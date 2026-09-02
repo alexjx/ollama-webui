@@ -1,0 +1,14 @@
+.agents/
+web/node_modules/
+web/dist/
+
+# Local design-QA iteration captures; final evidence is committed separately.
+docs/design/*-crop.png
+docs/design/implementation-desktop-v*.png
+docs/design/compare-desktop-v*.png
+docs/design/implementation-1440.png
+docs/design/implementation-mobile-sidebar.png
+docs/design/implementation-mobile-settings.png
+
+*.log
+.DS_Store
