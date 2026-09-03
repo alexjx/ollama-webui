@@ -73,8 +73,8 @@ func (shell *recordingShell) Run(_ context.Context, command string, _ time.Durat
 func TestRunnerExecutesToolAndContinuesUntilFinalAnswer(t *testing.T) {
 	call := ollama.ToolCall{ID: "call_123", Function: ollama.ToolCallFunction{Name: "shell", Arguments: json.RawMessage(`{"command":"pwd"}`)}}
 	chat := &scriptedChat{turns: [][]ollama.ChatChunk{
-		{{Message: ollama.Message{Thinking: "Need to inspect.", Content: "Checking.", ToolCalls: []ollama.ToolCall{call}}}, {Done: true, DoneReason: "stop"}},
-		{{Message: ollama.Message{Thinking: "The result is clear.", Content: "The workspace is ready."}}, {Done: true, DoneReason: "stop"}},
+		{{Message: ollama.Message{Thinking: "Need to inspect.", Content: "Checking.", ToolCalls: []ollama.ToolCall{call}}}, {Done: true, DoneReason: "stop", PromptEvalCount: 10, PromptEvalDuration: int64(time.Second), EvalCount: 5, EvalDuration: int64(500 * time.Millisecond), TotalDuration: int64(2 * time.Second), LoadDuration: int64(200 * time.Millisecond)}},
+		{{Message: ollama.Message{Thinking: "The result is clear.", Content: "The workspace is ready."}}, {Done: true, DoneReason: "stop", PromptEvalCount: 20, PromptEvalDuration: int64(2 * time.Second), EvalCount: 10, EvalDuration: int64(time.Second), TotalDuration: int64(4 * time.Second), LoadDuration: int64(100 * time.Millisecond)}},
 	}}
 	steps := &memorySteps{}
 	shell := &recordingShell{result: ShellResult{Output: "/workspace\n", ExitCode: 0}}
@@ -108,6 +108,12 @@ func TestRunnerExecutesToolAndContinuesUntilFinalAnswer(t *testing.T) {
 	if len(events) != 8 || events[0].Type != "turn.started" || events[1].Type != "thinking.delta" || events[3].Type != "tool.started" || events[4].Type != "tool.done" || events[5].Type != "turn.started" || events[6].Type != "thinking.delta" {
 		t.Fatalf("unexpected events: %#v", events)
 	}
+	if result.Metadata["prompt_eval_count"] != 20 || result.Metadata["eval_count"] != 10 {
+		t.Fatalf("final-turn context metrics changed: %#v", result.Metadata)
+	}
+	if result.Metadata["agent_prompt_eval_count"] != 30 || result.Metadata["agent_eval_count"] != 15 || result.Metadata["agent_total_duration"] != int64(6*time.Second) {
+		t.Fatalf("agent-run metrics were not aggregated: %#v", result.Metadata)
+	}
 }
 
 func TestRunnerAnswersDirectlyWithoutUsingShell(t *testing.T) {
@@ -121,6 +127,28 @@ func TestRunnerAnswersDirectlyWithoutUsingShell(t *testing.T) {
 	}
 	if len(shell.commands) != 0 || len(chat.requests) != 1 {
 		t.Fatalf("simple response unexpectedly used a tool: commands=%#v requests=%d", shell.commands, len(chat.requests))
+	}
+}
+
+func TestRunnerChatModeUsesOneTurnWithoutToolsOrStaging(t *testing.T) {
+	chat := &scriptedChat{turns: [][]ollama.ChatChunk{{
+		{Message: ollama.Message{Content: "plain chat"}},
+		{Done: true, EvalCount: 12, EvalDuration: int64(time.Second)},
+	}}}
+	result, err := (Runner{Chat: chat}).Run(context.Background(), RunInput{
+		Model: "chat", Mode: "chat", Messages: []ollama.Message{{Role: "user", Content: "hello"}},
+	}, func(Event) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Content != "plain chat" || len(chat.requests) != 1 || len(chat.requests[0].Tools) != 0 {
+		t.Fatalf("chat mode did not remain a single tool-free call: result=%#v requests=%#v", result, chat.requests)
+	}
+	if result.Metadata["run_mode"] != "chat" || result.Metadata["eval_count"] != 12 {
+		t.Fatalf("chat metadata was not preserved: %#v", result.Metadata)
+	}
+	if _, exists := result.Metadata["agent_eval_count"]; exists {
+		t.Fatalf("chat metadata was incorrectly marked as an agent aggregate: %#v", result.Metadata)
 	}
 }
 

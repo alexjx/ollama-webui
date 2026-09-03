@@ -15,6 +15,40 @@ import (
 	"ollama-webui/internal/store"
 )
 
+func TestCreateConversationPersistsAndValidatesMode(t *testing.T) {
+	database, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	api := New(database, nil, agent.Runner{}, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	request := httptest.NewRequest(http.MethodPost, "/api/conversations", strings.NewReader(`{"model":"plain","mode":"chat","thinking_mode":"medium"}`))
+	response := httptest.NewRecorder()
+	api.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("unexpected status %d: %s", response.Code, response.Body.String())
+	}
+	var conversation store.Conversation
+	if err := json.NewDecoder(response.Body).Decode(&conversation); err != nil || conversation.Mode != "chat" || conversation.ThinkingMode == nil || *conversation.ThinkingMode != "medium" {
+		t.Fatalf("chat mode was not returned: %#v, %v", conversation, err)
+	}
+
+	request = httptest.NewRequest(http.MethodPost, "/api/conversations", strings.NewReader(`{"model":"plain","mode":"automatic"}`))
+	response = httptest.NewRecorder()
+	api.ServeHTTP(response, request)
+	if response.Code != http.StatusUnprocessableEntity || !strings.Contains(response.Body.String(), "mode must be agent or chat") {
+		t.Fatalf("invalid mode returned %d: %s", response.Code, response.Body.String())
+	}
+
+	request = httptest.NewRequest(http.MethodPost, "/api/conversations", strings.NewReader(`{"model":"plain","mode":"chat","thinking_mode":"extreme"}`))
+	response = httptest.NewRecorder()
+	api.ServeHTTP(response, request)
+	if response.Code != http.StatusUnprocessableEntity || !strings.Contains(response.Body.String(), "thinking_mode must be") {
+		t.Fatalf("invalid thinking mode returned %d: %s", response.Code, response.Body.String())
+	}
+}
+
 func TestUpdateConversationTitleTrimsAndPersists(t *testing.T) {
 	database, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {

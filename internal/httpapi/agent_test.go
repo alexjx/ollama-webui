@@ -54,9 +54,9 @@ func TestGenerateRunsShellAgentAndPersistsTrace(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer database.Close()
-	thinkingEnabled := true
+	thinkingMode := "high"
 	conversation, err := database.CreateConversation(context.Background(), store.CreateConversationParams{
-		Title: "Agent", Model: "agent", ThinkingEnabled: &thinkingEnabled,
+		Title: "Agent", Model: "agent", ThinkingMode: &thinkingMode,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -110,7 +110,7 @@ func TestGenerateRunsShellAgentAndPersistsTrace(t *testing.T) {
 	if messages[0].Content != "  verify long input  " {
 		t.Fatalf("stored user input lost whitespace: %q", messages[0].Content)
 	}
-	if len(chatRequests) != 2 || chatRequests[0]["tools"] == nil || chatRequests[0]["think"] != true || chatRequests[0]["keep_alive"] != nil {
+	if len(chatRequests) != 2 || chatRequests[0]["tools"] == nil || chatRequests[0]["think"] != "high" || chatRequests[0]["keep_alive"] != nil {
 		t.Fatalf("agent request lost tools or added keep_alive: %#v", chatRequests)
 	}
 	firstMessages := chatRequests[0]["messages"].([]any)
@@ -133,7 +133,59 @@ func TestGenerateRunsShellAgentAndPersistsTrace(t *testing.T) {
 	}
 }
 
-func TestGenerateRejectsNonToolModelBeforePersistence(t *testing.T) {
+func TestGenerateChatModeSupportsNonToolModelWithoutAgentPrompt(t *testing.T) {
+	var captured map[string]any
+	ollamaServer := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api/tags":
+			_, _ = response.Write([]byte(`{"models":[{"name":"chat","modified_at":"2026-01-01T00:00:00Z","capabilities":["completion"]}]}`))
+		case "/api/chat":
+			if err := json.NewDecoder(request.Body).Decode(&captured); err != nil {
+				t.Fatal(err)
+			}
+			_, _ = response.Write([]byte("{\"message\":{\"role\":\"assistant\",\"content\":\"chat reply\"},\"done\":false}\n{\"done\":true,\"eval_count\":2,\"eval_duration\":1000000000}\n"))
+		default:
+			http.NotFound(response, request)
+		}
+	}))
+	defer ollamaServer.Close()
+	database, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	conversation, err := database.CreateConversation(context.Background(), store.CreateConversationParams{
+		Title: "Chat", Model: "chat", Mode: "chat", SystemPrompt: "Keep it concise.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := ollama.NewClient(ollamaServer.URL)
+	api := New(database, client, agent.Runner{Chat: client}, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	request := httptest.NewRequest(http.MethodPost, "/api/conversations/1/messages", strings.NewReader(`{"content":"hello"}`))
+	request.SetPathValue("id", "1")
+	response := httptest.NewRecorder()
+	api.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("unexpected response %d: %s", response.Code, response.Body.String())
+	}
+	if _, exists := captured["tools"]; exists {
+		t.Fatalf("chat request unexpectedly included tools: %#v", captured)
+	}
+	if _, exists := captured["keep_alive"]; exists {
+		t.Fatalf("chat request unexpectedly overrode model lifetime: %#v", captured)
+	}
+	messages := captured["messages"].([]any)
+	if len(messages) != 2 || messages[0].(map[string]any)["content"] != "Keep it concise." || strings.Contains(messages[0].(map[string]any)["content"].(string), "autonomous") {
+		t.Fatalf("chat request used the wrong system prompt: %#v", captured)
+	}
+	stored, err := database.Messages(context.Background(), conversation.ID)
+	if err != nil || len(stored) != 2 || stored[1].Content != "chat reply" || stored[1].Metadata["run_mode"] != "chat" {
+		t.Fatalf("chat result was not persisted: %#v, %v", stored, err)
+	}
+}
+
+func TestGenerateRejectsNonToolAgentModeBeforePersistence(t *testing.T) {
 	ollamaServer := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		_, _ = response.Write([]byte(`{"models":[{"name":"chat","modified_at":"2026-01-01T00:00:00Z","capabilities":["completion"]}]}`))
 	}))
@@ -143,7 +195,7 @@ func TestGenerateRejectsNonToolModelBeforePersistence(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer database.Close()
-	conversation, err := database.CreateConversation(context.Background(), store.CreateConversationParams{Title: "Chat", Model: "chat"})
+	conversation, err := database.CreateConversation(context.Background(), store.CreateConversationParams{Title: "Agent", Model: "chat", Mode: "agent"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,9 +263,9 @@ func TestGenerateRejectsUnsupportedThinkingOverrideBeforePersistence(t *testing.
 		t.Fatal(err)
 	}
 	defer database.Close()
-	enabled := true
+	thinkingMode := "on"
 	conversation, err := database.CreateConversation(context.Background(), store.CreateConversationParams{
-		Title: "No thinking", Model: "agent", ThinkingEnabled: &enabled,
+		Title: "No thinking", Model: "agent", ThinkingMode: &thinkingMode,
 	})
 	if err != nil {
 		t.Fatal(err)

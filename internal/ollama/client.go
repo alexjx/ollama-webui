@@ -106,12 +106,27 @@ type ChatOptions struct {
 	Temperature *float64 `json:"temperature,omitempty"`
 }
 
+type ThinkValue string
+
+func (value ThinkValue) MarshalJSON() ([]byte, error) {
+	switch value {
+	case "on":
+		return []byte("true"), nil
+	case "off":
+		return []byte("false"), nil
+	case "low", "medium", "high", "max":
+		return json.Marshal(string(value))
+	default:
+		return nil, fmt.Errorf("invalid thinking mode %q", value)
+	}
+}
+
 type ChatRequest struct {
 	Model    string       `json:"model"`
 	Messages []Message    `json:"messages"`
 	Tools    []Tool       `json:"tools,omitempty"`
 	Options  *ChatOptions `json:"options,omitempty"`
-	Think    *bool        `json:"think,omitempty"`
+	Think    *ThinkValue  `json:"think,omitempty"`
 	Stream   bool         `json:"stream"`
 }
 

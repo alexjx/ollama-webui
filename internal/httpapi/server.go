@@ -86,8 +86,10 @@ func (s *Server) listConversations(response http.ResponseWriter, request *http.R
 type conversationInput struct {
 	Title           string   `json:"title"`
 	Model           string   `json:"model"`
+	Mode            string   `json:"mode"`
 	SystemPrompt    string   `json:"system_prompt"`
 	ContextWindow   *int     `json:"context_window"`
+	ThinkingMode    *string  `json:"thinking_mode"`
 	ThinkingEnabled *bool    `json:"thinking_enabled"`
 	Temperature     *float64 `json:"temperature"`
 }
@@ -102,9 +104,10 @@ func (s *Server) createConversation(response http.ResponseWriter, request *http.
 		writeError(response, http.StatusUnprocessableEntity, "invalid_settings", err.Error())
 		return
 	}
+	thinkingMode := normalizedThinkingMode(input)
 	conversation, err := s.store.CreateConversation(request.Context(), store.CreateConversationParams{
-		Title: input.Title, Model: input.Model, SystemPrompt: input.SystemPrompt,
-		ContextWindow: input.ContextWindow, ThinkingEnabled: input.ThinkingEnabled, Temperature: input.Temperature,
+		Title: input.Title, Model: input.Model, Mode: input.Mode, SystemPrompt: input.SystemPrompt,
+		ContextWindow: input.ContextWindow, ThinkingMode: thinkingMode, Temperature: input.Temperature,
 	})
 	if err != nil {
 		s.internalError(response, err)
@@ -195,11 +198,16 @@ func (s *Server) generate(response http.ResponseWriter, request *http.Request) {
 		writeError(response, http.StatusBadGateway, "ollama_unavailable", err.Error())
 		return
 	}
-	if !containsCapability(modelInfo.Capabilities, "completion") || !containsCapability(modelInfo.Capabilities, "tools") {
-		writeError(response, http.StatusUnprocessableEntity, "tools_unsupported", "the selected model does not support agent tools")
+	if len(modelInfo.Capabilities) > 0 && !containsCapability(modelInfo.Capabilities, "completion") {
+		writeError(response, http.StatusUnprocessableEntity, "completion_unsupported", "the selected model does not support chat completion")
 		return
 	}
-	if conversation.ThinkingEnabled != nil && !containsCapability(modelInfo.Capabilities, "thinking") {
+	agentMode := conversation.Mode != "chat"
+	if agentMode && !containsCapability(modelInfo.Capabilities, "tools") {
+		writeError(response, http.StatusUnprocessableEntity, "tools_unsupported", "choose Chat mode because the selected model does not support tools")
+		return
+	}
+	if conversation.ThinkingMode != nil && !containsCapability(modelInfo.Capabilities, "thinking") {
 		writeError(response, http.StatusUnprocessableEntity, "thinking_unsupported", "the selected model does not support thinking overrides")
 		return
 	}
@@ -243,11 +251,16 @@ func (s *Server) generate(response http.ResponseWriter, request *http.Request) {
 	writeEvent(response, flusher, map[string]any{"type": "started", "user_message": userMessage, "assistant_message": assistantMessage})
 
 	upstreamMessages := make([]ollama.Message, 0, len(history)+1)
-	systemPrompt := agent.SystemPrompt
-	if conversation.SystemPrompt != "" {
-		systemPrompt += "\n\nAdditional instructions from the user:\n" + conversation.SystemPrompt
+	systemPrompt := conversation.SystemPrompt
+	if agentMode {
+		systemPrompt = agent.SystemPrompt
+		if conversation.SystemPrompt != "" {
+			systemPrompt += "\n\nAdditional instructions from the user:\n" + conversation.SystemPrompt
+		}
 	}
-	upstreamMessages = append(upstreamMessages, ollama.Message{Role: "system", Content: systemPrompt})
+	if systemPrompt != "" {
+		upstreamMessages = append(upstreamMessages, ollama.Message{Role: "system", Content: systemPrompt})
+	}
 	for _, message := range history {
 		if message.ID == assistantMessage.ID || message.Status == "error" || message.Status == "cancelled" {
 			continue
@@ -262,9 +275,14 @@ func (s *Server) generate(response http.ResponseWriter, request *http.Request) {
 	if conversation.ContextWindow != nil || conversation.Temperature != nil {
 		options = &ollama.ChatOptions{NumCtx: conversation.ContextWindow, Temperature: conversation.Temperature}
 	}
+	var think *ollama.ThinkValue
+	if conversation.ThinkingMode != nil {
+		value := ollama.ThinkValue(*conversation.ThinkingMode)
+		think = &value
+	}
 	result, err := s.agent.Run(request.Context(), agent.RunInput{
-		Model: conversation.Model, Messages: upstreamMessages, Options: options,
-		Think:              conversation.ThinkingEnabled,
+		Model: conversation.Model, Mode: conversation.Mode, Messages: upstreamMessages, Options: options,
+		Think:              think,
 		AssistantMessageID: assistantMessage.ID,
 	}, func(event agent.Event) error {
 		return writeEvent(response, flusher, event)
@@ -450,6 +468,15 @@ func validateConversation(input conversationInput) error {
 	if strings.TrimSpace(input.Model) == "" {
 		return errors.New("model is required")
 	}
+	if input.Mode != "" && input.Mode != "agent" && input.Mode != "chat" {
+		return errors.New("mode must be agent or chat")
+	}
+	if input.ThinkingMode != nil && input.ThinkingEnabled != nil {
+		return errors.New("send thinking_mode or thinking_enabled, not both")
+	}
+	if input.ThinkingMode != nil && !validThinkingMode(*input.ThinkingMode) {
+		return errors.New("thinking_mode must be off, on, low, medium, high, or max")
+	}
 	if input.ContextWindow != nil && *input.ContextWindow <= 0 {
 		return errors.New("context_window must be positive")
 	}
@@ -457,6 +484,29 @@ func validateConversation(input conversationInput) error {
 		return errors.New("temperature must be between 0 and 2")
 	}
 	return nil
+}
+
+func normalizedThinkingMode(input conversationInput) *string {
+	if input.ThinkingMode != nil {
+		return input.ThinkingMode
+	}
+	if input.ThinkingEnabled == nil {
+		return nil
+	}
+	mode := "off"
+	if *input.ThinkingEnabled {
+		mode = "on"
+	}
+	return &mode
+}
+
+func validThinkingMode(mode string) bool {
+	switch mode {
+	case "off", "on", "low", "medium", "high", "max":
+		return true
+	default:
+		return false
+	}
 }
 
 func pathID(response http.ResponseWriter, request *http.Request) (int64, bool) {

@@ -1,10 +1,11 @@
 # Ollama WebUI
 
-A lightweight general-purpose agent interface for Ollama. It answers directly
-when tools are unnecessary and can use a shell for calculation, search,
-inspection, execution, or verification when useful. The Go service continues
-until the task is complete, streams activity to a responsive React interface,
-and stores chats, model thinking, image attachments, and tool traces in SQLite.
+A lightweight Chat and Agent interface for Ollama. Chat mode works with any
+completion-capable model and never sends tools. Agent mode can use a shell for
+calculation, search, inspection, execution, or verification when useful and
+continues until the task is complete. The Go service streams both modes to a
+responsive React interface and stores chats, model thinking, image attachments,
+and tool traces in SQLite.
 
 To protect short local-model context windows, user messages above 16 KiB are
 temporarily staged as private files in the mounted workspace. Ollama receives a
@@ -14,11 +15,14 @@ unchanged in SQLite, staged files are removed when the run ends, prior thinking
 is not sent back to the model, and shell feedback sent to later turns is capped
 separately from the fuller activity log.
 
-New-chat setup offers **Ollama default**, **On**, and **Off** for models that
-advertise Ollama's `thinking` capability. Ollama default omits the `think` field;
-On and Off send an explicit override. The choice is stored with the conversation,
-and live reasoning appears in an expandable panel separate from the final answer.
-Models without the capability show Thinking as unsupported.
+New-chat setup offers **Ollama default**, **Off**, **On**, and the native
+**Low**, **Medium**, **High**, and **Max** effort levels for models that advertise
+Ollama's `thinking` capability. Ollama default omits the `think` field; On and Off
+send booleans, while effort levels pass through as strings. The choice is stored
+with the conversation, and live reasoning appears in an expandable panel separate
+from the final answer. Ollama does not publish each model's exact supported effort
+levels, so unsupported combinations may still be rejected by the model. Models
+without the broad capability show Thinking as unsupported.
 
 ## Optional shell access: safety boundary
 
@@ -49,7 +53,8 @@ docker compose up --build
 
 Open <http://localhost:8080>. Ollama models are stored in the `ollama-data`
 volume, chats in `webui-data`, and the host `./workspace` directory is mounted at
-`/workspace`. Pull a model that advertises Ollama's `tools` capability, for example:
+`/workspace`. Agent mode requires a model that advertises Ollama's `tools`
+capability, for example:
 
 ```sh
 docker compose exec ollama ollama pull qwen3:8b
@@ -59,7 +64,8 @@ The WebUI never sends `keep_alive` unless a future explicit override is added,
 so Ollama remains responsible for model lifetime. Choosing **Ollama default** for
 the context window similarly omits `num_ctx`; an explicit context selection is
 saved with the conversation and sent on every turn. The Thinking setting follows
-the same inherited-default behavior and is also fixed once a chat starts.
+the same inherited-default behavior and is also fixed once a chat starts. Explicit
+effort levels are model-dependent; **Ollama default** is the safest portable choice.
 
 ## Local development
 
@@ -91,16 +97,19 @@ Configuration is provided with environment variables:
 Compose also accepts `AGENT_WORKSPACE_PATH` to select the host directory mounted
 at `/workspace`. The agent has no overall task timeout; it continues until the
 model returns a final response, you press Stop, or the emergency turn ceiling is
-reached. A model without the `tools` capability remains selectable for inspecting
-old chats, but cannot start a new agent task.
+reached. Models without the `tools` capability automatically use Chat mode and
+remain fully usable for ordinary conversations. Tool-capable models can use
+either Chat or Agent mode; the choice is fixed after the conversation starts.
 
 ## Current scope
 
-The daily-use core now supports model discovery, general agent tasks with optional shell use, new
+The daily-use core now supports model discovery, ordinary Chat and general Agent
+tasks with optional shell use, new
 conversations, context and temperature overrides before first load, streamed
 responses with Stop, durable history and shell traces, title/message search, and
 persisted image input for vision-capable models. Images may be pasted, dropped,
 or selected; JPEG, PNG, and WebP are accepted with limits of four images, 10 MiB
-each, and 20 MiB total per message.
+each, and 20 MiB total per message. Completed responses include expandable token,
+timing, and generation-rate details.
 Conversation rename and deletion are available from each row in the history list.
 Markdown rendering, import/export, and advanced generation parameters remain planned.

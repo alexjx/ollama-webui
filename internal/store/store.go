@@ -20,8 +20,10 @@ type Conversation struct {
 	ID              int64      `json:"id"`
 	Title           string     `json:"title"`
 	Model           string     `json:"model"`
+	Mode            string     `json:"mode"`
 	SystemPrompt    string     `json:"system_prompt"`
 	ContextWindow   *int       `json:"context_window"`
+	ThinkingMode    *string    `json:"thinking_mode"`
 	ThinkingEnabled *bool      `json:"thinking_enabled"`
 	Temperature     *float64   `json:"temperature"`
 	CreatedAt       time.Time  `json:"created_at"`
@@ -108,9 +110,11 @@ CREATE TABLE IF NOT EXISTS conversations (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   title TEXT NOT NULL DEFAULT 'New chat',
   model TEXT NOT NULL,
+  mode TEXT NOT NULL DEFAULT 'agent' CHECK (mode IN ('agent', 'chat')),
   system_prompt TEXT NOT NULL DEFAULT '',
   context_window INTEGER CHECK (context_window > 0),
   thinking_enabled INTEGER CHECK (thinking_enabled IN (0, 1)),
+  thinking_mode TEXT CHECK (thinking_mode IN ('off', 'on', 'low', 'medium', 'high', 'max')),
   temperature REAL CHECK (temperature >= 0 AND temperature <= 2),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -160,6 +164,17 @@ CREATE INDEX IF NOT EXISTS agent_steps_message_idx ON agent_steps(message_id, id
 	if err := s.ensureColumn(ctx, "conversations", "thinking_enabled", "INTEGER CHECK (thinking_enabled IN (0, 1))"); err != nil {
 		return err
 	}
+	if err := s.ensureColumn(ctx, "conversations", "thinking_mode", "TEXT CHECK (thinking_mode IN ('off', 'on', 'low', 'medium', 'high', 'max'))"); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE conversations
+SET thinking_mode = CASE WHEN thinking_enabled = 1 THEN 'on' ELSE 'off' END
+WHERE thinking_mode IS NULL AND thinking_enabled IS NOT NULL`); err != nil {
+		return fmt.Errorf("migrate conversation thinking modes: %w", err)
+	}
+	if err := s.ensureColumn(ctx, "conversations", "mode", "TEXT NOT NULL DEFAULT 'agent' CHECK (mode IN ('agent', 'chat'))"); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -196,8 +211,10 @@ func (s *Store) ensureColumn(ctx context.Context, table, column, definition stri
 type CreateConversationParams struct {
 	Title           string
 	Model           string
+	Mode            string
 	SystemPrompt    string
 	ContextWindow   *int
+	ThinkingMode    *string
 	ThinkingEnabled *bool
 	Temperature     *float64
 }
@@ -206,11 +223,26 @@ func (s *Store) CreateConversation(ctx context.Context, params CreateConversatio
 	if strings.TrimSpace(params.Title) == "" {
 		params.Title = "New chat"
 	}
+	if params.Mode == "" {
+		params.Mode = "agent"
+	}
+	if params.ThinkingMode == nil && params.ThinkingEnabled != nil {
+		mode := "off"
+		if *params.ThinkingEnabled {
+			mode = "on"
+		}
+		params.ThinkingMode = &mode
+	}
+	var legacyThinkingEnabled *bool
+	if params.ThinkingMode != nil && (*params.ThinkingMode == "on" || *params.ThinkingMode == "off") {
+		enabled := *params.ThinkingMode == "on"
+		legacyThinkingEnabled = &enabled
+	}
 	now := time.Now().UTC()
 	result, err := s.db.ExecContext(ctx, `
-INSERT INTO conversations (title, model, system_prompt, context_window, thinking_enabled, temperature, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, params.Title, params.Model, params.SystemPrompt,
-		params.ContextWindow, params.ThinkingEnabled, params.Temperature, formatTime(now), formatTime(now))
+INSERT INTO conversations (title, model, mode, system_prompt, context_window, thinking_enabled, thinking_mode, temperature, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, params.Title, params.Model, params.Mode, params.SystemPrompt,
+		params.ContextWindow, legacyThinkingEnabled, params.ThinkingMode, params.Temperature, formatTime(now), formatTime(now))
 	if err != nil {
 		return Conversation{}, fmt.Errorf("create conversation: %w", err)
 	}
@@ -223,7 +255,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, params.Title, params.Model, params.SystemPromp
 
 func (s *Store) GetConversation(ctx context.Context, id int64) (Conversation, error) {
 	row := s.db.QueryRowContext(ctx, `
-SELECT c.id, c.title, c.model, c.system_prompt, c.context_window, c.thinking_enabled, c.temperature,
+SELECT c.id, c.title, c.model, c.mode, c.system_prompt, c.context_window, c.thinking_enabled, c.thinking_mode, c.temperature,
        c.created_at, c.updated_at, MAX(m.created_at), COUNT(m.id)
 FROM conversations c
 LEFT JOIN messages m ON m.conversation_id = c.id
@@ -239,7 +271,7 @@ GROUP BY c.id`, id)
 func (s *Store) ListConversations(ctx context.Context, query string) ([]Conversation, error) {
 	pattern := "%" + escapeLike(strings.TrimSpace(query)) + "%"
 	rows, err := s.db.QueryContext(ctx, `
-SELECT c.id, c.title, c.model, c.system_prompt, c.context_window, c.thinking_enabled, c.temperature,
+SELECT c.id, c.title, c.model, c.mode, c.system_prompt, c.context_window, c.thinking_enabled, c.thinking_mode, c.temperature,
        c.created_at, c.updated_at, MAX(m.created_at), COUNT(m.id)
 FROM conversations c
 LEFT JOIN messages m ON m.conversation_id = c.id
@@ -496,11 +528,12 @@ func scanConversation(row rowScanner) (Conversation, error) {
 	var conversation Conversation
 	var contextWindow sql.NullInt64
 	var thinkingEnabled sql.NullBool
+	var thinkingMode sql.NullString
 	var temperature sql.NullFloat64
 	var createdAt, updatedAt string
 	var lastMessageAt sql.NullString
-	if err := row.Scan(&conversation.ID, &conversation.Title, &conversation.Model, &conversation.SystemPrompt,
-		&contextWindow, &thinkingEnabled, &temperature, &createdAt, &updatedAt, &lastMessageAt, &conversation.MessageCount); err != nil {
+	if err := row.Scan(&conversation.ID, &conversation.Title, &conversation.Model, &conversation.Mode, &conversation.SystemPrompt,
+		&contextWindow, &thinkingEnabled, &thinkingMode, &temperature, &createdAt, &updatedAt, &lastMessageAt, &conversation.MessageCount); err != nil {
 		return Conversation{}, err
 	}
 	var err error
@@ -517,6 +550,10 @@ func scanConversation(row rowScanner) (Conversation, error) {
 	if thinkingEnabled.Valid {
 		value := thinkingEnabled.Bool
 		conversation.ThinkingEnabled = &value
+	}
+	if thinkingMode.Valid {
+		value := thinkingMode.String
+		conversation.ThinkingMode = &value
 	}
 	if temperature.Valid {
 		value := temperature.Float64

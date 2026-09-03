@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 )
@@ -17,7 +18,7 @@ func TestConversationPersistenceAndSearch(t *testing.T) {
 	contextWindow := 16384
 	thinkingEnabled := false
 	conversation, err := database.CreateConversation(ctx, CreateConversationParams{
-		Title: "SQLite persistence", Model: "qwen3:8b", ContextWindow: &contextWindow, ThinkingEnabled: &thinkingEnabled,
+		Title: "SQLite persistence", Model: "qwen3:8b", Mode: "chat", ContextWindow: &contextWindow, ThinkingEnabled: &thinkingEnabled,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -28,12 +29,29 @@ func TestConversationPersistenceAndSearch(t *testing.T) {
 	if conversation.ThinkingEnabled == nil || *conversation.ThinkingEnabled {
 		t.Fatalf("explicit thinking off was not persisted: %#v", conversation.ThinkingEnabled)
 	}
+	if conversation.ThinkingMode == nil || *conversation.ThinkingMode != "off" {
+		t.Fatalf("legacy thinking off was not normalized: %#v", conversation.ThinkingMode)
+	}
+	if conversation.Mode != "chat" {
+		t.Fatalf("conversation mode was not persisted: %q", conversation.Mode)
+	}
 	inherited, err := database.CreateConversation(ctx, CreateConversationParams{Title: "Inherited thinking", Model: "qwen3:8b"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if inherited.ThinkingEnabled != nil {
 		t.Fatalf("inherited thinking should remain null: %#v", inherited.ThinkingEnabled)
+	}
+	if inherited.ThinkingMode != nil {
+		t.Fatalf("inherited thinking mode should remain null: %#v", inherited.ThinkingMode)
+	}
+	high := "high"
+	leveled, err := database.CreateConversation(ctx, CreateConversationParams{Title: "High effort", Model: "qwen3:8b", ThinkingMode: &high})
+	if err != nil || leveled.ThinkingMode == nil || *leveled.ThinkingMode != "high" || leveled.ThinkingEnabled != nil {
+		t.Fatalf("reasoning level did not persist independently: %#v, %v", leveled, err)
+	}
+	if inherited.Mode != "agent" {
+		t.Fatalf("the backward-compatible mode default changed: %q", inherited.Mode)
 	}
 	if _, err := database.AddMessage(ctx, conversation.ID, "user", "searchable needle", "complete"); err != nil {
 		t.Fatal(err)
@@ -48,6 +66,39 @@ func TestConversationPersistenceAndSearch(t *testing.T) {
 	messages, err := database.MessagesWithAttachmentData(ctx, conversation.ID)
 	if err != nil || len(messages) != 1 || messages[0].Content != "searchable needle" {
 		t.Fatalf("messages were not persisted: %#v, %v", messages, err)
+	}
+}
+
+func TestMigrationDefaultsExistingConversationsToAgentMode(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	legacy, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = legacy.ExecContext(ctx, `CREATE TABLE conversations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  title TEXT NOT NULL DEFAULT 'New chat', model TEXT NOT NULL,
+  system_prompt TEXT NOT NULL DEFAULT '', context_window INTEGER,
+  thinking_enabled INTEGER, temperature REAL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+INSERT INTO conversations (title, model, thinking_enabled, created_at, updated_at)
+VALUES ('Existing agent', 'tools', 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	database, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	conversation, err := database.GetConversation(ctx, 1)
+	if err != nil || conversation.Mode != "agent" || conversation.ThinkingMode == nil || *conversation.ThinkingMode != "on" {
+		t.Fatalf("legacy conversation did not migrate to agent mode: %#v, %v", conversation, err)
 	}
 }
 

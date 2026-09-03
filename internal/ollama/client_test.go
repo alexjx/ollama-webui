@@ -34,19 +34,22 @@ func TestChatOmitsInheritedOptionsAndKeepAlive(t *testing.T) {
 	}
 }
 
-func TestChatIncludesExplicitThinkingWithoutKeepAlive(t *testing.T) {
-	for _, enabled := range []bool{true, false} {
-		t.Run(fmt.Sprintf("enabled=%t", enabled), func(t *testing.T) {
+func TestChatIncludesExplicitThinkingModesWithoutKeepAlive(t *testing.T) {
+	for _, test := range []struct {
+		mode     ThinkValue
+		expected any
+	}{{"on", true}, {"off", false}, {"low", "low"}, {"medium", "medium"}, {"high", "high"}, {"max", "max"}} {
+		t.Run(fmt.Sprintf("mode=%s", test.mode), func(t *testing.T) {
 			var captured map[string]any
 			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 				_ = json.NewDecoder(request.Body).Decode(&captured)
 				_, _ = response.Write([]byte("{\"done\":true}\n"))
 			}))
 			defer server.Close()
-			if err := NewClient(server.URL).Chat(context.Background(), ChatRequest{Model: "thinking", Think: &enabled}, func(ChatChunk) error { return nil }); err != nil {
+			if err := NewClient(server.URL).Chat(context.Background(), ChatRequest{Model: "thinking", Think: &test.mode}, func(ChatChunk) error { return nil }); err != nil {
 				t.Fatal(err)
 			}
-			if captured["think"] != enabled {
+			if captured["think"] != test.expected {
 				t.Fatalf("explicit thinking value was not sent: %#v", captured)
 			}
 			if _, exists := captured["keep_alive"]; exists {

@@ -54,9 +54,10 @@ type Runner struct {
 
 type RunInput struct {
 	Model              string
+	Mode               string
 	Messages           []ollama.Message
 	Options            *ollama.ChatOptions
-	Think              *bool
+	Think              *ollama.ThinkValue
 	AssistantMessageID int64
 }
 
@@ -73,20 +74,51 @@ type RunResult struct {
 	Metadata map[string]any
 }
 
+type runMetrics struct {
+	promptEvalCount    int
+	promptEvalDuration int64
+	evalCount          int
+	evalDuration       int64
+	totalDuration      int64
+	loadDuration       int64
+}
+
+func (metrics *runMetrics) add(chunk ollama.ChatChunk) {
+	metrics.promptEvalCount += chunk.PromptEvalCount
+	metrics.promptEvalDuration += chunk.PromptEvalDuration
+	metrics.evalCount += chunk.EvalCount
+	metrics.evalDuration += chunk.EvalDuration
+	metrics.totalDuration += chunk.TotalDuration
+	metrics.loadDuration += chunk.LoadDuration
+}
+
 func (runner Runner) Run(ctx context.Context, input RunInput, emit func(Event) error) (RunResult, error) {
-	if runner.MaxTurns <= 0 {
+	agentMode := input.Mode != "chat"
+	if agentMode && runner.MaxTurns <= 0 {
 		return RunResult{}, errors.New("agent max turns must be positive")
 	}
-	messages, cleanup, err := runner.Stager.Stage(input.Messages, input.OptionsNumCtx())
-	if err != nil {
-		return RunResult{}, err
+	var err error
+	messages := input.Messages
+	cleanup := func() {}
+	if agentMode {
+		messages, cleanup, err = runner.Stager.Stage(input.Messages, input.OptionsNumCtx())
+		if err != nil {
+			return RunResult{}, err
+		}
 	}
 	defer cleanup()
 	var visible strings.Builder
 	var thinking strings.Builder
 	var metadata map[string]any
+	var metrics runMetrics
 
-	for turn := 1; turn <= runner.MaxTurns; turn++ {
+	maxTurns := 1
+	tools := []ollama.Tool(nil)
+	if agentMode {
+		maxTurns = runner.MaxTurns
+		tools = []ollama.Tool{shellTool}
+	}
+	for turn := 1; turn <= maxTurns; turn++ {
 		if err := emit(Event{Type: "turn.started", Turn: turn}); err != nil {
 			return RunResult{Content: visible.String(), Thinking: thinking.String(), Metadata: metadata}, err
 		}
@@ -95,7 +127,7 @@ func (runner Runner) Run(ctx context.Context, input RunInput, emit func(Event) e
 		turnStartedContent := false
 		turnStartedThinking := false
 		err = runner.Chat.Chat(ctx, ollama.ChatRequest{
-			Model: input.Model, Messages: messages, Tools: []ollama.Tool{shellTool}, Options: input.Options, Think: input.Think,
+			Model: input.Model, Messages: messages, Tools: tools, Options: input.Options, Think: input.Think,
 		}, func(chunk ollama.ChatChunk) error {
 			if chunk.Message.Thinking != "" {
 				assistant.Thinking += chunk.Message.Thinking
@@ -135,8 +167,9 @@ func (runner Runner) Run(ctx context.Context, input RunInput, emit func(Event) e
 		assistant.Role = "assistant"
 		assistant.Thinking = ""
 		messages = append(messages, assistant)
-		metadata = chunkMetadata(final, turn)
-		if len(assistant.ToolCalls) == 0 {
+		metrics.add(final)
+		metadata = chunkMetadata(final, turn, metrics, input.Mode)
+		if !agentMode || len(assistant.ToolCalls) == 0 {
 			return RunResult{Content: visible.String(), Thinking: thinking.String(), Metadata: metadata}, nil
 		}
 
@@ -267,11 +300,23 @@ func (runner Runner) completeStep(step store.AgentStep, result ShellResult, stat
 	return runner.Steps.CompleteAgentStep(ctx, step.ID, result.Output, result.ExitCode, status)
 }
 
-func chunkMetadata(chunk ollama.ChatChunk, turn int) map[string]any {
-	return map[string]any{
+func chunkMetadata(chunk ollama.ChatChunk, turn int, metrics runMetrics, mode string) map[string]any {
+	if mode == "" {
+		mode = "agent"
+	}
+	metadata := map[string]any{
 		"agent_turns": turn, "done_reason": chunk.DoneReason, "total_duration": chunk.TotalDuration,
 		"load_duration": chunk.LoadDuration, "prompt_eval_count": chunk.PromptEvalCount,
 		"prompt_eval_duration": chunk.PromptEvalDuration, "eval_count": chunk.EvalCount,
-		"eval_duration": chunk.EvalDuration,
+		"eval_duration": chunk.EvalDuration, "run_mode": mode,
 	}
+	if mode == "agent" {
+		metadata["agent_prompt_eval_count"] = metrics.promptEvalCount
+		metadata["agent_prompt_eval_duration"] = metrics.promptEvalDuration
+		metadata["agent_eval_count"] = metrics.evalCount
+		metadata["agent_eval_duration"] = metrics.evalDuration
+		metadata["agent_total_duration"] = metrics.totalDuration
+		metadata["agent_load_duration"] = metrics.loadDuration
+	}
+	return metadata
 }

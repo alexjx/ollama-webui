@@ -1,4 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { contextUsage } from "./context-usage";
+import { formatDuration, formatRate, responseMetrics } from "./response-metrics";
+import { thinkingModeForRequest, thinkingModeFromConversation } from "./thinking-mode";
 import {
   createConversation,
   deleteConversation,
@@ -43,8 +46,17 @@ const contextWindows = [
 
 const thinkingModes = [
   { value: "default", label: "Ollama default" },
-  { value: "enabled", label: "On" },
-  { value: "disabled", label: "Off" },
+  { value: "off", label: "Off" },
+  { value: "on", label: "On — default effort" },
+  { value: "low", label: "Low effort" },
+  { value: "medium", label: "Medium effort" },
+  { value: "high", label: "High effort" },
+  { value: "max", label: "Maximum effort" },
+];
+
+const conversationModes = [
+  { value: "agent", label: "Agent" },
+  { value: "chat", label: "Chat" },
 ];
 
 function IconButton({ label, children, className = "", ...props }) {
@@ -76,7 +88,7 @@ function groupConversations(items) {
   return [...groups].map(([label, groupedItems]) => ({ label, items: groupedItems }));
 }
 
-function ConversationSidebar({ activeId, conversations, query, streaming, onQuery, onSelect, onNew, onRename, onDelete, onClose }) {
+function ConversationSidebar({ activeId, conversations, query, streaming, onQuery, onSelect, onNew, onRename, onDelete, onSettings, onClose }) {
   const filteredGroups = useMemo(() => groupConversations(conversations), [conversations]);
   const [openActionsId, setOpenActionsId] = useState(null);
 
@@ -180,7 +192,7 @@ function ConversationSidebar({ activeId, conversations, query, streaming, onQuer
       </nav>
 
       <div className="sidebar-footer">
-        <button><Gear size={23} />Settings</button>
+        <button onClick={onSettings}><Gear size={23} />Settings</button>
         <button><Info size={23} />About</button>
       </div>
     </aside>
@@ -191,6 +203,9 @@ function ModelSettings({
   models,
   model,
   setModel,
+  conversationMode,
+  setConversationMode,
+  supportsTools,
   onClose,
   systemPrompt,
   setSystemPrompt,
@@ -207,6 +222,7 @@ function ModelSettings({
 }) {
   function resetDefaults() {
     setSystemPrompt("");
+    if (!modelLoaded) setConversationMode(supportsTools ? "agent" : "chat");
     if (!modelLoaded) setContextWindow("default");
     if (!modelLoaded) setThinkingMode("default");
     setTemperatureOverride(false);
@@ -232,6 +248,30 @@ function ModelSettings({
             <CaretDown size={18} aria-hidden="true" />
           </div>
           <p>Select the model to use for this conversation.</p>
+        </section>
+
+        <section className="settings-section mode-section">
+          <label htmlFor="conversation-mode">Mode</label>
+          <div className="select-wrap wide">
+            <select
+              id="conversation-mode"
+              value={conversationMode}
+              disabled={modelLoaded}
+              onChange={(event) => setConversationMode(event.target.value)}
+            >
+              {conversationModes.map((item) => (
+                <option key={item.value} value={item.value} disabled={item.value === "agent" && !supportsTools}>{item.label}</option>
+              ))}
+            </select>
+            <CaretDown size={18} aria-hidden="true" />
+          </div>
+          {modelLoaded ? (
+            <p className="locked-setting"><span className="lock-dot" />Mode is fixed for this conversation.</p>
+          ) : supportsTools ? (
+            <p>Agent can use the shell; Chat talks to the model without tools.</p>
+          ) : (
+            <p>This model uses Chat because it does not advertise tool support.</p>
+          )}
         </section>
 
         <section className="settings-section context-section">
@@ -276,7 +316,7 @@ function ModelSettings({
           ) : modelLoaded ? (
             <p className="locked-setting"><span className="lock-dot" />Model loaded. Start a new chat to choose a different thinking mode.</p>
           ) : (
-            <p>Ollama default sends no thinking override. On and Off explicitly control model reasoning.</p>
+            <p>Default sends no override. Effort levels are passed through exactly and remain model-dependent.</p>
           )}
         </section>
 
@@ -329,7 +369,7 @@ function ModelSettings({
   );
 }
 
-function AgentActivity({ message }) {
+function AgentActivity({ message, mode }) {
   const thinkingRef = useRef(null);
   const steps = message.agent_steps || [];
   const hasActivity = message.status === "streaming" || Boolean(message.thinking) || steps.length > 0;
@@ -345,7 +385,7 @@ function AgentActivity({ message }) {
     error: "Failed",
   };
   const phase = message.agent_phase || (message.status === "complete" ? "finished" : message.status === "cancelled" ? "stopped" : message.status === "error" ? "error" : "thinking");
-  const turn = message.agent_turn || message.metadata?.agent_turns;
+  const turn = mode === "agent" ? message.agent_turn || message.metadata?.agent_turns : null;
   const active = message.status === "streaming";
 
   useEffect(() => {
@@ -357,7 +397,7 @@ function AgentActivity({ message }) {
   if (!hasActivity) return null;
 
   return (
-    <section className={`agent-activity ${phase}`} aria-label="Agent activity">
+    <section className={`agent-activity ${phase}`} aria-label={mode === "agent" ? "Agent activity" : "Response activity"}>
       <div className="agent-progress" role="status" aria-live="polite">
         <span className="agent-progress-icon" aria-hidden="true">
           {active ? <CircleNotch size={17} /> : phase === "finished" ? <CheckCircle size={17} /> : <Stop size={15} weight="fill" />}
@@ -401,68 +441,58 @@ function AgentActivity({ message }) {
   );
 }
 
+function ResponseMetrics({ message }) {
+  if (message.status !== "complete") return null;
+  const metrics = responseMetrics(message.metadata);
+  if (!metrics) return null;
+  const generationRate = formatRate(metrics.generationRate);
+  const modelTime = formatDuration(metrics.totalSeconds);
+  const summary = [
+    generationRate,
+    metrics.outputTokens != null ? `${metrics.outputTokens.toLocaleString()} output tokens` : null,
+    modelTime ? `${modelTime} model time` : null,
+  ].filter(Boolean);
+  const details = [
+    ["Generation", generationRate],
+    ["Output", metrics.outputTokens != null ? `${metrics.outputTokens.toLocaleString()} tokens` : null],
+    ["Processed input", metrics.inputTokens != null ? `${metrics.inputTokens.toLocaleString()} tokens` : null],
+    ["Prompt processing", formatRate(metrics.promptRate)],
+    ["Model time", modelTime],
+    ["Model load", formatDuration(metrics.loadSeconds)],
+    ["Model turns", metrics.turns ? metrics.turns.toLocaleString() : null],
+  ].filter(([, value]) => value);
+  if (summary.length === 0) return null;
+
+  return (
+    <details className="response-metrics">
+      <summary aria-label={`Response performance: ${summary.join(", ")}`}>
+        <Info size={15} aria-hidden="true" />
+        {summary.map((item, index) => <span className={index === 0 ? "primary" : ""} key={item}>{item}</span>)}
+      </summary>
+      <dl>
+        {details.map(([label, value]) => (
+          <div key={label}><dt>{label}</dt><dd>{value}</dd></div>
+        ))}
+      </dl>
+      <p>{metrics.mode === "chat" ? "Single Chat model call." : metrics.aggregate ? "Across the complete agent run." : "Final model call; older conversation metadata."}</p>
+    </details>
+  );
+}
+
 function ChatTranscript({
   empty,
-  streaming,
   messages,
-  model,
-  models,
-  setModel,
-  contextWindow,
-  setContextWindow,
-  thinkingMode,
-  setThinkingMode,
-  supportsThinking,
+  conversationMode,
   error,
 }) {
   if (empty) {
     return (
       <div className="empty-chat">
-        <div className="empty-icon"><ChatCircle size={30} /></div>
-        <h1>Start a local conversation</h1>
-        <p>Choose how the model should load, then send your first message.</p>
-        <div className="preload-setup" aria-label="New chat model setup">
-          <div className="preload-status"><span />Model not loaded</div>
-          <div className="preload-fields">
-            <label className="setup-field">
-              <span>Model</span>
-              <div className="select-wrap wide">
-                <select value={model} onChange={(event) => setModel(event.target.value)}>
-                  {models.length ? models.map((item) => <option key={item}>{item}</option>) : <option value="">No local models found</option>}
-                </select>
-                <CaretDown size={18} aria-hidden="true" />
-              </div>
-            </label>
-            <label className="setup-field">
-              <span>Context window</span>
-              <div className="select-wrap wide">
-                <select value={contextWindow} onChange={(event) => setContextWindow(event.target.value)}>
-                  {contextWindows.map((item) => (
-                    <option key={item.value} value={item.value}>{item.label}</option>
-                  ))}
-                </select>
-                <CaretDown size={18} aria-hidden="true" />
-              </div>
-            </label>
-            <label className="setup-field">
-              <span>Thinking</span>
-              <div className="select-wrap wide">
-                <select
-                  value={thinkingMode}
-                  disabled={!supportsThinking}
-                  onChange={(event) => setThinkingMode(event.target.value)}
-                >
-                  {supportsThinking
-                    ? thinkingModes.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)
-                    : <option value="default">Not supported</option>}
-                </select>
-                <CaretDown size={18} aria-hidden="true" />
-              </div>
-            </label>
-          </div>
-          <p className="preload-help">Context and thinking are fixed when the first message loads the model. Ollama default sends no override.</p>
+        <div className="empty-icon"><ChatCircle size={38} /></div>
+        <h1>New conversation</h1>
+        <p>Chat privately with your local models.<br />Your data stays on this machine.</p>
+        {error && <div className="chat-error" role="alert">{error}</div>}
         </div>
-      </div>
     );
   }
 
@@ -484,7 +514,7 @@ function ChatTranscript({
               ))}
             </div>
           )}
-          {message.role === "assistant" && <AgentActivity message={message} />}
+          {message.role === "assistant" && <AgentActivity message={message} mode={conversationMode} />}
           {(message.content || message.role === "assistant" && message.status !== "streaming") && (
             <p className="message-content">{message.content || (message.status === "streaming" ? "" : "No response was generated.")}
               {message.role === "assistant" && message.status === "streaming" && <span className="stream-cursor" aria-hidden="true" />}
@@ -492,6 +522,7 @@ function ChatTranscript({
           )}
           {message.status === "cancelled" && <p className="message-status">Generation stopped</p>}
           {message.status === "error" && <p className="message-status error">Generation failed</p>}
+          {message.role === "assistant" && <ResponseMetrics message={message} />}
         </article>
       ))}
       {error && <div className="chat-error" role="alert">{error}</div>}
@@ -521,7 +552,7 @@ function readImage(file) {
   });
 }
 
-function Composer({ streaming, onStop, onSend, empty, model, contextWindow, disabled, supportsImages, supportsTools }) {
+function Composer({ streaming, onStop, onSend, empty, model, models, setModel, conversationMode, setConversationMode, contextWindow, setContextWindow, thinkingMode, setThinkingMode, contextUsedTokens, disabled, supportsImages, supportsTools, supportsThinking, onOpenSettings }) {
   const [message, setMessage] = useState("");
   const [attachments, setAttachments] = useState([]);
   const [attachmentError, setAttachmentError] = useState("");
@@ -591,8 +622,53 @@ function Composer({ streaming, onStop, onSend, empty, model, contextWindow, disa
   }
 
   const contextLimit = contextWindow === "default" ? null : Number(contextWindow);
-  const usedPercent = 0;
-  const contextLabel = contextLimit ? `${contextLimit.toLocaleString()} token limit` : "Ollama default";
+  const usedPercent = contextLimit ? Math.min(100, contextUsedTokens / contextLimit * 100) : null;
+  const displayPercent = usedPercent == null ? null : usedPercent > 0 && usedPercent < 1 ? "<1" : Math.round(usedPercent).toString();
+  const contextLabel = contextLimit
+    ? `${contextUsedTokens.toLocaleString()} / ${contextLimit.toLocaleString()} tokens (${displayPercent}%)`
+    : contextUsedTokens > 0
+      ? `${contextUsedTokens.toLocaleString()} tokens · Ollama default limit`
+      : "Ollama default · usage available after response";
+
+  const messageField = (
+    <textarea
+      ref={inputRef}
+      value={message}
+      rows={empty ? "6" : "1"}
+      onChange={(event) => setMessage(event.target.value)}
+      onPaste={(event) => {
+        const images = [...event.clipboardData.files].filter((file) => file.type.startsWith("image/"));
+        if (images.length) {
+          event.preventDefault();
+          addImages(images);
+        }
+      }}
+      onKeyDown={onKeyDown}
+      placeholder={empty ? "Ask or assign a task…" : model ? `Message ${model}` : "Choose a model"}
+      aria-label="Message"
+    />
+  );
+
+  const attachButton = (
+    <IconButton
+      label={supportsImages ? "Attach images" : "Image input requires a vision model"}
+      className="attach-button"
+      aria-disabled={!supportsImages}
+      onClick={() => supportsImages ? fileInputRef.current?.click() : setAttachmentError("Choose a vision-capable model to attach images.")}
+    >
+      <Paperclip size={22} />
+    </IconButton>
+  );
+
+  const sendButton = streaming ? (
+    <button className="stop-button" aria-label="Stop generation" onClick={onStop}>
+      <Stop size={16} weight="fill" /><span>Stop</span>
+    </button>
+  ) : (
+    <button className="send-button" aria-label="Send message" onClick={submit} disabled={(!message.trim() && attachments.length === 0) || disabled || (!supportsImages && attachments.length > 0)}>
+      <ArrowUp size={19} weight="bold" /><span>Send</span>
+    </button>
+  );
 
   return (
     <div className="composer-wrap">
@@ -609,8 +685,38 @@ function Composer({ streaming, onStop, onSend, empty, model, contextWindow, disa
           addImages([...event.dataTransfer.files].filter((file) => file.type.startsWith("image/")));
         }}
       >
-        {!supportsTools && model && (
-          <div className="agent-model-warning" role="status">Agent mode requires a tool-capable model, even when a task may not need a tool.</div>
+        {empty && (
+          <div className="launch-dock-header">
+            <div className="select-wrap launch-dock-model">
+              <select aria-label="Model" value={model} onChange={(event) => setModel(event.target.value)}>
+                {models.length ? models.map((item) => <option key={item}>{item}</option>) : <option value="">No local models found</option>}
+              </select>
+              <CaretDown size={17} aria-hidden="true" />
+            </div>
+            <div className="launch-dock-modes" role="radiogroup" aria-label="Conversation mode">
+              <label className={conversationMode === "chat" ? "selected" : ""}>
+                <input type="radio" name="conversation-mode" value="chat" checked={conversationMode === "chat"} onChange={() => setConversationMode("chat")} />
+                <ChatCircle size={20} /><span>Chat</span>
+              </label>
+              <label className={`${conversationMode === "agent" ? "selected" : ""} ${!supportsTools ? "disabled" : ""}`}>
+                <input type="radio" name="conversation-mode" value="agent" checked={conversationMode === "agent"} disabled={!supportsTools} onChange={() => setConversationMode("agent")} />
+                <TerminalWindow size={20} /><span>Agent</span>
+              </label>
+            </div>
+            <div className="launch-capabilities" aria-label="Selected model capabilities">
+              {supportsTools && <span>Tools</span>}
+              {supportsImages && <span>Vision</span>}
+              {supportsThinking && <span>Thinking</span>}
+            </div>
+            <IconButton label="Open model settings" className="launch-settings-button" onClick={onOpenSettings}>
+              <SlidersHorizontal size={21} />
+            </IconButton>
+          </div>
+        )}
+        {conversationMode === "chat" && model && !empty && (
+          <div className="mode-notice" role="status">
+            Chat mode · {supportsTools ? "tools are off for this conversation" : "this model does not support tools"}
+          </div>
         )}
         {attachments.length > 0 && (
           <div className="attachment-previews" aria-label="Images ready to send">
@@ -628,60 +734,67 @@ function Composer({ streaming, onStop, onSend, empty, model, contextWindow, disa
           </div>
         )}
         {attachmentError && <div className="attachment-error" role="alert">{attachmentError}</div>}
-        <div className="composer-row">
-          <input
-            ref={fileInputRef}
-            className="sr-only"
-            type="file"
-            accept="image/jpeg,image/png,image/webp"
-            multiple
-            aria-hidden="true"
-            tabIndex="-1"
-            onChange={(event) => {
-              addImages(event.target.files);
-              event.target.value = "";
-            }}
-          />
-          <IconButton
-            label={supportsImages ? "Attach images" : "Image input requires a vision model"}
-            className="attach-button"
-            aria-disabled={!supportsImages}
-            onClick={() => supportsImages ? fileInputRef.current?.click() : setAttachmentError("Choose a vision-capable model to attach images.")}
-          >
-            <Paperclip size={22} />
-          </IconButton>
-          <textarea
-            ref={inputRef}
-            value={message}
-            rows="1"
-            onChange={(event) => setMessage(event.target.value)}
-            onPaste={(event) => {
-              const images = [...event.clipboardData.files].filter((file) => file.type.startsWith("image/"));
-              if (images.length) {
-                event.preventDefault();
-                addImages(images);
-              }
-            }}
-            onKeyDown={onKeyDown}
-            placeholder={supportsTools ? `Ask ${model} anything` : "Choose a tool-capable model"}
-            aria-label="Message"
-          />
-          {streaming ? (
-            <button className="stop-button" aria-label="Stop generation" onClick={onStop}>
-              <Stop size={16} weight="fill" /><span>Stop</span>
-            </button>
-          ) : (
-            <button className="send-button" aria-label="Send message" onClick={submit} disabled={(!message.trim() && attachments.length === 0) || disabled || (!supportsImages && attachments.length > 0)}>
-              <ArrowUp size={19} weight="bold" /><span>Send</span>
-            </button>
-          )}
-        </div>
-        <div className="context-row">
-          <span>Context&nbsp;&nbsp;{contextLabel}</span>
-          <div className="context-track" aria-label={`${usedPercent}% of context used`} role="progressbar" aria-valuenow={usedPercent} aria-valuemin="0" aria-valuemax="100">
-            <span style={{ width: `${usedPercent}%` }} />
-          </div>
-        </div>
+        <input
+          ref={fileInputRef}
+          className="sr-only"
+          type="file"
+          accept="image/jpeg,image/png,image/webp"
+          multiple
+          aria-hidden="true"
+          tabIndex="-1"
+          onChange={(event) => {
+            addImages(event.target.files);
+            event.target.value = "";
+          }}
+        />
+        {empty ? (
+          <>
+            <div className="launch-prompt-row">{messageField}</div>
+            <div className="launch-dock-footer">
+              {attachButton}
+              <label className="launch-runtime-control">
+                <span>Context</span>
+                <select aria-label="Context window" value={contextWindow} onChange={(event) => setContextWindow(event.target.value)}>
+                  {contextWindows.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+                </select>
+                <CaretDown size={16} aria-hidden="true" />
+              </label>
+              <label className="launch-runtime-control">
+                <span>Thinking</span>
+                <select aria-label="Thinking" value={thinkingMode} disabled={!supportsThinking} onChange={(event) => setThinkingMode(event.target.value)}>
+                  {supportsThinking
+                    ? thinkingModes.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)
+                    : <option value="default">Not supported</option>}
+                </select>
+                <CaretDown size={16} aria-hidden="true" />
+              </label>
+              <div className="launch-context-summary">
+                <span>{contextLimit ? contextLabel : "Limit inherited"}</span>
+                <div className={`context-track ${usedPercent == null ? "unknown-limit" : ""}`} aria-hidden="true">
+                  {usedPercent != null && <span style={{ width: `${usedPercent}%` }} />}
+                </div>
+              </div>
+              {sendButton}
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="composer-row">{attachButton}{messageField}{sendButton}</div>
+            <div className="context-row">
+              <span>Context&nbsp;&nbsp;{contextLabel}</span>
+              <div
+                className={`context-track ${usedPercent == null ? "unknown-limit" : ""}`}
+                aria-label={contextLimit ? `${contextUsedTokens} of ${contextLimit} context tokens used` : `${contextUsedTokens} context tokens used; limit inherited from Ollama`}
+                role={contextLimit ? "progressbar" : undefined}
+                aria-valuenow={usedPercent ?? undefined}
+                aria-valuemin={contextLimit ? "0" : undefined}
+                aria-valuemax={contextLimit ? "100" : undefined}
+              >
+                {usedPercent != null && <span style={{ width: `${usedPercent}%` }} />}
+              </div>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
@@ -691,6 +804,7 @@ export function App() {
   const [activeId, setActiveId] = useState(null);
   const [activeTitle, setActiveTitle] = useState("");
   const [model, setModel] = useState("");
+  const [conversationMode, setConversationMode] = useState("agent");
   const [models, setModels] = useState([]);
   const [visionModels, setVisionModels] = useState(() => new Set());
   const [toolModels, setToolModels] = useState(() => new Set());
@@ -700,7 +814,7 @@ export function App() {
   const [messages, setMessages] = useState([]);
   const [connected, setConnected] = useState(false);
   const [chatError, setChatError] = useState("");
-  const [settingsOpen, setSettingsOpen] = useState(() => window.innerWidth >= 1200);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [renameTarget, setRenameTarget] = useState(null);
@@ -727,6 +841,7 @@ export function App() {
   const deleteDialogRef = useRef(null);
   const deleteCancelRef = useRef(null);
   const actionReturnRef = useRef(null);
+  const currentContextUsage = useMemo(() => contextUsage(messages, contextWindow), [messages, contextWindow]);
 
   async function refreshConversations(search = query, signal) {
     const items = await listConversations(search, signal);
@@ -763,6 +878,12 @@ export function App() {
       setThinkingMode("default");
     }
   }, [model, modelLoaded, thinkingMode, thinkingModels]);
+
+  useEffect(() => {
+    if (!modelLoaded && model && !toolModels.has(model) && conversationMode === "agent") {
+      setConversationMode("chat");
+    }
+  }, [conversationMode, model, modelLoaded, toolModels]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -880,11 +1001,10 @@ export function App() {
       setActiveId(payload.conversation.id);
       setActiveTitle(payload.conversation.title);
       setModel(payload.conversation.model);
+      setConversationMode(payload.conversation.mode || "agent");
       setSystemPrompt(payload.conversation.system_prompt || "");
       setContextWindow(payload.conversation.context_window == null ? "default" : String(payload.conversation.context_window));
-      setThinkingMode(payload.conversation.thinking_enabled == null
-        ? "default"
-        : payload.conversation.thinking_enabled ? "enabled" : "disabled");
+      setThinkingMode(thinkingModeFromConversation(payload.conversation));
       setTemperatureOverride(payload.conversation.temperature != null);
       setTemperature(payload.conversation.temperature ?? 0.7);
       setModelLoaded(payload.conversation.message_count > 0);
@@ -901,6 +1021,7 @@ export function App() {
     setMessages([]);
     setStreaming(false);
     setModelLoaded(false);
+    setConversationMode(toolModels.has(model) ? "agent" : "chat");
     setSystemPrompt("");
     setContextWindow("default");
     setThinkingMode("default");
@@ -1006,9 +1127,10 @@ export function App() {
         const conversation = await createConversation({
           title: value.trim().replace(/\s+/g, " ").slice(0, 60) || `Image: ${images[0]?.name || "conversation"}`,
           model,
+          mode: conversationMode,
           system_prompt: systemPrompt,
           context_window: contextWindow === "default" ? null : Number(contextWindow),
-          thinking_enabled: thinkingMode === "default" ? null : thinkingMode === "enabled",
+          thinking_mode: thinkingModeForRequest(thinkingMode),
           temperature: temperatureOverride ? temperature : null,
         }, controller.signal);
         conversationId = conversation.id;
@@ -1101,11 +1223,12 @@ export function App() {
           onNew={newChat}
           onRename={openRename}
           onDelete={openDelete}
+          onSettings={() => { setSettingsOpen(true); closeSidebar(); }}
           onClose={closeSidebar}
         />
       </div>
 
-      <main className="chat-workspace">
+      <main className={`chat-workspace ${!activeId ? "is-new-chat" : ""}`}>
         <header className="topbar">
           <div className="topbar-left">
             <IconButton
@@ -1116,17 +1239,22 @@ export function App() {
             >
               <SidebarSimple size={23} />
             </IconButton>
-            <div className="terminal-button" aria-hidden="true"><ChatCircle size={24} /></div>
-            <div className="select-wrap model-select">
-              <select aria-label="Active model" value={model} disabled={modelLoaded} onChange={(event) => setModel(event.target.value)}>
-                {models.length ? models.map((item) => <option key={item}>{item}</option>) : <option value="">No models</option>}
-              </select>
-              <CaretDown size={17} aria-hidden="true" />
-            </div>
+            {activeId && (
+              <>
+                <div className="terminal-button" aria-hidden="true"><ChatCircle size={24} /></div>
+                <div className="select-wrap model-select">
+                  <select aria-label="Active model" value={model} disabled={modelLoaded} onChange={(event) => setModel(event.target.value)}>
+                    {models.length ? models.map((item) => <option key={item}>{item}</option>) : <option value="">No models</option>}
+                  </select>
+                  <CaretDown size={17} aria-hidden="true" />
+                </div>
+              </>
+            )}
           </div>
           <div className="topbar-right">
             <div className={`agent-status ${streaming ? "working" : ""}`} role="status" aria-live="polite">
-              {streaming ? <CircleNotch size={16} /> : <ChatCircle size={16} />}<span>{streaming ? "Agent working" : "Agent ready"}</span>
+              {streaming ? <CircleNotch size={16} /> : <ChatCircle size={16} />}
+              <span>{conversationMode === "agent" ? (streaming ? "Agent working" : "Agent ready") : (streaming ? "Chat responding" : "Chat ready")}</span>
             </div>
             <div className={`connected-status ${connected ? "" : "disconnected"}`}><span /> <span className="connected-text">{connected ? "Connected" : "Ollama unavailable"}</span></div>
             <div
@@ -1176,16 +1304,8 @@ export function App() {
         <section className="transcript" aria-label="Conversation">
           <ChatTranscript
             empty={!activeId}
-            streaming={streaming}
             messages={messages}
-            model={model}
-            models={models}
-            setModel={setModel}
-            contextWindow={contextWindow}
-            setContextWindow={setContextWindow}
-            thinkingMode={thinkingMode}
-            setThinkingMode={setThinkingMode}
-            supportsThinking={thinkingModels.has(model)}
+            conversationMode={conversationMode}
             error={chatError}
           />
         </section>
@@ -1195,10 +1315,20 @@ export function App() {
           onSend={sendMessage}
           empty={!activeId}
           model={model}
+          models={models}
+          setModel={setModel}
+          conversationMode={conversationMode}
+          setConversationMode={setConversationMode}
           contextWindow={contextWindow}
-          disabled={!model || !toolModels.has(model)}
+          setContextWindow={setContextWindow}
+          thinkingMode={thinkingMode}
+          setThinkingMode={setThinkingMode}
+          contextUsedTokens={currentContextUsage.usedTokens}
+          disabled={!model || conversationMode === "agent" && !toolModels.has(model)}
           supportsImages={visionModels.has(model)}
           supportsTools={toolModels.has(model)}
+          supportsThinking={thinkingModels.has(model)}
+          onOpenSettings={() => setSettingsOpen(true)}
         />
       </main>
 
@@ -1207,6 +1337,9 @@ export function App() {
           models={models}
           model={model}
           setModel={setModel}
+          conversationMode={conversationMode}
+          setConversationMode={setConversationMode}
+          supportsTools={toolModels.has(model)}
           onClose={closeSettings}
           systemPrompt={systemPrompt}
           setSystemPrompt={setSystemPrompt}
