@@ -381,14 +381,14 @@ function formatBytes(value) {
   return `${amount >= 10 || power === 0 ? amount.toFixed(0) : amount.toFixed(1)} ${units[power]}`;
 }
 
-function SystemSettings({ connected, modelCount, runtime, loading, error, streaming, onRefresh, onClose, onRequestClear }) {
+function SystemSettings({ connected, modelCount, runtime, loading, error, streaming, onRefresh, onClose, onRequestClear, closeRef }) {
   const storage = runtime?.storage;
   const agent = runtime?.agent;
   return (
-    <aside className="settings-panel system-settings" aria-label="System settings">
+    <div className="system-settings-dialog-content">
       <div className="settings-heading">
-        <div><span className="settings-eyebrow">Application</span><h2>System settings</h2></div>
-        <IconButton label="Close system settings" onClick={onClose}><X size={24} /></IconButton>
+        <div><span className="settings-eyebrow">Application</span><h2 id="system-settings-title">System settings</h2></div>
+        <IconButton ref={closeRef} label="Close system settings" onClick={onClose}><X size={24} /></IconButton>
       </div>
 
       <div className="settings-scroll">
@@ -432,7 +432,7 @@ function SystemSettings({ connected, modelCount, runtime, loading, error, stream
         </section>
 
       </div>
-    </aside>
+    </div>
   );
 }
 
@@ -882,7 +882,7 @@ export function App() {
   const [connected, setConnected] = useState(false);
   const [chatError, setChatError] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [settingsKind, setSettingsKind] = useState("conversation");
+  const [systemSettingsOpen, setSystemSettingsOpen] = useState(false);
   const [runtimeSettings, setRuntimeSettings] = useState(null);
   const [runtimeSettingsLoading, setRuntimeSettingsLoading] = useState(false);
   const [runtimeSettingsError, setRuntimeSettingsError] = useState("");
@@ -910,6 +910,9 @@ export function App() {
   const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
   const settingsTriggerRef = useRef(null);
   const settingsReturnRef = useRef(null);
+  const systemSettingsDialogRef = useRef(null);
+  const systemSettingsCloseRef = useRef(null);
+  const systemSettingsReturnRef = useRef(null);
   const sidebarTriggerRef = useRef(null);
   const generationRef = useRef(null);
   const detailRequestRef = useRef(null);
@@ -1024,6 +1027,17 @@ export function App() {
   }, [aboutOpen]);
 
   useEffect(() => {
+    const dialog = systemSettingsDialogRef.current;
+    if (!dialog) return;
+    if (systemSettingsOpen && !dialog.open) {
+      dialog.showModal();
+      window.setTimeout(() => systemSettingsCloseRef.current?.focus(), 0);
+    } else if (!systemSettingsOpen && dialog.open) {
+      dialog.close();
+    }
+  }, [systemSettingsOpen]);
+
+  useEffect(() => {
     const dialog = clearAllDialogRef.current;
     if (!dialog) return;
     if (clearAllOpen && !dialog.open) {
@@ -1035,7 +1049,7 @@ export function App() {
   }, [clearAllOpen]);
 
   useEffect(() => {
-    if (!settingsOpen || settingsKind !== "system") return undefined;
+    if (!systemSettingsOpen) return undefined;
     const controller = new AbortController();
     setRuntimeSettingsLoading(true);
     setRuntimeSettingsError("");
@@ -1044,12 +1058,12 @@ export function App() {
       .catch((error) => { if (error.name !== "AbortError") setRuntimeSettingsError(error.message); })
       .finally(() => { if (!controller.signal.aborted) setRuntimeSettingsLoading(false); });
     return () => controller.abort();
-  }, [settingsOpen, settingsKind]);
+  }, [systemSettingsOpen]);
 
   useEffect(() => {
     function onKeyDown(event) {
       if (event.key !== "Escape") return;
-      if (renameTarget || deleteTarget || aboutOpen || clearAllOpen) {
+      if (renameTarget || deleteTarget || aboutOpen || systemSettingsOpen || clearAllOpen) {
         return;
       } else if (settingsOpen && viewportWidth < 1200) {
         setSettingsOpen(false);
@@ -1063,7 +1077,7 @@ export function App() {
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [renameTarget, deleteTarget, aboutOpen, clearAllOpen, settingsOpen, sidebarOpen, viewportWidth]);
+  }, [renameTarget, deleteTarget, aboutOpen, systemSettingsOpen, clearAllOpen, settingsOpen, sidebarOpen, viewportWidth]);
 
   useEffect(() => {
     const isSettingsOverlay = settingsOpen && viewportWidth < 1200;
@@ -1110,12 +1124,28 @@ export function App() {
     }, 0);
   }
 
-  function openSettings(kind, trigger) {
+  function openConversationSettings(trigger) {
     settingsReturnRef.current = trigger;
-    setSettingsKind(kind);
-    setSidebarOpen(false);
     setMenuOpen(false);
     setSettingsOpen(true);
+  }
+
+  function openSystemSettings(trigger) {
+    systemSettingsReturnRef.current = trigger;
+    setSidebarOpen(false);
+    setSystemSettingsOpen(true);
+  }
+
+  function closeSystemSettings() {
+    setSystemSettingsOpen(false);
+  }
+
+  function restoreSystemSettingsFocus() {
+    window.setTimeout(() => {
+      const trigger = systemSettingsReturnRef.current;
+      if (trigger?.isConnected && !trigger.closest('[inert]')) trigger.focus();
+      else sidebarTriggerRef.current?.focus();
+    }, 0);
   }
 
   function openAbout(trigger) {
@@ -1410,7 +1440,7 @@ export function App() {
   const sidebarVisible = viewportWidth > 900 || sidebarOpen;
 
   return (
-    <div className={`app-shell ${settingsOpen ? "settings-is-open" : ""} ${settingsOpen && settingsKind === "system" ? "system-settings-is-open" : ""}`}>
+    <div className={`app-shell ${settingsOpen ? "settings-is-open" : ""}`}>
       <div className={`sidebar-layer ${sidebarOpen ? "open" : ""}`} aria-hidden={!sidebarVisible} inert={!sidebarVisible ? "" : undefined}>
         <ConversationSidebar
           activeId={activeId}
@@ -1422,7 +1452,7 @@ export function App() {
           onNew={newChat}
           onRename={openRename}
           onDelete={openDelete}
-          onSettings={(trigger) => openSettings("system", trigger)}
+          onSettings={openSystemSettings}
           onAbout={openAbout}
           onClose={closeSidebar}
         />
@@ -1476,7 +1506,7 @@ export function App() {
                 <div className="overflow-menu" role="menu">
                   <button
                     role="menuitem"
-                    onClick={() => openSettings("conversation", settingsTriggerRef.current)}
+                    onClick={() => openConversationSettings(settingsTriggerRef.current)}
                   ><SlidersHorizontal size={19} />Conversation settings</button>
                   <button
                     role="menuitem"
@@ -1528,46 +1558,32 @@ export function App() {
           supportsImages={visionModels.has(model)}
           supportsTools={toolModels.has(model)}
           supportsThinking={thinkingModels.has(model)}
-          onOpenSettings={(event) => openSettings("conversation", event.currentTarget)}
+          onOpenSettings={(event) => openConversationSettings(event.currentTarget)}
         />
       </main>
 
       <div className={`settings-layer ${settingsOpen ? "open" : ""}`} aria-hidden={!settingsOpen} inert={!settingsOpen ? "" : undefined}>
-        {settingsKind === "system" ? (
-          <SystemSettings
-            connected={connected}
-            modelCount={models.length}
-            runtime={runtimeSettings}
-            loading={runtimeSettingsLoading}
-            error={runtimeSettingsError}
-            streaming={streaming}
-            onRefresh={refreshRuntimeSettings}
-            onClose={closeSettings}
-            onRequestClear={(event) => openClearAll(event.currentTarget)}
-          />
-        ) : (
-          <ConversationSettings
-            models={models}
-            model={model}
-            setModel={setModel}
-            conversationMode={conversationMode}
-            setConversationMode={setConversationMode}
-            supportsTools={toolModels.has(model)}
-            onClose={closeSettings}
-            systemPrompt={systemPrompt}
-            setSystemPrompt={setSystemPrompt}
-            contextWindow={contextWindow}
-            setContextWindow={setContextWindow}
-            thinkingMode={thinkingMode}
-            setThinkingMode={setThinkingMode}
-            supportsThinking={thinkingModels.has(model)}
-            modelLoaded={modelLoaded}
-            temperatureOverride={temperatureOverride}
-            setTemperatureOverride={setTemperatureOverride}
-            temperature={temperature}
-            setTemperature={setTemperature}
-          />
-        )}
+        <ConversationSettings
+          models={models}
+          model={model}
+          setModel={setModel}
+          conversationMode={conversationMode}
+          setConversationMode={setConversationMode}
+          supportsTools={toolModels.has(model)}
+          onClose={closeSettings}
+          systemPrompt={systemPrompt}
+          setSystemPrompt={setSystemPrompt}
+          contextWindow={contextWindow}
+          setContextWindow={setContextWindow}
+          thinkingMode={thinkingMode}
+          setThinkingMode={setThinkingMode}
+          supportsThinking={thinkingModels.has(model)}
+          modelLoaded={modelLoaded}
+          temperatureOverride={temperatureOverride}
+          setTemperatureOverride={setTemperatureOverride}
+          temperature={temperature}
+          setTemperature={setTemperature}
+        />
       </div>
 
       {(sidebarOpen || overlaySettings) && (
@@ -1577,6 +1593,27 @@ export function App() {
           onClick={() => { if (sidebarOpen) closeSidebar(); if (viewportWidth < 1200 && settingsOpen) closeSettings(); }}
         />
       )}
+
+      <dialog
+        className="system-settings-dialog"
+        ref={systemSettingsDialogRef}
+        aria-labelledby="system-settings-title"
+        onCancel={(event) => { event.preventDefault(); closeSystemSettings(); }}
+        onClose={restoreSystemSettingsFocus}
+      >
+        <SystemSettings
+          connected={connected}
+          modelCount={models.length}
+          runtime={runtimeSettings}
+          loading={runtimeSettingsLoading}
+          error={runtimeSettingsError}
+          streaming={streaming}
+          onRefresh={refreshRuntimeSettings}
+          onClose={closeSystemSettings}
+          onRequestClear={(event) => openClearAll(event.currentTarget)}
+          closeRef={systemSettingsCloseRef}
+        />
+      </dialog>
 
       <dialog
         className="rename-dialog"
