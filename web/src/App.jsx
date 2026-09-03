@@ -1,13 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import hljs from "highlight.js/lib/core";
-import python from "highlight.js/lib/languages/python";
+import {
+  createConversation,
+  getConversation,
+  getHealth,
+  listConversations,
+  listModels,
+  streamMessage,
+} from "./api";
 import {
   ArrowCounterClockwise,
   ArrowUp,
+  Brain,
   CaretDown,
   ChatCircle,
-  Check,
-  Copy,
+  CheckCircle,
+  CircleNotch,
   DotsThreeVertical,
   Gear,
   Info,
@@ -21,35 +28,6 @@ import {
   X,
 } from "@phosphor-icons/react";
 
-const conversations = [
-  {
-    label: "Today",
-    items: [
-      { id: "python-server", title: "Implement a Python HTTP server", time: "10:42 AM" },
-      { id: "quantize", title: "Quantize models in Ollama", time: "9:18 AM" },
-      { id: "gpu", title: "Troubleshoot GPU offload", time: "8:03 AM" },
-    ],
-  },
-  {
-    label: "Yesterday",
-    items: [
-      { id: "kv-cache", title: "Explain KV cache", time: "Yesterday" },
-      { id: "modelfile", title: "Use Modelfile template", time: "Yesterday" },
-      { id: "rag", title: "RAG with local documents", time: "Yesterday" },
-    ],
-  },
-  {
-    label: "Previous 7 days",
-    items: [
-      { id: "system-prompt", title: "System prompt best practices", time: "May 10" },
-      { id: "context", title: "Context length limits", time: "May 9" },
-      { id: "api", title: "Ollama API examples", time: "May 8" },
-      { id: "lora", title: "Fine-tune with LoRA", time: "May 7" },
-    ],
-  },
-];
-
-const models = ["qwen3:8b", "llama3.2:latest", "gemma3:12b"];
 const contextWindows = [
   { value: "default", label: "Ollama default" },
   { value: "4096", label: "4,096 tokens" },
@@ -60,42 +38,11 @@ const contextWindows = [
   { value: "131072", label: "131,072 tokens" },
 ];
 
-hljs.registerLanguage("python", python);
-
-const code = `import json
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from datetime import datetime
-
-class Handler(BaseHTTPRequestHandler):
-    def log_message(self, format, *args):
-        # Log each request with client address and timestamp
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"[{now}] {self.client_address[0]} - {format % args}")
-
-    def do_GET(self):
-        if self.path == "/api/health":
-            payload = {"status": "ok", "service": "ollama-webui"}
-            body = json.dumps(payload).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-        else:
-            self.send_response(404)
-            self.end_headers()
-            self.wfile.write(b"Not found")
-
-if __name__ == "__main__":
-    host = "0.0.0.0"
-    port = 8000
-    server = HTTPServer((host, port), Handler)
-    print(f"Listening on http://{host}:{port}")
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        print("Shutting down")
-        server.server_close()`;
+const thinkingModes = [
+  { value: "default", label: "Ollama default" },
+  { value: "enabled", label: "On" },
+  { value: "disabled", label: "Off" },
+];
 
 function IconButton({ label, children, className = "", ...props }) {
   return (
@@ -105,18 +52,29 @@ function IconButton({ label, children, className = "", ...props }) {
   );
 }
 
-function ConversationSidebar({ activeId, onSelect, onNew, onClose }) {
-  const [query, setQuery] = useState("");
-  const filteredGroups = useMemo(() => {
-    const normalized = query.trim().toLowerCase();
-    if (!normalized) return conversations;
-    return conversations
-      .map((group) => ({
-        ...group,
-        items: group.items.filter((item) => item.title.toLowerCase().includes(normalized)),
-      }))
-      .filter((group) => group.items.length);
-  }, [query]);
+function groupConversations(items) {
+  const today = new Date();
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+  const groups = new Map();
+  for (const item of items) {
+    const date = new Date(item.updated_at);
+    const label = date.toDateString() === today.toDateString()
+      ? "Today"
+      : date.toDateString() === yesterday.toDateString() ? "Yesterday" : "Earlier";
+    if (!groups.has(label)) groups.set(label, []);
+    groups.get(label).push({
+      ...item,
+      time: label === "Today"
+        ? date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
+        : date.toLocaleDateString([], { month: "short", day: "numeric" }),
+    });
+  }
+  return [...groups].map(([label, groupedItems]) => ({ label, items: groupedItems }));
+}
+
+function ConversationSidebar({ activeId, conversations, query, onQuery, onSelect, onNew, onClose }) {
+  const filteredGroups = useMemo(() => groupConversations(conversations), [conversations]);
 
   return (
     <aside className="conversation-sidebar" aria-label="Conversations">
@@ -139,7 +97,7 @@ function ConversationSidebar({ activeId, onSelect, onNew, onClose }) {
         <span className="sr-only">Search conversations</span>
         <input
           value={query}
-          onChange={(event) => setQuery(event.target.value)}
+          onChange={(event) => onQuery(event.target.value)}
           placeholder="Search conversations"
         />
       </label>
@@ -180,6 +138,7 @@ function ConversationSidebar({ activeId, onSelect, onNew, onClose }) {
 }
 
 function ModelSettings({
+  models,
   model,
   setModel,
   onClose,
@@ -187,14 +146,19 @@ function ModelSettings({
   setSystemPrompt,
   contextWindow,
   setContextWindow,
+  thinkingMode,
+  setThinkingMode,
+  supportsThinking,
   modelLoaded,
+  temperatureOverride,
+  setTemperatureOverride,
+  temperature,
+  setTemperature,
 }) {
-  const [temperatureOverride, setTemperatureOverride] = useState(false);
-  const [temperature, setTemperature] = useState(0.7);
-
   function resetDefaults() {
     setSystemPrompt("");
     if (!modelLoaded) setContextWindow("default");
+    if (!modelLoaded) setThinkingMode("default");
     setTemperatureOverride(false);
     setTemperature(0.7);
   }
@@ -212,7 +176,7 @@ function ModelSettings({
         <section className="settings-section model-section">
           <label htmlFor="settings-model">Model</label>
           <div className="select-wrap wide">
-            <select id="settings-model" value={model} onChange={(event) => setModel(event.target.value)}>
+            <select id="settings-model" value={model} disabled={modelLoaded} onChange={(event) => setModel(event.target.value)}>
               {models.map((item) => <option key={item}>{item}</option>)}
             </select>
             <CaretDown size={18} aria-hidden="true" />
@@ -239,6 +203,30 @@ function ModelSettings({
             <p className="locked-setting"><span className="lock-dot" />Model loaded. Start a new chat to choose a different context window.</p>
           ) : (
             <p>Applied when the first message loads this model. Ollama default sends no context override.</p>
+          )}
+        </section>
+
+        <section className="settings-section thinking-section">
+          <label htmlFor="thinking-mode">Thinking</label>
+          <div className="select-wrap wide">
+            <select
+              id="thinking-mode"
+              value={thinkingMode}
+              disabled={modelLoaded || !supportsThinking}
+              onChange={(event) => setThinkingMode(event.target.value)}
+            >
+              {supportsThinking
+                ? thinkingModes.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)
+                : <option value="default">Not supported</option>}
+            </select>
+            <CaretDown size={18} aria-hidden="true" />
+          </div>
+          {!supportsThinking ? (
+            <p>This model does not advertise thinking support.</p>
+          ) : modelLoaded ? (
+            <p className="locked-setting"><span className="lock-dot" />Model loaded. Start a new chat to choose a different thinking mode.</p>
+          ) : (
+            <p>Ollama default sends no thinking override. On and Off explicitly control model reasoning.</p>
           )}
         </section>
 
@@ -291,47 +279,91 @@ function ModelSettings({
   );
 }
 
-function HighlightedCode() {
-  const [copied, setCopied] = useState(false);
-  const highlightedLines = useMemo(
-    () => hljs.highlight(code, { language: "python" }).value.split("\n"),
-    [],
-  );
+function AgentActivity({ message }) {
+  const thinkingRef = useRef(null);
+  const steps = message.agent_steps || [];
+  const hasActivity = message.status === "streaming" || Boolean(message.thinking) || steps.length > 0;
 
-  async function copyCode() {
-    await navigator.clipboard.writeText(code);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1600);
-  }
+  const phaseLabels = {
+    starting: "Starting",
+    thinking: "Thinking",
+    shell: "Running shell",
+    reviewing: "Reviewing result",
+    responding: "Writing answer",
+    finished: "Finished",
+    stopped: "Stopped",
+    error: "Failed",
+  };
+  const phase = message.agent_phase || (message.status === "complete" ? "finished" : message.status === "cancelled" ? "stopped" : message.status === "error" ? "error" : "thinking");
+  const turn = message.agent_turn || message.metadata?.agent_turns;
+  const active = message.status === "streaming";
+
+  useEffect(() => {
+    if (active && phase === "thinking" && thinkingRef.current) {
+      thinkingRef.current.scrollTop = thinkingRef.current.scrollHeight;
+    }
+  }, [active, phase, message.thinking]);
+
+  if (!hasActivity) return null;
 
   return (
-    <div className="code-block">
-      <div className="code-toolbar">
-        <span>python</span>
-        <button onClick={copyCode} aria-label="Copy Python code">
-          {copied ? <Check size={18} /> : <Copy size={18} />}
-          <span>{copied ? "Copied" : "Copy"}</span>
-        </button>
+    <section className={`agent-activity ${phase}`} aria-label="Agent activity">
+      <div className="agent-progress" role="status" aria-live="polite">
+        <span className="agent-progress-icon" aria-hidden="true">
+          {active ? <CircleNotch size={17} /> : phase === "finished" ? <CheckCircle size={17} /> : <Stop size={15} weight="fill" />}
+        </span>
+        <strong>{phaseLabels[phase] || "Working"}</strong>
+        {turn && <span>Turn {turn}</span>}
+        {steps.length > 0 && <span>{steps.length} {steps.length === 1 ? "action" : "actions"}</span>}
       </div>
-      <pre><code>{highlightedLines.map((line, index) => (
-        <span
-          className="code-line"
-          key={index}
-          dangerouslySetInnerHTML={{ __html: line || "&nbsp;" }}
-        />
-      ))}</code></pre>
-    </div>
+
+      {message.thinking && (
+        <details className="thinking-step" open={active && phase === "thinking"}>
+          <summary>
+            <span className="agent-step-icon"><Brain size={17} /></span>
+            <span>Model thinking</span>
+            <span className="agent-step-status">{active && phase === "thinking" ? "Live" : "View"}</span>
+          </summary>
+          <div className="thinking-content" ref={thinkingRef}>{message.thinking}{active && phase === "thinking" && <span className="stream-cursor" aria-hidden="true" />}</div>
+        </details>
+      )}
+
+      {steps.length > 0 && (
+        <div className="agent-steps" aria-label="Shell activity">
+          {steps.map((step) => {
+            let command = step.input;
+            try { command = JSON.parse(step.input).command || step.input; } catch { /* Show the recorded input. */ }
+            const statusLabel = step.status === "running" ? "Running" : step.status === "complete" ? `Exited ${step.exit_code ?? 0}` : step.status === "cancelled" ? "Stopped" : "Failed";
+            return (
+              <details className={`agent-step ${step.status}`} key={step.id} open={step.status === "running"}>
+                <summary>
+                  <span className="agent-step-icon"><TerminalWindow size={17} /></span>
+                  <code>{command}</code>
+                  <span className="agent-step-status">{statusLabel}</span>
+                </summary>
+                {step.output && <pre>{step.output}</pre>}
+              </details>
+            );
+          })}
+        </div>
+      )}
+    </section>
   );
 }
 
 function ChatTranscript({
   empty,
   streaming,
-  lastPrompt,
+  messages,
   model,
+  models,
   setModel,
   contextWindow,
   setContextWindow,
+  thinkingMode,
+  setThinkingMode,
+  supportsThinking,
+  error,
 }) {
   if (empty) {
     return (
@@ -346,7 +378,7 @@ function ChatTranscript({
               <span>Model</span>
               <div className="select-wrap wide">
                 <select value={model} onChange={(event) => setModel(event.target.value)}>
-                  {models.map((item) => <option key={item}>{item}</option>)}
+                  {models.length ? models.map((item) => <option key={item}>{item}</option>) : <option value="">No local models found</option>}
                 </select>
                 <CaretDown size={18} aria-hidden="true" />
               </div>
@@ -362,8 +394,23 @@ function ChatTranscript({
                 <CaretDown size={18} aria-hidden="true" />
               </div>
             </label>
+            <label className="setup-field">
+              <span>Thinking</span>
+              <div className="select-wrap wide">
+                <select
+                  value={thinkingMode}
+                  disabled={!supportsThinking}
+                  onChange={(event) => setThinkingMode(event.target.value)}
+                >
+                  {supportsThinking
+                    ? thinkingModes.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)
+                    : <option value="default">Not supported</option>}
+                </select>
+                <CaretDown size={18} aria-hidden="true" />
+              </div>
+            </label>
           </div>
-          <p className="preload-help">Context is fixed when the first message loads the model. Leave it on Ollama default to send no override.</p>
+          <p className="preload-help">Context and thinking are fixed when the first message loads the model. Ollama default sends no override.</p>
         </div>
       </div>
     );
@@ -371,34 +418,119 @@ function ChatTranscript({
 
   return (
     <div className="transcript-inner">
-      <article className="message user-message">
-        <header><strong>You</strong><time>10:42 AM</time></header>
-        <p>{lastPrompt || "Write a minimal Python HTTP server using only the standard library that responds with JSON at /api/health and logs each request."}</p>
-      </article>
-
-      <article className="message assistant-message">
-        <header><strong>Ollama</strong><time>10:42 AM</time></header>
-        <p>Below is a minimal HTTP server using only the Python standard library. It exposes <code>GET /api/health</code>, returning JSON and logs each request to stdout.</p>
-        <HighlightedCode />
-        <p>Save this as <code>server.py</code> and run it with <code>python server.py</code>. Then visit <code>http://localhost:8000/api/health</code> to get a JSON response.<span className={streaming ? "stream-cursor" : "stream-cursor stopped"} aria-hidden="true" /></p>
-      </article>
+      {messages.map((message, index) => (
+        <article className={`message ${message.role === "user" ? "user-message" : "assistant-message"}`} key={message.id || `${message.role}-${index}`}>
+          <header>
+            <strong>{message.role === "user" ? "You" : "Ollama"}</strong>
+            <time>{message.created_at ? new Date(message.created_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "Now"}</time>
+          </header>
+          {message.attachments?.length > 0 && (
+            <div className="message-images" aria-label="Attached images">
+              {message.attachments.map((attachment) => (
+                <a href={attachment.url} target="_blank" rel="noreferrer" key={attachment.id || attachment.url}>
+                  <img src={attachment.url} alt={`Attached image: ${attachment.file_name}`} loading="lazy" />
+                  <span>{attachment.file_name}</span>
+                </a>
+              ))}
+            </div>
+          )}
+          {message.role === "assistant" && <AgentActivity message={message} />}
+          {(message.content || message.role === "assistant" && message.status !== "streaming") && (
+            <p className="message-content">{message.content || (message.status === "streaming" ? "" : "No response was generated.")}
+              {message.role === "assistant" && message.status === "streaming" && <span className="stream-cursor" aria-hidden="true" />}
+            </p>
+          )}
+          {message.status === "cancelled" && <p className="message-status">Generation stopped</p>}
+          {message.status === "error" && <p className="message-status error">Generation failed</p>}
+        </article>
+      ))}
+      {error && <div className="chat-error" role="alert">{error}</div>}
     </div>
   );
 }
 
-function Composer({ streaming, setStreaming, onSend, empty, model, contextWindow }) {
+const acceptedImageTypes = new Set(["image/jpeg", "image/png", "image/webp"]);
+
+function readImage(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error(`Could not read ${file.name}`));
+    reader.onload = () => {
+      const dataURL = String(reader.result);
+      resolve({
+        id: `${file.name}-${file.lastModified}-${file.size}`,
+        name: file.name,
+        media_type: file.type,
+        size: file.size,
+        data: dataURL.slice(dataURL.indexOf(",") + 1),
+        url: dataURL,
+        file_name: file.name,
+      });
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function Composer({ streaming, onStop, onSend, empty, model, contextWindow, disabled, supportsImages, supportsTools }) {
   const [message, setMessage] = useState("");
+  const [attachments, setAttachments] = useState([]);
+  const [attachmentError, setAttachmentError] = useState("");
+  const [draggingImages, setDraggingImages] = useState(false);
   const inputRef = useRef(null);
+  const fileInputRef = useRef(null);
 
   useEffect(() => {
     if (empty) inputRef.current?.focus();
   }, [empty]);
 
+  useEffect(() => {
+    if (!supportsImages && attachments.length > 0) {
+      setAttachmentError("Choose a vision-capable model before sending these images.");
+    } else if (supportsImages) {
+      setAttachmentError("");
+    }
+  }, [supportsImages, attachments.length]);
+
   function submit() {
     const value = message.trim();
-    if (!value) return;
-    onSend(value);
+    if (disabled || (!value && attachments.length === 0) || !supportsImages && attachments.length > 0) return;
+    onSend(value, attachments);
     setMessage("");
+    setAttachments([]);
+    setAttachmentError("");
+  }
+
+  async function addImages(files) {
+    setAttachmentError("");
+    if (!supportsImages) {
+      setAttachmentError("Choose a vision-capable model to attach images.");
+      return;
+    }
+    const candidates = [...files];
+    if (attachments.length + candidates.length > 4) {
+      setAttachmentError("Attach at most 4 images per message.");
+      return;
+    }
+    if (candidates.some((file) => !acceptedImageTypes.has(file.type))) {
+      setAttachmentError("Images must be JPEG, PNG, or WebP files.");
+      return;
+    }
+    if (candidates.some((file) => file.size === 0 || file.size > 10 * 1024 * 1024)) {
+      setAttachmentError("Each image must be between 1 byte and 10 MiB.");
+      return;
+    }
+    const total = attachments.reduce((sum, item) => sum + item.size, 0)
+      + candidates.reduce((sum, file) => sum + file.size, 0);
+    if (total > 20 * 1024 * 1024) {
+      setAttachmentError("Images may total at most 20 MiB per message.");
+      return;
+    }
+    try {
+      const prepared = await Promise.all(candidates.map(readImage));
+      setAttachments((current) => [...current, ...prepared]);
+    } catch (error) {
+      setAttachmentError(error.message);
+    }
   }
 
   function onKeyDown(event) {
@@ -408,18 +540,64 @@ function Composer({ streaming, setStreaming, onSend, empty, model, contextWindow
     }
   }
 
-  const contextLimit = contextWindow === "default" ? 8192 : Number(contextWindow);
-  const usedTokens = empty ? 0 : 2048;
-  const usedPercent = empty ? 0 : Math.min(100, Math.round((usedTokens / contextLimit) * 100));
-  const contextLabel = contextWindow === "default"
-    ? `${usedTokens.toLocaleString()} / Ollama default`
-    : `${usedTokens.toLocaleString()} / ${contextLimit.toLocaleString()} tokens (${usedPercent}%)`;
+  const contextLimit = contextWindow === "default" ? null : Number(contextWindow);
+  const usedPercent = 0;
+  const contextLabel = contextLimit ? `${contextLimit.toLocaleString()} token limit` : "Ollama default";
 
   return (
     <div className="composer-wrap">
-      <div className="composer focus-within">
+      <div
+        className={`composer focus-within ${draggingImages ? "is-dragging" : ""}`}
+        onDragEnter={(event) => { event.preventDefault(); setDraggingImages(true); }}
+        onDragOver={(event) => event.preventDefault()}
+        onDragLeave={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget)) setDraggingImages(false);
+        }}
+        onDrop={(event) => {
+          event.preventDefault();
+          setDraggingImages(false);
+          addImages([...event.dataTransfer.files].filter((file) => file.type.startsWith("image/")));
+        }}
+      >
+        {!supportsTools && model && (
+          <div className="agent-model-warning" role="status">Agent mode requires a tool-capable model, even when a task may not need a tool.</div>
+        )}
+        {attachments.length > 0 && (
+          <div className="attachment-previews" aria-label="Images ready to send">
+            {attachments.map((attachment) => (
+              <div className="attachment-preview" key={attachment.id}>
+                <img src={attachment.url} alt={`Preview of ${attachment.name}`} />
+                <button
+                  type="button"
+                  aria-label={`Remove ${attachment.name}`}
+                  onClick={() => setAttachments((current) => current.filter((item) => item.id !== attachment.id))}
+                ><X size={16} /></button>
+                <span>{attachment.name}</span>
+              </div>
+            ))}
+          </div>
+        )}
+        {attachmentError && <div className="attachment-error" role="alert">{attachmentError}</div>}
         <div className="composer-row">
-          <IconButton label="Attach a file" className="attach-button">
+          <input
+            ref={fileInputRef}
+            className="sr-only"
+            type="file"
+            accept="image/jpeg,image/png,image/webp"
+            multiple
+            aria-hidden="true"
+            tabIndex="-1"
+            onChange={(event) => {
+              addImages(event.target.files);
+              event.target.value = "";
+            }}
+          />
+          <IconButton
+            label={supportsImages ? "Attach images" : "Image input requires a vision model"}
+            className="attach-button"
+            aria-disabled={!supportsImages}
+            onClick={() => supportsImages ? fileInputRef.current?.click() : setAttachmentError("Choose a vision-capable model to attach images.")}
+          >
             <Paperclip size={22} />
           </IconButton>
           <textarea
@@ -427,16 +605,23 @@ function Composer({ streaming, setStreaming, onSend, empty, model, contextWindow
             value={message}
             rows="1"
             onChange={(event) => setMessage(event.target.value)}
+            onPaste={(event) => {
+              const images = [...event.clipboardData.files].filter((file) => file.type.startsWith("image/"));
+              if (images.length) {
+                event.preventDefault();
+                addImages(images);
+              }
+            }}
             onKeyDown={onKeyDown}
-            placeholder={`Message ${model}`}
+            placeholder={supportsTools ? `Ask ${model} anything` : "Choose a tool-capable model"}
             aria-label="Message"
           />
           {streaming ? (
-            <button className="stop-button" onClick={() => setStreaming(false)}>
+            <button className="stop-button" aria-label="Stop generation" onClick={onStop}>
               <Stop size={16} weight="fill" /><span>Stop</span>
             </button>
           ) : (
-            <button className="send-button" onClick={submit} disabled={!message.trim()}>
+            <button className="send-button" aria-label="Send message" onClick={submit} disabled={(!message.trim() && attachments.length === 0) || disabled || (!supportsImages && attachments.length > 0)}>
               <ArrowUp size={19} weight="bold" /><span>Send</span>
             </button>
           )}
@@ -453,22 +638,92 @@ function Composer({ streaming, setStreaming, onSend, empty, model, contextWindow
 }
 
 export function App() {
-  const [activeId, setActiveId] = useState("python-server");
-  const [model, setModel] = useState("qwen3:8b");
+  const [activeId, setActiveId] = useState(null);
+  const [model, setModel] = useState("");
+  const [models, setModels] = useState([]);
+  const [visionModels, setVisionModels] = useState(() => new Set());
+  const [toolModels, setToolModels] = useState(() => new Set());
+  const [thinkingModels, setThinkingModels] = useState(() => new Set());
+  const [conversationItems, setConversationItems] = useState([]);
+  const [query, setQuery] = useState("");
+  const [messages, setMessages] = useState([]);
+  const [connected, setConnected] = useState(false);
+  const [chatError, setChatError] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(() => window.innerWidth >= 1200);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [systemPrompt, setSystemPrompt] = useState("");
   const [contextWindow, setContextWindow] = useState("default");
-  const [streaming, setStreaming] = useState(true);
-  const [lastPrompt, setLastPrompt] = useState("");
+  const [thinkingMode, setThinkingMode] = useState("default");
+  const [temperatureOverride, setTemperatureOverride] = useState(false);
+  const [temperature, setTemperature] = useState(0.7);
+  const [modelLoaded, setModelLoaded] = useState(false);
+  const [streaming, setStreaming] = useState(false);
+  const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
   const settingsTriggerRef = useRef(null);
   const sidebarTriggerRef = useRef(null);
+  const generationRef = useRef(null);
+  const detailRequestRef = useRef(null);
+
+  async function refreshConversations(search = query, signal) {
+    const items = await listConversations(search, signal);
+    setConversationItems(items);
+  }
+
+  useEffect(() => {
+    const controller = new AbortController();
+    Promise.allSettled([
+      listModels(controller.signal).then((items) => {
+        const names = items.map((item) => item.name);
+        const toolNames = items.filter((item) => item.capabilities?.includes("tools")).map((item) => item.name);
+        setModels(names);
+        setVisionModels(new Set(items.filter((item) => item.capabilities?.includes("vision")).map((item) => item.name)));
+        setToolModels(new Set(toolNames));
+        setThinkingModels(new Set(items.filter((item) => item.capabilities?.includes("thinking")).map((item) => item.name)));
+        setModel((current) => current || toolNames[0] || names[0] || "");
+        setConnected(true);
+      }),
+      refreshConversations("", controller.signal),
+      getHealth(controller.signal).then((health) => setConnected(health.ollama?.status === "ok")),
+    ]).then((results) => {
+      const modelResult = results[0];
+      if (modelResult.status === "rejected" && modelResult.reason?.name !== "AbortError") {
+        setConnected(false);
+        setChatError(`Could not reach Ollama: ${modelResult.reason.message}`);
+      }
+    });
+    return () => controller.abort();
+  }, []);
+
+  useEffect(() => {
+    if (!modelLoaded && model && !thinkingModels.has(model) && thinkingMode !== "default") {
+      setThinkingMode("default");
+    }
+  }, [model, modelLoaded, thinkingMode, thinkingModels]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      refreshConversations(query, controller.signal).catch((error) => {
+        if (error.name !== "AbortError") setChatError(error.message);
+      });
+    }, 250);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [query]);
+
+  useEffect(() => {
+    function onResize() { setViewportWidth(window.innerWidth); }
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
 
   useEffect(() => {
     function onKeyDown(event) {
       if (event.key !== "Escape") return;
-      if (settingsOpen && window.innerWidth < 1200) {
+      if (settingsOpen && viewportWidth < 1200) {
         setSettingsOpen(false);
         settingsTriggerRef.current?.focus();
       } else if (sidebarOpen) {
@@ -480,11 +735,11 @@ export function App() {
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [settingsOpen, sidebarOpen]);
+  }, [settingsOpen, sidebarOpen, viewportWidth]);
 
   useEffect(() => {
-    const isSettingsOverlay = settingsOpen && window.innerWidth < 1200;
-    const isSidebarOverlay = sidebarOpen && window.innerWidth <= 900;
+    const isSettingsOverlay = settingsOpen && viewportWidth < 1200;
+    const isSidebarOverlay = sidebarOpen && viewportWidth <= 900;
     const overlay = isSettingsOverlay
       ? document.querySelector(".settings-panel")
       : isSidebarOverlay
@@ -511,7 +766,7 @@ export function App() {
 
     document.addEventListener("keydown", trapFocus);
     return () => document.removeEventListener("keydown", trapFocus);
-  }, [settingsOpen, sidebarOpen]);
+  }, [settingsOpen, sidebarOpen, viewportWidth]);
 
   function closeSidebar() {
     setSidebarOpen(false);
@@ -523,34 +778,148 @@ export function App() {
     window.setTimeout(() => settingsTriggerRef.current?.focus(), 0);
   }
 
-  function chooseConversation(id) {
-    setActiveId(id);
-    setLastPrompt("");
-    setStreaming(id === "python-server");
+  async function chooseConversation(id) {
+    generationRef.current?.abort();
+    detailRequestRef.current?.abort();
+    const controller = new AbortController();
+    detailRequestRef.current = controller;
+    setChatError("");
     setSidebarOpen(false);
+    try {
+      const payload = await getConversation(id, controller.signal);
+      setActiveId(payload.conversation.id);
+      setModel(payload.conversation.model);
+      setSystemPrompt(payload.conversation.system_prompt || "");
+      setContextWindow(payload.conversation.context_window == null ? "default" : String(payload.conversation.context_window));
+      setThinkingMode(payload.conversation.thinking_enabled == null
+        ? "default"
+        : payload.conversation.thinking_enabled ? "enabled" : "disabled");
+      setTemperatureOverride(payload.conversation.temperature != null);
+      setTemperature(payload.conversation.temperature ?? 0.7);
+      setModelLoaded(payload.conversation.message_count > 0);
+      setMessages(payload.messages);
+    } catch (error) {
+      if (error.name !== "AbortError") setChatError(error.message);
+    }
   }
 
   function newChat() {
+    generationRef.current?.abort();
     setActiveId(null);
-    setLastPrompt("");
+    setMessages([]);
     setStreaming(false);
+    setModelLoaded(false);
+    setSystemPrompt("");
     setContextWindow("default");
+    setThinkingMode("default");
+    setTemperatureOverride(false);
+    setTemperature(0.7);
+    setChatError("");
     setSidebarOpen(false);
   }
 
-  function sendMessage(value) {
-    setActiveId("draft");
-    setLastPrompt(value);
+  async function sendMessage(value, images = []) {
+    if (!model || streaming) return;
+    setChatError("");
+    const controller = new AbortController();
+    generationRef.current = controller;
     setStreaming(true);
+    setModelLoaded(true);
+    let conversationId = activeId;
+    try {
+      if (!conversationId) {
+        const conversation = await createConversation({
+          title: value.trim().replace(/\s+/g, " ").slice(0, 60) || `Image: ${images[0]?.name || "conversation"}`,
+          model,
+          system_prompt: systemPrompt,
+          context_window: contextWindow === "default" ? null : Number(contextWindow),
+          thinking_enabled: thinkingMode === "default" ? null : thinkingMode === "enabled",
+          temperature: temperatureOverride ? temperature : null,
+        }, controller.signal);
+        conversationId = conversation.id;
+        setActiveId(conversationId);
+      }
+
+      const pendingUser = {
+        id: "pending-user",
+        role: "user",
+        content: value,
+        status: "complete",
+        attachments: images.map((image) => ({ id: image.id, file_name: image.name, url: image.url, media_type: image.media_type, size: image.size })),
+      };
+      const pendingAssistant = { id: "pending-assistant", role: "assistant", content: "", thinking: "", status: "streaming", agent_phase: "starting", agent_turn: 1 };
+      setMessages((current) => [...current, pendingUser, pendingAssistant]);
+
+      await streamMessage(conversationId, value, {
+        signal: controller.signal,
+        images: images.map(({ name, media_type, data }) => ({ name, media_type, data })),
+        onEvent(event) {
+          if (event.type === "started") {
+            setMessages((current) => current.map((message) => {
+              if (message.id === "pending-user") return event.user_message;
+              if (message.id === "pending-assistant") return { ...event.assistant_message, agent_phase: "thinking", agent_turn: 1 };
+              return message;
+            }));
+          } else if (event.type === "turn.started") {
+            setMessages((current) => current.map((message, index) =>
+              index === current.length - 1 ? { ...message, agent_phase: "thinking", agent_turn: event.turn } : message));
+          } else if (event.type === "thinking.delta") {
+            setMessages((current) => current.map((message, index) =>
+              index === current.length - 1
+                ? { ...message, thinking: (message.thinking || "") + event.content, agent_phase: "thinking", agent_turn: event.turn }
+                : message));
+          } else if (event.type === "delta") {
+            setMessages((current) => current.map((message, index) =>
+              index === current.length - 1 ? { ...message, content: message.content + event.content, agent_phase: "responding", agent_turn: event.turn || message.agent_turn } : message));
+          } else if (event.type === "tool.started") {
+            setMessages((current) => current.map((message, index) =>
+              index === current.length - 1
+                ? { ...message, agent_steps: [...(message.agent_steps || []), event.step], agent_phase: "shell", agent_turn: event.turn }
+                : message));
+          } else if (event.type === "tool.done") {
+            setMessages((current) => current.map((message, index) =>
+              index === current.length - 1
+                ? { ...message, agent_steps: (message.agent_steps || []).map((step) => step.id === event.step.id ? event.step : step), agent_phase: "reviewing", agent_turn: event.turn }
+                : message));
+          } else if (event.type === "done") {
+            setMessages((current) => current.map((message, index) =>
+              index === current.length - 1 ? { ...message, status: "complete", metadata: event.metadata, agent_phase: "finished", agent_turn: event.metadata?.agent_turns || message.agent_turn } : message));
+          } else if (event.type === "error") {
+            throw new Error(event.message);
+          }
+        },
+      });
+    } catch (error) {
+      const cancelled = error.name === "AbortError";
+      setMessages((current) => current.map((message, index) =>
+        index === current.length - 1 && message.role === "assistant"
+          ? {
+              ...message,
+              status: cancelled ? "cancelled" : "error",
+              agent_phase: cancelled ? "stopped" : "error",
+              agent_steps: (message.agent_steps || []).map((step) =>
+                step.status === "running" ? { ...step, status: cancelled ? "cancelled" : "error" } : step),
+            }
+          : message));
+      if (!cancelled) setChatError(error.message);
+    } finally {
+      setStreaming(false);
+      generationRef.current = null;
+      refreshConversations(query).catch(() => {});
+    }
   }
 
-  const overlaySettings = settingsOpen && window.innerWidth < 1200;
+  const overlaySettings = settingsOpen && viewportWidth < 1200;
+  const sidebarVisible = viewportWidth > 900 || sidebarOpen;
 
   return (
     <div className={`app-shell ${settingsOpen ? "settings-is-open" : ""}`}>
-      <div className={`sidebar-layer ${sidebarOpen ? "open" : ""}`}>
+      <div className={`sidebar-layer ${sidebarOpen ? "open" : ""}`} aria-hidden={!sidebarVisible} inert={!sidebarVisible ? "" : undefined}>
         <ConversationSidebar
           activeId={activeId}
+          conversations={conversationItems}
+          query={query}
+          onQuery={setQuery}
           onSelect={chooseConversation}
           onNew={newChat}
           onClose={closeSidebar}
@@ -568,16 +937,19 @@ export function App() {
             >
               <SidebarSimple size={23} />
             </IconButton>
-            <div className="terminal-button" aria-hidden="true"><TerminalWindow size={24} /></div>
+            <div className="terminal-button" aria-hidden="true"><ChatCircle size={24} /></div>
             <div className="select-wrap model-select">
-              <select aria-label="Active model" value={model} onChange={(event) => setModel(event.target.value)}>
-                {models.map((item) => <option key={item}>{item}</option>)}
+              <select aria-label="Active model" value={model} disabled={modelLoaded} onChange={(event) => setModel(event.target.value)}>
+                {models.length ? models.map((item) => <option key={item}>{item}</option>) : <option value="">No models</option>}
               </select>
               <CaretDown size={17} aria-hidden="true" />
             </div>
           </div>
           <div className="topbar-right">
-            <div className="connected-status"><span /> <span className="connected-text">Connected</span></div>
+            <div className={`agent-status ${streaming ? "working" : ""}`} role="status" aria-live="polite">
+              {streaming ? <CircleNotch size={16} /> : <ChatCircle size={16} />}<span>{streaming ? "Agent working" : "Agent ready"}</span>
+            </div>
+            <div className={`connected-status ${connected ? "" : "disconnected"}`}><span /> <span className="connected-text">{connected ? "Connected" : "Ollama unavailable"}</span></div>
             <div className="menu-wrap">
               <IconButton ref={settingsTriggerRef} label="Conversation menu" onClick={() => setMenuOpen((value) => !value)}>
                 <DotsThreeVertical size={23} weight="bold" />
@@ -599,25 +971,34 @@ export function App() {
           <ChatTranscript
             empty={!activeId}
             streaming={streaming}
-            lastPrompt={lastPrompt}
+            messages={messages}
             model={model}
+            models={models}
             setModel={setModel}
             contextWindow={contextWindow}
             setContextWindow={setContextWindow}
+            thinkingMode={thinkingMode}
+            setThinkingMode={setThinkingMode}
+            supportsThinking={thinkingModels.has(model)}
+            error={chatError}
           />
         </section>
         <Composer
           streaming={streaming}
-          setStreaming={setStreaming}
+          onStop={() => generationRef.current?.abort()}
           onSend={sendMessage}
           empty={!activeId}
           model={model}
           contextWindow={contextWindow}
+          disabled={!model || !toolModels.has(model)}
+          supportsImages={visionModels.has(model)}
+          supportsTools={toolModels.has(model)}
         />
       </main>
 
-      <div className={`settings-layer ${settingsOpen ? "open" : ""}`}>
+      <div className={`settings-layer ${settingsOpen ? "open" : ""}`} aria-hidden={!settingsOpen} inert={!settingsOpen ? "" : undefined}>
         <ModelSettings
+          models={models}
           model={model}
           setModel={setModel}
           onClose={closeSettings}
@@ -625,7 +1006,14 @@ export function App() {
           setSystemPrompt={setSystemPrompt}
           contextWindow={contextWindow}
           setContextWindow={setContextWindow}
-          modelLoaded={Boolean(activeId)}
+          thinkingMode={thinkingMode}
+          setThinkingMode={setThinkingMode}
+          supportsThinking={thinkingModels.has(model)}
+          modelLoaded={modelLoaded}
+          temperatureOverride={temperatureOverride}
+          setTemperatureOverride={setTemperatureOverride}
+          temperature={temperature}
+          setTemperature={setTemperature}
         />
       </div>
 
@@ -633,7 +1021,7 @@ export function App() {
         <button
           className="drawer-backdrop"
           aria-label="Close open panel"
-          onClick={() => { if (sidebarOpen) closeSidebar(); if (window.innerWidth < 1200 && settingsOpen) closeSettings(); }}
+          onClick={() => { if (sidebarOpen) closeSidebar(); if (viewportWidth < 1200 && settingsOpen) closeSettings(); }}
         />
       )}
     </div>

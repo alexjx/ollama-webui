@@ -14,5 +14,9 @@ When implementing from a selected generated mock, treat that image as the source
 - At narrower widths, conversations and model settings become overlay drawers; the chat remains the persistent surface.
 - Untouched model parameters must visibly communicate that Ollama's defaults are inherited.
 - Context window is chosen during new-chat setup, before the first message loads the model. It defaults to Ollama's inherited value and becomes read-only once that conversation's model is loaded.
+- Thinking is visible in new-chat setup as Ollama default, On, or Off for capable models. It defaults to inherited Ollama behavior, shows unsupported models clearly, and becomes read-only once the conversation starts.
+- Agent mode is the primary interaction: use compact expandable shell traces, keep Stop prominent while work is active, and avoid making the transcript look like a full terminal emulator.
+- Present the product as a general-purpose agent. Shell and workspace access are optional capabilities, not the default task or the primary visual identity.
+- Agent progress uses observable phases rather than an invented percentage. Stream thinking in an expandable, visually secondary activity area above the final answer; retain chronological tool steps and clear finished/stopped states.
 
 Build app UI in `src/`. Keep `.openai/hosting.json`, `worker/index.js`, `scripts/prepare-sites-build.mjs`, and `tests/sites-worker.test.mjs` intact so the same local prototype can be handed to Sites. Before a Sites handoff, run `npm run build` and `npm run test:sites`; the build must leave `dist/client/index.html`, `dist/server/index.js`, and `dist/.openai/hosting.json`.

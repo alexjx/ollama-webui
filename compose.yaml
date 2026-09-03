@@ -1,0 +1,39 @@
+services:
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - ollama-data:/root/.ollama
+
+  webui:
+    build: .
+    init: true
+    restart: unless-stopped
+    depends_on:
+      - ollama
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434
+      DATABASE_PATH: /data/ollama-webui.db
+      AGENT_WORKSPACE: /workspace
+      AGENT_MAX_TURNS: ${AGENT_MAX_TURNS:-200}
+      AGENT_INLINE_INPUT_BYTES: ${AGENT_INLINE_INPUT_BYTES:-16384}
+      AGENT_TOOL_FEEDBACK_BYTES: ${AGENT_TOOL_FEEDBACK_BYTES:-8192}
+      SHELL_TIMEOUT_SECONDS: ${SHELL_TIMEOUT_SECONDS:-600}
+      SHELL_MAX_OUTPUT_BYTES: ${SHELL_MAX_OUTPUT_BYTES:-65536}
+    ports:
+      - "8080:8080"
+    volumes:
+      - webui-data:/data
+      - ${AGENT_WORKSPACE_PATH:-./workspace}:/workspace
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  ollama-data:
+  webui-data:
