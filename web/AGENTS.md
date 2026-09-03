@@ -18,5 +18,8 @@ When implementing from a selected generated mock, treat that image as the source
 - Agent mode is the primary interaction: use compact expandable shell traces, keep Stop prominent while work is active, and avoid making the transcript look like a full terminal emulator.
 - Present the product as a general-purpose agent. Shell and workspace access are optional capabilities, not the default task or the primary visual identity.
 - Agent progress uses observable phases rather than an invented percentage. Stream thinking in an expandable, visually secondary activity area above the final answer; retain chronological tool steps and clear finished/stopped states.
+- Conversation rename uses a focused modal with preselected current text, Save/Cancel/Escape behavior, inline errors, and focus restoration to the conversation menu.
+- Conversation deletion requires a focused confirmation modal with the affected title, initial focus on Cancel, explicit irreversible wording, inline errors, and one restrained danger-colored action.
+- Conversation rename and deletion belong to each history row and must work without opening that conversation first; inactive-row actions must not disturb the active chat.
 
 Build app UI in `src/`. Keep `.openai/hosting.json`, `worker/index.js`, `scripts/prepare-sites-build.mjs`, and `tests/sites-worker.test.mjs` intact so the same local prototype can be handed to Sites. Before a Sites handoff, run `npm run build` and `npm run test:sites`; the build must leave `dist/client/index.html`, `dist/server/index.js`, and `dist/.openai/hosting.json`.

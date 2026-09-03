@@ -44,6 +44,22 @@ export function createConversation(input, signal) {
   });
 }
 
+export function renameConversation(id, title, signal) {
+  return request(`/api/conversations/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title }),
+    signal,
+  });
+}
+
+export function deleteConversation(id, signal) {
+  return request(`/api/conversations/${id}`, {
+    method: "DELETE",
+    signal,
+  });
+}
+
 export async function streamMessage(id, content, { signal, onEvent, images = [] }) {
   const response = await fetch(`/api/conversations/${id}/messages`, {
     method: "POST",

@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   createConversation,
+  deleteConversation,
   getConversation,
   getHealth,
   listConversations,
   listModels,
+  renameConversation,
   streamMessage,
 } from "./api";
 import {
@@ -25,6 +27,7 @@ import {
   SlidersHorizontal,
   Stop,
   TerminalWindow,
+  Trash,
   X,
 } from "@phosphor-icons/react";
 
@@ -73,8 +76,9 @@ function groupConversations(items) {
   return [...groups].map(([label, groupedItems]) => ({ label, items: groupedItems }));
 }
 
-function ConversationSidebar({ activeId, conversations, query, onQuery, onSelect, onNew, onClose }) {
+function ConversationSidebar({ activeId, conversations, query, streaming, onQuery, onSelect, onNew, onRename, onDelete, onClose }) {
   const filteredGroups = useMemo(() => groupConversations(conversations), [conversations]);
+  const [openActionsId, setOpenActionsId] = useState(null);
 
   return (
     <aside className="conversation-sidebar" aria-label="Conversations">
@@ -108,16 +112,62 @@ function ConversationSidebar({ activeId, conversations, query, onQuery, onSelect
             <section className="conversation-group" key={group.label}>
               <h2>{group.label}</h2>
               {group.items.map((item) => (
-                <button
+                <div
                   key={item.id}
-                  className={`conversation-row ${activeId === item.id ? "active" : ""}`}
-                  aria-current={activeId === item.id ? "page" : undefined}
-                  onClick={() => onSelect(item.id)}
+                  className={`conversation-entry ${activeId === item.id ? "active" : ""}`}
+                  onBlur={(event) => {
+                    if (!event.currentTarget.contains(event.relatedTarget)) setOpenActionsId(null);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape" && openActionsId === item.id) {
+                      setOpenActionsId(null);
+                      event.currentTarget.querySelector(".conversation-actions-trigger")?.focus();
+                    }
+                  }}
                 >
-                  <ChatCircle size={18} />
-                  <span className="conversation-title">{item.title}</span>
-                  <time>{item.time}</time>
-                </button>
+                  <button
+                    className="conversation-row"
+                    aria-current={activeId === item.id ? "page" : undefined}
+                    onClick={() => onSelect(item.id)}
+                  >
+                    <ChatCircle size={18} />
+                    <span className="conversation-title">{item.title}</span>
+                    <time>{item.time}</time>
+                  </button>
+                  <div className="conversation-actions-wrap">
+                    <IconButton
+                      className="conversation-actions-trigger"
+                      label={`Actions for ${item.title}`}
+                      aria-haspopup="menu"
+                      aria-expanded={openActionsId === item.id}
+                      onClick={() => setOpenActionsId((current) => current === item.id ? null : item.id)}
+                    >
+                      <DotsThreeVertical size={18} weight="bold" />
+                    </IconButton>
+                    {openActionsId === item.id && (
+                      <div className="conversation-actions-menu" role="menu">
+                        <button
+                          role="menuitem"
+                          onClick={(event) => {
+                            const trigger = event.currentTarget.closest(".conversation-entry")?.querySelector(".conversation-actions-trigger");
+                            setOpenActionsId(null);
+                            onRename(item, trigger);
+                          }}
+                        ><NotePencil size={17} />Rename</button>
+                        <button
+                          className="danger-menu-item"
+                          role="menuitem"
+                          disabled={streaming && activeId === item.id}
+                          onClick={(event) => {
+                            const trigger = event.currentTarget.closest(".conversation-entry")?.querySelector(".conversation-actions-trigger");
+                            setOpenActionsId(null);
+                            onDelete(item, trigger);
+                          }}
+                        ><Trash size={17} />Delete</button>
+                      </div>
+                    )}
+                  </div>
+                </div>
               ))}
             </section>
           ))
@@ -651,7 +701,13 @@ export function App() {
   const [chatError, setChatError] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(() => window.innerWidth >= 1200);
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [menuOpen, setMenuOpen] = useState(false);
+  const [renameTarget, setRenameTarget] = useState(null);
+  const [renameTitle, setRenameTitle] = useState("");
+  const [renameError, setRenameError] = useState("");
+  const [renaming, setRenaming] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [deleteError, setDeleteError] = useState("");
+  const [deleting, setDeleting] = useState(false);
   const [systemPrompt, setSystemPrompt] = useState("");
   const [contextWindow, setContextWindow] = useState("default");
   const [thinkingMode, setThinkingMode] = useState("default");
@@ -664,6 +720,11 @@ export function App() {
   const sidebarTriggerRef = useRef(null);
   const generationRef = useRef(null);
   const detailRequestRef = useRef(null);
+  const renameDialogRef = useRef(null);
+  const renameInputRef = useRef(null);
+  const deleteDialogRef = useRef(null);
+  const deleteCancelRef = useRef(null);
+  const actionReturnRef = useRef(null);
 
   async function refreshConversations(search = query, signal) {
     const items = await listConversations(search, signal);
@@ -721,21 +782,46 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    const dialog = renameDialogRef.current;
+    if (!dialog) return;
+    if (renameTarget && !dialog.open) {
+      dialog.showModal();
+      window.setTimeout(() => {
+        renameInputRef.current?.focus();
+        renameInputRef.current?.select();
+      }, 0);
+    } else if (!renameTarget && dialog.open) {
+      dialog.close();
+    }
+  }, [renameTarget]);
+
+  useEffect(() => {
+    const dialog = deleteDialogRef.current;
+    if (!dialog) return;
+    if (deleteTarget && !dialog.open) {
+      dialog.showModal();
+      window.setTimeout(() => deleteCancelRef.current?.focus(), 0);
+    } else if (!deleteTarget && dialog.open) {
+      dialog.close();
+    }
+  }, [deleteTarget]);
+
+  useEffect(() => {
     function onKeyDown(event) {
       if (event.key !== "Escape") return;
-      if (settingsOpen && viewportWidth < 1200) {
+      if (renameTarget || deleteTarget) {
+        return;
+      } else if (settingsOpen && viewportWidth < 1200) {
         setSettingsOpen(false);
         settingsTriggerRef.current?.focus();
       } else if (sidebarOpen) {
         setSidebarOpen(false);
         sidebarTriggerRef.current?.focus();
-      } else {
-        setMenuOpen(false);
       }
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [settingsOpen, sidebarOpen, viewportWidth]);
+  }, [renameTarget, deleteTarget, settingsOpen, sidebarOpen, viewportWidth]);
 
   useEffect(() => {
     const isSettingsOverlay = settingsOpen && viewportWidth < 1200;
@@ -803,7 +889,7 @@ export function App() {
     }
   }
 
-  function newChat() {
+  function resetConversation(closeNavigation = true) {
     generationRef.current?.abort();
     setActiveId(null);
     setMessages([]);
@@ -815,7 +901,89 @@ export function App() {
     setTemperatureOverride(false);
     setTemperature(0.7);
     setChatError("");
-    setSidebarOpen(false);
+    if (closeNavigation) setSidebarOpen(false);
+  }
+
+  function newChat() {
+    resetConversation(true);
+  }
+
+  function restoreActionFocus() {
+    window.setTimeout(() => {
+      const trigger = actionReturnRef.current;
+      if (trigger?.isConnected) {
+        trigger.focus();
+      } else {
+        document.querySelector(".new-chat-button")?.focus();
+      }
+    }, 0);
+  }
+
+  function openRename(conversation, trigger) {
+    actionReturnRef.current = trigger;
+    setRenameTitle(conversation.title);
+    setRenameError("");
+    setRenameTarget(conversation);
+  }
+
+  function closeRename() {
+    if (renaming) return;
+    setRenameTarget(null);
+    setRenameError("");
+  }
+
+  async function saveRename(event) {
+    event.preventDefault();
+    const title = renameTitle.trim();
+    if (!renameTarget) return;
+    if (!title) {
+      setRenameError("Enter a conversation name.");
+      renameInputRef.current?.focus();
+      return;
+    }
+    setRenaming(true);
+    setRenameError("");
+    try {
+      const updated = await renameConversation(renameTarget.id, title);
+      setConversationItems((items) => items.map((item) => item.id === renameTarget.id ? { ...item, title: updated.title } : item));
+      setRenameTarget(null);
+      await refreshConversations(query);
+    } catch (error) {
+      setRenameError(error.message);
+    } finally {
+      setRenaming(false);
+    }
+  }
+
+  function openDelete(conversation, trigger) {
+    if (streaming && activeId === conversation.id) return;
+    actionReturnRef.current = trigger;
+    setDeleteError("");
+    setDeleteTarget(conversation);
+  }
+
+  function closeDelete() {
+    if (deleting) return;
+    setDeleteTarget(null);
+    setDeleteError("");
+  }
+
+  async function confirmDelete() {
+    if (!deleteTarget || deleting) return;
+    const deletedId = deleteTarget.id;
+    setDeleting(true);
+    setDeleteError("");
+    try {
+      await deleteConversation(deletedId);
+      setConversationItems((items) => items.filter((item) => item.id !== deletedId));
+      setDeleteTarget(null);
+      if (deletedId === activeId) resetConversation(false);
+      await refreshConversations(query);
+    } catch (error) {
+      setDeleteError(error.message);
+    } finally {
+      setDeleting(false);
+    }
   }
 
   async function sendMessage(value, images = []) {
@@ -919,9 +1087,12 @@ export function App() {
           activeId={activeId}
           conversations={conversationItems}
           query={query}
+          streaming={streaming}
           onQuery={setQuery}
           onSelect={chooseConversation}
           onNew={newChat}
+          onRename={openRename}
+          onDelete={openDelete}
           onClose={closeSidebar}
         />
       </div>
@@ -950,19 +1121,10 @@ export function App() {
               {streaming ? <CircleNotch size={16} /> : <ChatCircle size={16} />}<span>{streaming ? "Agent working" : "Agent ready"}</span>
             </div>
             <div className={`connected-status ${connected ? "" : "disconnected"}`}><span /> <span className="connected-text">{connected ? "Connected" : "Ollama unavailable"}</span></div>
-            <div className="menu-wrap">
-              <IconButton ref={settingsTriggerRef} label="Conversation menu" onClick={() => setMenuOpen((value) => !value)}>
-                <DotsThreeVertical size={23} weight="bold" />
+            <div>
+              <IconButton ref={settingsTriggerRef} label="Open model settings" onClick={() => setSettingsOpen(true)}>
+                <SlidersHorizontal size={22} />
               </IconButton>
-              {menuOpen && (
-                <div className="overflow-menu" role="menu">
-                  <button
-                    role="menuitem"
-                    onClick={() => { setSettingsOpen(true); setMenuOpen(false); }}
-                  ><SlidersHorizontal size={19} />Model settings</button>
-                  <button role="menuitem"><NotePencil size={19} />Rename chat</button>
-                </div>
-              )}
             </div>
           </div>
         </header>
@@ -1024,6 +1186,66 @@ export function App() {
           onClick={() => { if (sidebarOpen) closeSidebar(); if (viewportWidth < 1200 && settingsOpen) closeSettings(); }}
         />
       )}
+
+      <dialog
+        className="rename-dialog"
+        ref={renameDialogRef}
+        aria-labelledby="rename-title"
+        onCancel={(event) => { event.preventDefault(); closeRename(); }}
+        onClose={restoreActionFocus}
+      >
+        <form onSubmit={saveRename}>
+          <header>
+            <div>
+              <h2 id="rename-title">Rename conversation</h2>
+              <p>Use a short name that will be easy to find later.</p>
+            </div>
+            <IconButton label="Cancel rename" type="button" onClick={closeRename} disabled={renaming}>
+              <X size={22} />
+            </IconButton>
+          </header>
+          <label htmlFor="conversation-title">Conversation name</label>
+          <input
+            id="conversation-title"
+            ref={renameInputRef}
+            value={renameTitle}
+            onChange={(event) => { setRenameTitle(event.target.value); if (renameError) setRenameError(""); }}
+            autoComplete="off"
+            disabled={renaming}
+          />
+          {renameError && <p className="rename-error" role="alert">{renameError}</p>}
+          <footer>
+            <button className="rename-cancel" type="button" onClick={closeRename} disabled={renaming}>Cancel</button>
+            <button className="rename-save" type="submit" disabled={renaming || !renameTitle.trim()}>{renaming ? "Saving…" : "Save name"}</button>
+          </footer>
+        </form>
+      </dialog>
+
+      <dialog
+        className="delete-dialog"
+        ref={deleteDialogRef}
+        aria-labelledby="delete-title"
+        aria-describedby="delete-description"
+        onCancel={(event) => { event.preventDefault(); closeDelete(); }}
+        onClose={restoreActionFocus}
+      >
+        <div>
+          <header>
+            <span className="delete-dialog-icon" aria-hidden="true"><Trash size={22} /></span>
+            <div>
+              <h2 id="delete-title">Delete conversation?</h2>
+              <p id="delete-description">
+                <strong>{deleteTarget?.title || "This conversation"}</strong> and all of its messages and agent activity will be permanently removed.
+              </p>
+            </div>
+          </header>
+          {deleteError && <p className="delete-error" role="alert">{deleteError}</p>}
+          <footer>
+            <button ref={deleteCancelRef} className="delete-cancel" type="button" onClick={closeDelete} disabled={deleting}>Cancel</button>
+            <button className="delete-confirm" type="button" onClick={confirmDelete} disabled={deleting}>{deleting ? "Deleting…" : "Delete conversation"}</button>
+          </footer>
+        </div>
+      </dialog>
     </div>
   );
 }

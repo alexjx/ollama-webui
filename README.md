@@ -102,5 +102,5 @@ responses with Stop, durable history and shell traces, title/message search, and
 persisted image input for vision-capable models. Images may be pasted, dropped,
 or selected; JPEG, PNG, and WebP are accepted with limits of four images, 10 MiB
 each, and 20 MiB total per message.
-Rename/delete controls, Markdown rendering, import/export, and advanced
-generation parameters remain planned.
+Conversation rename and deletion are available from each row in the history list.
+Markdown rendering, import/export, and advanced generation parameters remain planned.
