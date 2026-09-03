@@ -689,6 +689,7 @@ function Composer({ streaming, onStop, onSend, empty, model, contextWindow, disa
 
 export function App() {
   const [activeId, setActiveId] = useState(null);
+  const [activeTitle, setActiveTitle] = useState("");
   const [model, setModel] = useState("");
   const [models, setModels] = useState([]);
   const [visionModels, setVisionModels] = useState(() => new Set());
@@ -701,6 +702,7 @@ export function App() {
   const [chatError, setChatError] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(() => window.innerWidth >= 1200);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
   const [renameTarget, setRenameTarget] = useState(null);
   const [renameTitle, setRenameTitle] = useState("");
   const [renameError, setRenameError] = useState("");
@@ -817,6 +819,8 @@ export function App() {
       } else if (sidebarOpen) {
         setSidebarOpen(false);
         sidebarTriggerRef.current?.focus();
+      } else {
+        setMenuOpen(false);
       }
     }
     window.addEventListener("keydown", onKeyDown);
@@ -874,6 +878,7 @@ export function App() {
     try {
       const payload = await getConversation(id, controller.signal);
       setActiveId(payload.conversation.id);
+      setActiveTitle(payload.conversation.title);
       setModel(payload.conversation.model);
       setSystemPrompt(payload.conversation.system_prompt || "");
       setContextWindow(payload.conversation.context_window == null ? "default" : String(payload.conversation.context_window));
@@ -892,6 +897,7 @@ export function App() {
   function resetConversation(closeNavigation = true) {
     generationRef.current?.abort();
     setActiveId(null);
+    setActiveTitle("");
     setMessages([]);
     setStreaming(false);
     setModelLoaded(false);
@@ -945,6 +951,7 @@ export function App() {
     setRenameError("");
     try {
       const updated = await renameConversation(renameTarget.id, title);
+      if (renameTarget.id === activeId) setActiveTitle(updated.title);
       setConversationItems((items) => items.map((item) => item.id === renameTarget.id ? { ...item, title: updated.title } : item));
       setRenameTarget(null);
       await refreshConversations(query);
@@ -1006,6 +1013,7 @@ export function App() {
         }, controller.signal);
         conversationId = conversation.id;
         setActiveId(conversationId);
+        setActiveTitle(conversation.title);
       }
 
       const pendingUser = {
@@ -1121,10 +1129,46 @@ export function App() {
               {streaming ? <CircleNotch size={16} /> : <ChatCircle size={16} />}<span>{streaming ? "Agent working" : "Agent ready"}</span>
             </div>
             <div className={`connected-status ${connected ? "" : "disconnected"}`}><span /> <span className="connected-text">{connected ? "Connected" : "Ollama unavailable"}</span></div>
-            <div>
-              <IconButton ref={settingsTriggerRef} label="Open model settings" onClick={() => setSettingsOpen(true)}>
-                <SlidersHorizontal size={22} />
+            <div
+              className="menu-wrap"
+              onBlur={(event) => {
+                if (!event.currentTarget.contains(event.relatedTarget)) setMenuOpen(false);
+              }}
+            >
+              <IconButton
+                ref={settingsTriggerRef}
+                label="Conversation menu"
+                aria-haspopup="menu"
+                aria-expanded={menuOpen}
+                onClick={() => setMenuOpen((value) => !value)}
+              >
+                <DotsThreeVertical size={23} weight="bold" />
               </IconButton>
+              {menuOpen && (
+                <div className="overflow-menu" role="menu">
+                  <button
+                    role="menuitem"
+                    onClick={() => { setSettingsOpen(true); setMenuOpen(false); }}
+                  ><SlidersHorizontal size={19} />Model settings</button>
+                  <button
+                    role="menuitem"
+                    disabled={!activeId}
+                    onClick={() => {
+                      setMenuOpen(false);
+                      openRename({ id: activeId, title: activeTitle }, settingsTriggerRef.current);
+                    }}
+                  ><NotePencil size={19} />Rename chat</button>
+                  <button
+                    className="danger-menu-item"
+                    role="menuitem"
+                    disabled={!activeId || streaming}
+                    onClick={() => {
+                      setMenuOpen(false);
+                      openDelete({ id: activeId, title: activeTitle }, settingsTriggerRef.current);
+                    }}
+                  ><Trash size={19} />Delete chat</button>
+                </div>
+              )}
             </div>
           </div>
         </header>
