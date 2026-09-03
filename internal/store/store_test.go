@@ -198,3 +198,43 @@ func TestAgentStepsPersistWithAssistantMessage(t *testing.T) {
 		t.Fatalf("thinking did not round trip: %#v", messages[0])
 	}
 }
+
+func TestStatsAndClearConversations(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	conversation, err := database.CreateConversation(ctx, CreateConversationParams{Title: "Clear me", Model: "vision"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := database.AddMessageWithAttachments(ctx, conversation.ID, "user", "image", "complete", []NewAttachment{{
+		FileName: "pixel.png", MediaType: "image/png", Data: []byte{1, 2, 3},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.BeginAgentStep(ctx, message.ID, 1, "shell", `{"command":"pwd"}`); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := database.Stats(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Conversations != 1 || stats.Messages != 1 || stats.Attachments != 1 || stats.AgentSteps != 1 || stats.AttachmentBytes != 3 || stats.DatabaseBytes <= 0 {
+		t.Fatalf("unexpected populated stats: %#v", stats)
+	}
+	deleted, err := database.ClearConversations(ctx)
+	if err != nil || deleted != 1 {
+		t.Fatalf("clear returned %d, %v", deleted, err)
+	}
+	stats, err = database.Stats(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Conversations != 0 || stats.Messages != 0 || stats.Attachments != 0 || stats.AgentSteps != 0 || stats.AttachmentBytes != 0 {
+		t.Fatalf("clear did not cascade: %#v", stats)
+	}
+}

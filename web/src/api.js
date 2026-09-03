@@ -23,6 +23,10 @@ export async function listModels(signal) {
   return payload.models || [];
 }
 
+export function getSettings(signal) {
+  return request("/api/settings", { signal });
+}
+
 export async function listConversations(query = "", signal) {
   const params = new URLSearchParams();
   if (query.trim()) params.set("q", query.trim());
@@ -56,6 +60,15 @@ export function renameConversation(id, title, signal) {
 export function deleteConversation(id, signal) {
   return request(`/api/conversations/${id}`, {
     method: "DELETE",
+    signal,
+  });
+}
+
+export function clearConversations(signal) {
+  return request("/api/conversations", {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ confirmation: "DELETE" }),
     signal,
   });
 }

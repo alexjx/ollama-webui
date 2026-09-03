@@ -67,6 +67,15 @@ saved with the conversation and sent on every turn. The Thinking setting follows
 the same inherited-default behavior and is also fixed once a chat starts. Explicit
 effort levels are model-dependent; **Ollama default** is the safest portable choice.
 
+The sidebar **Settings** entry shows application-wide runtime and storage status,
+including the effective Agent limits configured by Compose and local SQLite counts.
+These startup values are read-only in the WebUI: update the environment variables
+below and recreate the WebUI container to change them. Per-chat model controls live
+under **Conversation settings** in the composer or conversation menu. System settings
+also provides a guarded **Clear all** action; it requires typing `DELETE`, refuses to
+run while a response is active, and removes conversations and their dependent data
+in one database transaction.
+
 ## Local development
 
 Build the frontend, then run the Go service:
@@ -112,4 +121,5 @@ or selected; JPEG, PNG, and WebP are accepted with limits of four images, 10 MiB
 each, and 20 MiB total per message. Completed responses include expandable token,
 timing, and generation-rate details.
 Conversation rename and deletion are available from each row in the history list.
-Markdown rendering, import/export, and advanced generation parameters remain planned.
+Markdown rendering, data import/export and retention controls, and advanced generation
+parameters remain planned.

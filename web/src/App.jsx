@@ -3,10 +3,12 @@ import { contextUsage } from "./context-usage";
 import { formatDuration, formatRate, responseMetrics } from "./response-metrics";
 import { thinkingModeForRequest, thinkingModeFromConversation } from "./thinking-mode";
 import {
+  clearConversations as clearAllConversations,
   createConversation,
   deleteConversation,
   getConversation,
   getHealth,
+  getSettings,
   listConversations,
   listModels,
   renameConversation,
@@ -88,7 +90,7 @@ function groupConversations(items) {
   return [...groups].map(([label, groupedItems]) => ({ label, items: groupedItems }));
 }
 
-function ConversationSidebar({ activeId, conversations, query, streaming, onQuery, onSelect, onNew, onRename, onDelete, onSettings, onClose }) {
+function ConversationSidebar({ activeId, conversations, query, streaming, onQuery, onSelect, onNew, onRename, onDelete, onSettings, onAbout, onClose }) {
   const filteredGroups = useMemo(() => groupConversations(conversations), [conversations]);
   const [openActionsId, setOpenActionsId] = useState(null);
 
@@ -192,14 +194,14 @@ function ConversationSidebar({ activeId, conversations, query, streaming, onQuer
       </nav>
 
       <div className="sidebar-footer">
-        <button onClick={onSettings}><Gear size={23} />Settings</button>
-        <button><Info size={23} />About</button>
+        <button onClick={(event) => onSettings(event.currentTarget)}><Gear size={23} />Settings</button>
+        <button onClick={(event) => onAbout(event.currentTarget)}><Info size={23} />About</button>
       </div>
     </aside>
   );
 }
 
-function ModelSettings({
+function ConversationSettings({
   models,
   model,
   setModel,
@@ -230,10 +232,10 @@ function ModelSettings({
   }
 
   return (
-    <aside className="settings-panel" aria-label="Model settings">
+    <aside className="settings-panel" aria-label="Conversation settings">
       <div className="settings-heading">
-        <h2>Model settings</h2>
-        <IconButton label="Close model settings" onClick={onClose}>
+        <h2>Conversation settings</h2>
+        <IconButton label="Close conversation settings" onClick={onClose}>
           <X size={24} />
         </IconButton>
       </div>
@@ -327,8 +329,9 @@ function ModelSettings({
             value={systemPrompt}
             onChange={(event) => setSystemPrompt(event.target.value)}
             placeholder="Model default"
+            disabled={modelLoaded}
           />
-          <p>Used when the conversation doesn’t have a custom system prompt.</p>
+          <p>{modelLoaded ? "Start a new chat to use a different system prompt." : "Saved with this conversation when its first message is sent."}</p>
         </section>
 
         <section className="settings-section temperature-section">
@@ -338,6 +341,7 @@ function ModelSettings({
               <input
                 type="checkbox"
                 checked={temperatureOverride}
+                disabled={modelLoaded}
                 onChange={(event) => setTemperatureOverride(event.target.checked)}
               />
               <span>{temperatureOverride ? "Override on" : "Model default"}</span>
@@ -353,18 +357,81 @@ function ModelSettings({
             max="2"
             step="0.1"
             value={temperature}
-            disabled={!temperatureOverride}
+            disabled={modelLoaded || !temperatureOverride}
             onChange={(event) => setTemperature(Number(event.target.value))}
           />
           <div className="range-labels"><span>0</span><span>{temperature.toFixed(1)}</span><span>2</span></div>
-          <p>Controls randomness in model responses.</p>
+          <p>{modelLoaded ? "Start a new chat to use a different temperature." : "Controls randomness in model responses."}</p>
         </section>
       </div>
 
-      <button className="reset-button" onClick={resetDefaults}>
+      <button className="reset-button" onClick={resetDefaults} disabled={modelLoaded}>
         <ArrowCounterClockwise size={21} />
         Reset to model defaults
       </button>
+    </aside>
+  );
+}
+
+function formatBytes(value) {
+  if (!Number.isFinite(value) || value <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  const power = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1);
+  const amount = value / 1024 ** power;
+  return `${amount >= 10 || power === 0 ? amount.toFixed(0) : amount.toFixed(1)} ${units[power]}`;
+}
+
+function SystemSettings({ connected, modelCount, runtime, loading, error, streaming, onRefresh, onClose, onRequestClear }) {
+  const storage = runtime?.storage;
+  const agent = runtime?.agent;
+  return (
+    <aside className="settings-panel system-settings" aria-label="System settings">
+      <div className="settings-heading">
+        <div><span className="settings-eyebrow">Application</span><h2>System settings</h2></div>
+        <IconButton label="Close system settings" onClick={onClose}><X size={24} /></IconButton>
+      </div>
+
+      <div className="settings-scroll">
+        <section className="settings-section system-status-section">
+          <div className="system-section-heading"><div><h3>Runtime</h3><p>Current service and Agent boundaries.</p></div><button className="text-action" type="button" onClick={onRefresh} disabled={loading}>{loading ? "Refreshing…" : "Refresh"}</button></div>
+          {error && <p className="settings-error" role="alert">{error}</p>}
+          <div className="runtime-cards">
+            <article>
+              <div className="runtime-card-title"><span className={`status-dot ${connected ? "connected" : ""}`} /><strong>Ollama</strong></div>
+              <span>{connected ? "Connected" : "Unavailable"}</span>
+              <small>{modelCount} installed {modelCount === 1 ? "model" : "models"}</small>
+            </article>
+            <article>
+              <div className="runtime-card-title"><TerminalWindow size={18} /><strong>Agent shell</strong></div>
+              <span>{agent ? `${agent.max_turns} turn limit` : "Loading…"}</span>
+              <small>{agent ? `${agent.shell_timeout_seconds}s command timeout` : ""}</small>
+            </article>
+          </div>
+          <dl className="runtime-details">
+            <div><dt>Workspace boundary</dt><dd title={agent?.workspace}>{agent?.workspace || "—"}</dd></div>
+            <div><dt>Shell output limit</dt><dd>{agent ? formatBytes(agent.shell_max_output_bytes) : "—"}</dd></div>
+            <div><dt>Inline input limit</dt><dd>{agent ? formatBytes(agent.inline_input_bytes) : "—"}</dd></div>
+            <div><dt>Tool feedback limit</dt><dd>{agent ? formatBytes(agent.tool_feedback_bytes) : "—"}</dd></div>
+          </dl>
+          <p className="managed-note"><Info size={17} />These values come from Docker Compose environment settings. Change them there, then recreate the WebUI container.</p>
+        </section>
+
+        <section className="settings-section data-settings-section">
+          <div className="system-section-heading"><div><h3>Local data</h3><p>Conversations and images stored in SQLite.</p></div><span className="storage-size">{storage ? formatBytes(storage.database_bytes) : "—"}</span></div>
+          <dl className="data-counts">
+            <div><dt>Conversations</dt><dd>{storage?.conversations ?? "—"}</dd></div>
+            <div><dt>Messages</dt><dd>{storage?.messages ?? "—"}</dd></div>
+            <div><dt>Images</dt><dd>{storage?.attachments ?? "—"}</dd></div>
+            <div><dt>Agent actions</dt><dd>{storage?.agent_steps ?? "—"}</dd></div>
+          </dl>
+          <div className="danger-zone">
+            <div><strong>Clear conversation history</strong><p>Deletes every conversation, message, image, and recorded Agent action.</p></div>
+            <button type="button" onClick={onRequestClear} disabled={streaming || !storage?.conversations}><Trash size={18} />Clear all</button>
+          </div>
+          {streaming && <p className="locked-setting"><span className="lock-dot" />Stop the active response before clearing data.</p>}
+        </section>
+
+      </div>
     </aside>
   );
 }
@@ -815,6 +882,10 @@ export function App() {
   const [connected, setConnected] = useState(false);
   const [chatError, setChatError] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsKind, setSettingsKind] = useState("conversation");
+  const [runtimeSettings, setRuntimeSettings] = useState(null);
+  const [runtimeSettingsLoading, setRuntimeSettingsLoading] = useState(false);
+  const [runtimeSettingsError, setRuntimeSettingsError] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [renameTarget, setRenameTarget] = useState(null);
@@ -824,6 +895,11 @@ export function App() {
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [deleteError, setDeleteError] = useState("");
   const [deleting, setDeleting] = useState(false);
+  const [aboutOpen, setAboutOpen] = useState(false);
+  const [clearAllOpen, setClearAllOpen] = useState(false);
+  const [clearAllConfirmation, setClearAllConfirmation] = useState("");
+  const [clearAllError, setClearAllError] = useState("");
+  const [clearingAll, setClearingAll] = useState(false);
   const [systemPrompt, setSystemPrompt] = useState("");
   const [contextWindow, setContextWindow] = useState("default");
   const [thinkingMode, setThinkingMode] = useState("default");
@@ -833,6 +909,7 @@ export function App() {
   const [streaming, setStreaming] = useState(false);
   const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
   const settingsTriggerRef = useRef(null);
+  const settingsReturnRef = useRef(null);
   const sidebarTriggerRef = useRef(null);
   const generationRef = useRef(null);
   const detailRequestRef = useRef(null);
@@ -840,6 +917,12 @@ export function App() {
   const renameInputRef = useRef(null);
   const deleteDialogRef = useRef(null);
   const deleteCancelRef = useRef(null);
+  const aboutDialogRef = useRef(null);
+  const aboutCloseRef = useRef(null);
+  const aboutReturnRef = useRef(null);
+  const clearAllDialogRef = useRef(null);
+  const clearAllInputRef = useRef(null);
+  const clearAllReturnRef = useRef(null);
   const actionReturnRef = useRef(null);
   const currentContextUsage = useMemo(() => contextUsage(messages, contextWindow), [messages, contextWindow]);
 
@@ -930,9 +1013,43 @@ export function App() {
   }, [deleteTarget]);
 
   useEffect(() => {
+    const dialog = aboutDialogRef.current;
+    if (!dialog) return;
+    if (aboutOpen && !dialog.open) {
+      dialog.showModal();
+      window.setTimeout(() => aboutCloseRef.current?.focus(), 0);
+    } else if (!aboutOpen && dialog.open) {
+      dialog.close();
+    }
+  }, [aboutOpen]);
+
+  useEffect(() => {
+    const dialog = clearAllDialogRef.current;
+    if (!dialog) return;
+    if (clearAllOpen && !dialog.open) {
+      dialog.showModal();
+      window.setTimeout(() => clearAllInputRef.current?.focus(), 0);
+    } else if (!clearAllOpen && dialog.open) {
+      dialog.close();
+    }
+  }, [clearAllOpen]);
+
+  useEffect(() => {
+    if (!settingsOpen || settingsKind !== "system") return undefined;
+    const controller = new AbortController();
+    setRuntimeSettingsLoading(true);
+    setRuntimeSettingsError("");
+    getSettings(controller.signal)
+      .then(setRuntimeSettings)
+      .catch((error) => { if (error.name !== "AbortError") setRuntimeSettingsError(error.message); })
+      .finally(() => { if (!controller.signal.aborted) setRuntimeSettingsLoading(false); });
+    return () => controller.abort();
+  }, [settingsOpen, settingsKind]);
+
+  useEffect(() => {
     function onKeyDown(event) {
       if (event.key !== "Escape") return;
-      if (renameTarget || deleteTarget) {
+      if (renameTarget || deleteTarget || aboutOpen || clearAllOpen) {
         return;
       } else if (settingsOpen && viewportWidth < 1200) {
         setSettingsOpen(false);
@@ -946,7 +1063,7 @@ export function App() {
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [renameTarget, deleteTarget, settingsOpen, sidebarOpen, viewportWidth]);
+  }, [renameTarget, deleteTarget, aboutOpen, clearAllOpen, settingsOpen, sidebarOpen, viewportWidth]);
 
   useEffect(() => {
     const isSettingsOverlay = settingsOpen && viewportWidth < 1200;
@@ -986,7 +1103,89 @@ export function App() {
 
   function closeSettings() {
     setSettingsOpen(false);
-    window.setTimeout(() => settingsTriggerRef.current?.focus(), 0);
+    window.setTimeout(() => {
+      const trigger = settingsReturnRef.current;
+      if (trigger?.isConnected && !trigger.closest('[inert]')) trigger.focus();
+      else settingsTriggerRef.current?.focus();
+    }, 0);
+  }
+
+  function openSettings(kind, trigger) {
+    settingsReturnRef.current = trigger;
+    setSettingsKind(kind);
+    setSidebarOpen(false);
+    setMenuOpen(false);
+    setSettingsOpen(true);
+  }
+
+  function openAbout(trigger) {
+    aboutReturnRef.current = trigger;
+    setSidebarOpen(false);
+    setAboutOpen(true);
+  }
+
+  function closeAbout() {
+    setAboutOpen(false);
+  }
+
+  function restoreAboutFocus() {
+    window.setTimeout(() => {
+      const trigger = aboutReturnRef.current;
+      if (trigger?.isConnected && !trigger.closest('[inert]')) trigger.focus();
+      else sidebarTriggerRef.current?.focus();
+    }, 0);
+  }
+
+  async function refreshRuntimeSettings() {
+    setRuntimeSettingsLoading(true);
+    setRuntimeSettingsError("");
+    try {
+      setRuntimeSettings(await getSettings());
+    } catch (error) {
+      setRuntimeSettingsError(error.message);
+    } finally {
+      setRuntimeSettingsLoading(false);
+    }
+  }
+
+  function openClearAll(trigger) {
+    if (streaming) return;
+    clearAllReturnRef.current = trigger;
+    setClearAllConfirmation("");
+    setClearAllError("");
+    setClearAllOpen(true);
+  }
+
+  function closeClearAll() {
+    if (clearingAll) return;
+    setClearAllOpen(false);
+    setClearAllConfirmation("");
+    setClearAllError("");
+  }
+
+  function restoreClearAllFocus() {
+    window.setTimeout(() => {
+      const trigger = clearAllReturnRef.current;
+      if (trigger?.isConnected && !trigger.closest('[inert]')) trigger.focus();
+    }, 0);
+  }
+
+  async function confirmClearAll(event) {
+    event.preventDefault();
+    if (clearAllConfirmation !== "DELETE" || clearingAll) return;
+    setClearingAll(true);
+    setClearAllError("");
+    try {
+      await clearAllConversations();
+      resetConversation(false);
+      setConversationItems([]);
+      setClearAllOpen(false);
+      await refreshRuntimeSettings();
+    } catch (error) {
+      setClearAllError(error.message);
+    } finally {
+      setClearingAll(false);
+    }
   }
 
   async function chooseConversation(id) {
@@ -1211,7 +1410,7 @@ export function App() {
   const sidebarVisible = viewportWidth > 900 || sidebarOpen;
 
   return (
-    <div className={`app-shell ${settingsOpen ? "settings-is-open" : ""}`}>
+    <div className={`app-shell ${settingsOpen ? "settings-is-open" : ""} ${settingsOpen && settingsKind === "system" ? "system-settings-is-open" : ""}`}>
       <div className={`sidebar-layer ${sidebarOpen ? "open" : ""}`} aria-hidden={!sidebarVisible} inert={!sidebarVisible ? "" : undefined}>
         <ConversationSidebar
           activeId={activeId}
@@ -1223,7 +1422,8 @@ export function App() {
           onNew={newChat}
           onRename={openRename}
           onDelete={openDelete}
-          onSettings={() => { setSettingsOpen(true); closeSidebar(); }}
+          onSettings={(trigger) => openSettings("system", trigger)}
+          onAbout={openAbout}
           onClose={closeSidebar}
         />
       </div>
@@ -1276,8 +1476,8 @@ export function App() {
                 <div className="overflow-menu" role="menu">
                   <button
                     role="menuitem"
-                    onClick={() => { setSettingsOpen(true); setMenuOpen(false); }}
-                  ><SlidersHorizontal size={19} />Model settings</button>
+                    onClick={() => openSettings("conversation", settingsTriggerRef.current)}
+                  ><SlidersHorizontal size={19} />Conversation settings</button>
                   <button
                     role="menuitem"
                     disabled={!activeId}
@@ -1328,32 +1528,46 @@ export function App() {
           supportsImages={visionModels.has(model)}
           supportsTools={toolModels.has(model)}
           supportsThinking={thinkingModels.has(model)}
-          onOpenSettings={() => setSettingsOpen(true)}
+          onOpenSettings={(event) => openSettings("conversation", event.currentTarget)}
         />
       </main>
 
       <div className={`settings-layer ${settingsOpen ? "open" : ""}`} aria-hidden={!settingsOpen} inert={!settingsOpen ? "" : undefined}>
-        <ModelSettings
-          models={models}
-          model={model}
-          setModel={setModel}
-          conversationMode={conversationMode}
-          setConversationMode={setConversationMode}
-          supportsTools={toolModels.has(model)}
-          onClose={closeSettings}
-          systemPrompt={systemPrompt}
-          setSystemPrompt={setSystemPrompt}
-          contextWindow={contextWindow}
-          setContextWindow={setContextWindow}
-          thinkingMode={thinkingMode}
-          setThinkingMode={setThinkingMode}
-          supportsThinking={thinkingModels.has(model)}
-          modelLoaded={modelLoaded}
-          temperatureOverride={temperatureOverride}
-          setTemperatureOverride={setTemperatureOverride}
-          temperature={temperature}
-          setTemperature={setTemperature}
-        />
+        {settingsKind === "system" ? (
+          <SystemSettings
+            connected={connected}
+            modelCount={models.length}
+            runtime={runtimeSettings}
+            loading={runtimeSettingsLoading}
+            error={runtimeSettingsError}
+            streaming={streaming}
+            onRefresh={refreshRuntimeSettings}
+            onClose={closeSettings}
+            onRequestClear={(event) => openClearAll(event.currentTarget)}
+          />
+        ) : (
+          <ConversationSettings
+            models={models}
+            model={model}
+            setModel={setModel}
+            conversationMode={conversationMode}
+            setConversationMode={setConversationMode}
+            supportsTools={toolModels.has(model)}
+            onClose={closeSettings}
+            systemPrompt={systemPrompt}
+            setSystemPrompt={setSystemPrompt}
+            contextWindow={contextWindow}
+            setContextWindow={setContextWindow}
+            thinkingMode={thinkingMode}
+            setThinkingMode={setThinkingMode}
+            supportsThinking={thinkingModels.has(model)}
+            modelLoaded={modelLoaded}
+            temperatureOverride={temperatureOverride}
+            setTemperatureOverride={setTemperatureOverride}
+            temperature={temperature}
+            setTemperature={setTemperature}
+          />
+        )}
       </div>
 
       {(sidebarOpen || overlaySettings) && (
@@ -1421,6 +1635,69 @@ export function App() {
             <button ref={deleteCancelRef} className="delete-cancel" type="button" onClick={closeDelete} disabled={deleting}>Cancel</button>
             <button className="delete-confirm" type="button" onClick={confirmDelete} disabled={deleting}>{deleting ? "Deleting…" : "Delete conversation"}</button>
           </footer>
+        </div>
+      </dialog>
+
+      <dialog
+        className="delete-dialog clear-all-dialog"
+        ref={clearAllDialogRef}
+        aria-labelledby="clear-all-title"
+        aria-describedby="clear-all-description"
+        onCancel={(event) => { event.preventDefault(); closeClearAll(); }}
+        onClose={restoreClearAllFocus}
+      >
+        <form onSubmit={confirmClearAll}>
+          <header>
+            <span className="delete-dialog-icon" aria-hidden="true"><Trash size={22} /></span>
+            <div>
+              <h2 id="clear-all-title">Clear all conversations?</h2>
+              <p id="clear-all-description">This permanently deletes every conversation, message, image, and recorded Agent action. This cannot be undone.</p>
+            </div>
+          </header>
+          <label htmlFor="clear-all-confirmation">Type <strong>DELETE</strong> to confirm</label>
+          <input
+            id="clear-all-confirmation"
+            ref={clearAllInputRef}
+            value={clearAllConfirmation}
+            onChange={(event) => { setClearAllConfirmation(event.target.value); if (clearAllError) setClearAllError(""); }}
+            autoComplete="off"
+            disabled={clearingAll}
+          />
+          {clearAllError && <p className="delete-error" role="alert">{clearAllError}</p>}
+          <footer>
+            <button className="delete-cancel" type="button" onClick={closeClearAll} disabled={clearingAll}>Cancel</button>
+            <button className="delete-confirm" type="submit" disabled={clearingAll || clearAllConfirmation !== "DELETE"}>{clearingAll ? "Clearing…" : "Clear everything"}</button>
+          </footer>
+        </form>
+      </dialog>
+
+      <dialog
+        className="about-dialog"
+        ref={aboutDialogRef}
+        aria-labelledby="about-title"
+        aria-describedby="about-description"
+        onCancel={(event) => { event.preventDefault(); closeAbout(); }}
+        onClose={restoreAboutFocus}
+      >
+        <div>
+          <header>
+            <div className="about-mark" aria-hidden="true"><ChatCircle size={26} /></div>
+            <div>
+              <p className="about-eyebrow">Local Ollama client</p>
+              <h2 id="about-title">Ollama WebUI</h2>
+              <p id="about-description">A lightweight interface for private conversations with models running on your Ollama server.</p>
+            </div>
+            <IconButton ref={aboutCloseRef} label="Close About" type="button" onClick={closeAbout}>
+              <X size={22} />
+            </IconButton>
+          </header>
+          <dl className="about-facts">
+            <div><dt>Chat</dt><dd>Talk directly to any completion-capable model without tools.</dd></div>
+            <div><dt>Agent</dt><dd>Let a tool-capable model continue working and use the configured shell when needed.</dd></div>
+            <div><dt>Your data</dt><dd>Conversations and activity are stored locally in SQLite.</dd></div>
+          </dl>
+          <p className="about-security"><Info size={18} aria-hidden="true" />Agent shell access is powerful. Docker and the directories you mount define its security boundary.</p>
+          <footer><button type="button" onClick={closeAbout}>Done</button></footer>
         </div>
       </dialog>
     </div>

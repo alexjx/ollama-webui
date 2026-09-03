@@ -68,7 +68,7 @@ func TestGenerateRunsShellAgentAndPersistsTrace(t *testing.T) {
 		Shell:  agent.ShellExecutor{Workspace: workspace, Timeout: 2 * time.Second, MaxOutput: 4096},
 		Stager: agent.InputStager{Workspace: workspace, MaxInlineBytes: 8},
 	}
-	api := New(database, client, runner, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	api := New(database, client, runner, RuntimeSettings{}, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	requestBody := `{"content":"  verify long input  ","images":[{"name":"pixel.png","media_type":"image/png","data":"` + base64.StdEncoding.EncodeToString(onePixelPNG) + `"}]}`
 	request := httptest.NewRequest(http.MethodPost, "/api/conversations/1/messages", strings.NewReader(requestBody))
 	request.SetPathValue("id", "1")
@@ -161,7 +161,7 @@ func TestGenerateChatModeSupportsNonToolModelWithoutAgentPrompt(t *testing.T) {
 		t.Fatal(err)
 	}
 	client := ollama.NewClient(ollamaServer.URL)
-	api := New(database, client, agent.Runner{Chat: client}, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	api := New(database, client, agent.Runner{Chat: client}, RuntimeSettings{}, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	request := httptest.NewRequest(http.MethodPost, "/api/conversations/1/messages", strings.NewReader(`{"content":"hello"}`))
 	request.SetPathValue("id", "1")
 	response := httptest.NewRecorder()
@@ -200,7 +200,7 @@ func TestGenerateRejectsNonToolAgentModeBeforePersistence(t *testing.T) {
 		t.Fatal(err)
 	}
 	client := ollama.NewClient(ollamaServer.URL)
-	api := New(database, client, agent.Runner{}, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	api := New(database, client, agent.Runner{}, RuntimeSettings{}, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	request := httptest.NewRequest(http.MethodPost, "/api/conversations/1/messages", strings.NewReader(`{"content":"hello"}`))
 	request.SetPathValue("id", "1")
 	response := httptest.NewRecorder()
@@ -240,7 +240,7 @@ func TestGenerateOmitsInheritedThinking(t *testing.T) {
 	}
 	client := ollama.NewClient(ollamaServer.URL)
 	runner := agent.Runner{Chat: client, Steps: database, MaxTurns: 200, Shell: agent.ShellExecutor{Workspace: t.TempDir()}}
-	api := New(database, client, runner, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	api := New(database, client, runner, RuntimeSettings{}, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	request := httptest.NewRequest(http.MethodPost, "/api/conversations/1/messages", strings.NewReader(`{"content":"hello"}`))
 	request.SetPathValue("id", "1")
 	response := httptest.NewRecorder()
@@ -271,7 +271,7 @@ func TestGenerateRejectsUnsupportedThinkingOverrideBeforePersistence(t *testing.
 		t.Fatal(err)
 	}
 	client := ollama.NewClient(ollamaServer.URL)
-	api := New(database, client, agent.Runner{}, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	api := New(database, client, agent.Runner{}, RuntimeSettings{}, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	request := httptest.NewRequest(http.MethodPost, "/api/conversations/1/messages", strings.NewReader(`{"content":"hello"}`))
 	request.SetPathValue("id", "1")
 	response := httptest.NewRecorder()

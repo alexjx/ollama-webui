@@ -51,7 +51,10 @@ func main() {
 		MaxTurns:          cfg.AgentMaxTurns,
 		ToolFeedbackLimit: cfg.ToolFeedbackMax,
 	}
-	handler := httpapi.New(database, ollamaClient, runner, cfg.WebDistDir, logger)
+	handler := httpapi.New(database, ollamaClient, runner, httpapi.RuntimeSettings{
+		Workspace: workspace, MaxTurns: cfg.AgentMaxTurns, ShellTimeout: cfg.ShellTimeout,
+		ShellMaxOutput: cfg.ShellMaxOutput, InlineInputMax: cfg.InlineInputMax, ToolFeedbackLimit: cfg.ToolFeedbackMax,
+	}, cfg.WebDistDir, logger)
 	server := &http.Server{
 		Addr:              cfg.ListenAddr,
 		Handler:           handler,

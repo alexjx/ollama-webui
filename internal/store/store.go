@@ -74,7 +74,19 @@ type NewAttachment struct {
 	Data      []byte
 }
 
-type Store struct{ db *sql.DB }
+type Store struct {
+	db   *sql.DB
+	path string
+}
+
+type Stats struct {
+	Conversations   int64 `json:"conversations"`
+	Messages        int64 `json:"messages"`
+	Attachments     int64 `json:"attachments"`
+	AgentSteps      int64 `json:"agent_steps"`
+	AttachmentBytes int64 `json:"attachment_bytes"`
+	DatabaseBytes   int64 `json:"database_bytes"`
+}
 
 func Open(ctx context.Context, path string) (*Store, error) {
 	if path != ":memory:" {
@@ -87,7 +99,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
 	db.SetMaxOpenConns(1)
-	s := &Store{db: db}
+	s := &Store{db: db, path: path}
 	if err := s.migrate(ctx); err != nil {
 		db.Close()
 		return nil, err
@@ -312,6 +324,52 @@ func (s *Store) DeleteConversation(ctx context.Context, id int64) error {
 		return fmt.Errorf("delete conversation: %w", err)
 	}
 	return requireAffected(result)
+}
+
+func (s *Store) ClearConversations(ctx context.Context) (int64, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin clear conversations: %w", err)
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `DELETE FROM conversations`)
+	if err != nil {
+		return 0, fmt.Errorf("clear conversations: %w", err)
+	}
+	deleted, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("count cleared conversations: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit clear conversations: %w", err)
+	}
+	return deleted, nil
+}
+
+func (s *Store) Stats(ctx context.Context) (Stats, error) {
+	var stats Stats
+	err := s.db.QueryRowContext(ctx, `
+SELECT
+  (SELECT COUNT(*) FROM conversations),
+  (SELECT COUNT(*) FROM messages),
+  (SELECT COUNT(*) FROM message_attachments),
+  (SELECT COUNT(*) FROM agent_steps),
+  (SELECT COALESCE(SUM(LENGTH(data)), 0) FROM message_attachments)`).Scan(
+		&stats.Conversations, &stats.Messages, &stats.Attachments, &stats.AgentSteps, &stats.AttachmentBytes)
+	if err != nil {
+		return Stats{}, fmt.Errorf("read database stats: %w", err)
+	}
+	if s.path != ":memory:" {
+		for _, path := range []string{s.path, s.path + "-wal", s.path + "-shm"} {
+			info, statErr := os.Stat(path)
+			if statErr == nil {
+				stats.DatabaseBytes += info.Size()
+			} else if !errors.Is(statErr, os.ErrNotExist) {
+				return Stats{}, fmt.Errorf("read database size: %w", statErr)
+			}
+		}
+	}
+	return stats, nil
 }
 
 func (s *Store) AddMessage(ctx context.Context, conversationID int64, role, content, status string) (Message, error) {

@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	_ "golang.org/x/image/webp"
@@ -26,21 +27,35 @@ import (
 )
 
 type Server struct {
-	store   *store.Store
-	ollama  *ollama.Client
-	agent   agent.Runner
-	webDir  string
-	logger  *slog.Logger
-	handler http.Handler
+	store    *store.Store
+	ollama   *ollama.Client
+	agent    agent.Runner
+	runtime  RuntimeSettings
+	webDir   string
+	logger   *slog.Logger
+	handler  http.Handler
+	activeMu sync.Mutex
+	active   map[int64]struct{}
 }
 
-func New(database *store.Store, ollamaClient *ollama.Client, runner agent.Runner, webDir string, logger *slog.Logger) *Server {
-	server := &Server{store: database, ollama: ollamaClient, agent: runner, webDir: webDir, logger: logger}
+type RuntimeSettings struct {
+	Workspace         string
+	MaxTurns          int
+	ShellTimeout      time.Duration
+	ShellMaxOutput    int
+	InlineInputMax    int
+	ToolFeedbackLimit int
+}
+
+func New(database *store.Store, ollamaClient *ollama.Client, runner agent.Runner, runtime RuntimeSettings, webDir string, logger *slog.Logger) *Server {
+	server := &Server{store: database, ollama: ollamaClient, agent: runner, runtime: runtime, webDir: webDir, logger: logger, active: make(map[int64]struct{})}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", server.health)
+	mux.HandleFunc("GET /api/settings", server.settings)
 	mux.HandleFunc("GET /api/models", server.models)
 	mux.HandleFunc("GET /api/conversations", server.listConversations)
 	mux.HandleFunc("POST /api/conversations", server.createConversation)
+	mux.HandleFunc("DELETE /api/conversations", server.clearConversations)
 	mux.HandleFunc("GET /api/conversations/{id}", server.getConversation)
 	mux.HandleFunc("PATCH /api/conversations/{id}", server.updateConversation)
 	mux.HandleFunc("DELETE /api/conversations/{id}", server.deleteConversation)
@@ -74,6 +89,25 @@ func (s *Server) models(response http.ResponseWriter, request *http.Request) {
 	writeJSON(response, http.StatusOK, map[string]any{"models": models})
 }
 
+func (s *Server) settings(response http.ResponseWriter, request *http.Request) {
+	stats, err := s.store.Stats(request.Context())
+	if err != nil {
+		s.internalError(response, err)
+		return
+	}
+	writeJSON(response, http.StatusOK, map[string]any{
+		"agent": map[string]any{
+			"workspace":              s.runtime.Workspace,
+			"max_turns":              s.runtime.MaxTurns,
+			"shell_timeout_seconds":  int(s.runtime.ShellTimeout.Seconds()),
+			"shell_max_output_bytes": s.runtime.ShellMaxOutput,
+			"inline_input_bytes":     s.runtime.InlineInputMax,
+			"tool_feedback_bytes":    s.runtime.ToolFeedbackLimit,
+		},
+		"storage": stats,
+	})
+}
+
 func (s *Server) listConversations(response http.ResponseWriter, request *http.Request) {
 	items, err := s.store.ListConversations(request.Context(), request.URL.Query().Get("q"))
 	if err != nil {
@@ -81,6 +115,28 @@ func (s *Server) listConversations(response http.ResponseWriter, request *http.R
 		return
 	}
 	writeJSON(response, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) clearConversations(response http.ResponseWriter, request *http.Request) {
+	var input struct {
+		Confirmation string `json:"confirmation"`
+	}
+	if err := decodeJSON(request, &input); err != nil || input.Confirmation != "DELETE" {
+		writeError(response, http.StatusBadRequest, "confirmation_required", "confirmation must be DELETE")
+		return
+	}
+	s.activeMu.Lock()
+	defer s.activeMu.Unlock()
+	if len(s.active) > 0 {
+		writeError(response, http.StatusConflict, "generation_active", "stop active responses before clearing conversations")
+		return
+	}
+	deleted, err := s.store.ClearConversations(request.Context())
+	if err != nil {
+		s.internalError(response, err)
+		return
+	}
+	writeJSON(response, http.StatusOK, map[string]any{"deleted": deleted})
 }
 
 type conversationInput struct {
@@ -159,6 +215,12 @@ func (s *Server) deleteConversation(response http.ResponseWriter, request *http.
 	if !ok {
 		return
 	}
+	s.activeMu.Lock()
+	defer s.activeMu.Unlock()
+	if _, active := s.active[id]; active {
+		writeError(response, http.StatusConflict, "generation_active", "stop the active response before deleting this conversation")
+		return
+	}
 	if err := s.store.DeleteConversation(request.Context(), id); err != nil {
 		s.storeError(response, err)
 		return
@@ -171,6 +233,19 @@ func (s *Server) generate(response http.ResponseWriter, request *http.Request) {
 	if !ok {
 		return
 	}
+	s.activeMu.Lock()
+	if _, active := s.active[id]; active {
+		s.activeMu.Unlock()
+		writeError(response, http.StatusConflict, "generation_active", "a response is already running for this conversation")
+		return
+	}
+	s.active[id] = struct{}{}
+	s.activeMu.Unlock()
+	defer func() {
+		s.activeMu.Lock()
+		delete(s.active, id)
+		s.activeMu.Unlock()
+	}()
 	var input struct {
 		Content string       `json:"content"`
 		Images  []imageInput `json:"images"`

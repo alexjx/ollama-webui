@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"ollama-webui/internal/agent"
 	"ollama-webui/internal/store"
@@ -21,7 +22,7 @@ func TestCreateConversationPersistsAndValidatesMode(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer database.Close()
-	api := New(database, nil, agent.Runner{}, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	api := New(database, nil, agent.Runner{}, RuntimeSettings{}, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	request := httptest.NewRequest(http.MethodPost, "/api/conversations", strings.NewReader(`{"model":"plain","mode":"chat","thinking_mode":"medium"}`))
 	response := httptest.NewRecorder()
@@ -59,7 +60,7 @@ func TestUpdateConversationTitleTrimsAndPersists(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	api := New(database, nil, agent.Runner{}, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	api := New(database, nil, agent.Runner{}, RuntimeSettings{}, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	request := httptest.NewRequest(http.MethodPatch, "/api/conversations/1", strings.NewReader(`{"title":"  Renamed chat  "}`))
 	request.SetPathValue("id", "1")
@@ -110,7 +111,7 @@ func TestDeleteConversationCascadesAndPreservesOthers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	api := New(database, nil, agent.Runner{}, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	api := New(database, nil, agent.Runner{}, RuntimeSettings{}, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	request := httptest.NewRequest(http.MethodDelete, "/api/conversations/1", nil)
 	request.SetPathValue("id", "1")
@@ -127,5 +128,82 @@ func TestDeleteConversationCascadesAndPreservesOthers(t *testing.T) {
 	}
 	if conversation, err := database.GetConversation(context.Background(), kept.ID); err != nil || conversation.Title != "Keep me" {
 		t.Fatalf("unrelated conversation changed: %#v, %v", conversation, err)
+	}
+}
+
+func TestSystemSettingsAndBulkClear(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	conversation, err := database.CreateConversation(ctx, store.CreateConversationParams{Title: "Clear me", Model: "agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.AddMessage(ctx, conversation.ID, "user", "hello", "complete"); err != nil {
+		t.Fatal(err)
+	}
+	runner := agent.Runner{
+		Shell:  agent.ShellExecutor{Workspace: "/workspace", Timeout: 10 * time.Minute, MaxOutput: 65536},
+		Stager: agent.InputStager{MaxInlineBytes: 16384}, MaxTurns: 200, ToolFeedbackLimit: 8192,
+	}
+	api := New(database, nil, runner, RuntimeSettings{
+		Workspace: "/workspace", MaxTurns: 200, ShellTimeout: 10 * time.Minute,
+		ShellMaxOutput: 65536, InlineInputMax: 16384, ToolFeedbackLimit: 8192,
+	}, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	request := httptest.NewRequest(http.MethodGet, "/api/settings", nil)
+	response := httptest.NewRecorder()
+	api.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("unexpected settings status %d: %s", response.Code, response.Body.String())
+	}
+	var settings struct {
+		Agent struct {
+			Workspace string `json:"workspace"`
+			MaxTurns  int    `json:"max_turns"`
+		} `json:"agent"`
+		Storage store.Stats `json:"storage"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&settings); err != nil {
+		t.Fatal(err)
+	}
+	if settings.Agent.Workspace != "/workspace" || settings.Agent.MaxTurns != 200 || settings.Storage.Conversations != 1 || settings.Storage.Messages != 1 {
+		t.Fatalf("unexpected settings payload: %#v", settings)
+	}
+
+	request = httptest.NewRequest(http.MethodDelete, "/api/conversations", strings.NewReader(`{}`))
+	response = httptest.NewRecorder()
+	api.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("bulk clear without confirmation returned %d: %s", response.Code, response.Body.String())
+	}
+
+	api.active[conversation.ID] = struct{}{}
+	request = httptest.NewRequest(http.MethodDelete, "/api/conversations", strings.NewReader(`{"confirmation":"DELETE"}`))
+	response = httptest.NewRecorder()
+	api.ServeHTTP(response, request)
+	if response.Code != http.StatusConflict {
+		t.Fatalf("bulk clear during generation returned %d: %s", response.Code, response.Body.String())
+	}
+	request = httptest.NewRequest(http.MethodDelete, "/api/conversations/1", nil)
+	request.SetPathValue("id", "1")
+	response = httptest.NewRecorder()
+	api.ServeHTTP(response, request)
+	if response.Code != http.StatusConflict {
+		t.Fatalf("single delete during generation returned %d: %s", response.Code, response.Body.String())
+	}
+	delete(api.active, conversation.ID)
+
+	request = httptest.NewRequest(http.MethodDelete, "/api/conversations", strings.NewReader(`{"confirmation":"DELETE"}`))
+	response = httptest.NewRecorder()
+	api.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"deleted":1`) {
+		t.Fatalf("unexpected clear response %d: %s", response.Code, response.Body.String())
+	}
+	if _, err := database.GetConversation(ctx, conversation.ID); err != store.ErrNotFound {
+		t.Fatalf("bulk clear preserved conversation: %v", err)
 	}
 }
