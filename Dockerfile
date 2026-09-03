@@ -1,24 +1,31 @@
-FROM node:22-alpine AS frontend
+# syntax=docker/dockerfile:1.7
+
+FROM --platform=$BUILDPLATFORM node:22-alpine AS frontend
 WORKDIR /src/web
 COPY web/package.json web/package-lock.json ./
-RUN npm ci
+RUN --mount=type=cache,target=/root/.npm npm ci
 COPY web/ ./
 RUN npm run build
 
-FROM golang:1.25-alpine AS backend
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS backend
 WORKDIR /src
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY cmd/ ./cmd/
 COPY internal/ ./internal/
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/ollama-webui ./cmd/server
+ARG TARGETOS
+ARG TARGETARCH
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+    go build -trimpath -ldflags="-s -w" -o /out/ollama-webui ./cmd/server
 
 FROM alpine:3.22
 RUN apk add --no-cache bash ca-certificates curl git jq ripgrep su-exec \
     && addgroup -g 1000 -S webui \
     && adduser -u 1000 -S -G webui webui \
     && mkdir -p /data /workspace /app/web \
-    && chown -R webui:webui /data /app
+    && chown -R webui:webui /data /workspace /app
 COPY --from=backend /out/ollama-webui /app/ollama-webui
 COPY --from=frontend /src/web/dist/client/ /app/web/
 COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh

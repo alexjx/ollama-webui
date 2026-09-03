@@ -60,6 +60,47 @@ capability, for example:
 docker compose exec ollama ollama pull qwen3:8b
 ```
 
+The default image is multi-stage: Node and Go toolchains exist only in build
+stages. The final Alpine image keeps the small shell toolkit used by Agent mode,
+but contains neither compiler nor frontend source. If `./workspace` is bind-mounted,
+it must be writable by container UID 1000 so large-input staging and shell tasks work.
+
+## Container releases
+
+GitHub Actions runs the full test suite and a container smoke test for pull requests
+and main-branch pushes. Images are published to GitHub Container Registry only when
+a semantic version tag beginning with `v` is pushed:
+
+```sh
+git tag v1.2.3
+git push origin v1.2.3
+```
+
+Stable `v1.2.3` publishes `1.2.3`, `1.2`, `1`, and `latest` tags. A prerelease such
+as `v1.2.3-rc.1` publishes only prerelease-safe version tags and never changes
+`latest`. Every release contains `linux/amd64` and `linux/arm64` images plus an SBOM
+and build provenance. The image name follows the repository automatically:
+
+```text
+ghcr.io/<owner>/<repository>:1.2.3
+```
+
+For an existing Ollama server on the Docker host, run the published image with:
+
+```sh
+docker run -d --name ollama-webui \
+  --add-host host.docker.internal:host-gateway \
+  -p 8080:8080 \
+  -e OLLAMA_BASE_URL=http://host.docker.internal:11434 \
+  -v ollama-webui-data:/data \
+  -v "$PWD/workspace:/workspace" \
+  ghcr.io/<owner>/<repository>:1.2.3
+```
+
+Publishing uses the workflow's built-in `GITHUB_TOKEN`; no registry password is
+required. GHCR package visibility is controlled separately in the package settings,
+so make the package public there if anonymous pulls should work.
+
 The WebUI never sends `keep_alive` unless a future explicit override is added,
 so Ollama remains responsible for model lifetime. Choosing **Ollama default** for
 the context window similarly omits `num_ctx`; an explicit context selection is
