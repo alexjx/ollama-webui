@@ -236,6 +236,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .select-wrap select:disabled + svg { opacity: .38; }
 .select-wrap > svg { position: absolute; right: 14px; pointer-events: none; }
 .model-select { width: 148px; }
+@media (min-width: 981px) {
+  .model-select { width: 292px; }
+}
 .connected-status { display: flex; align-items: center; gap: 8px; font-size: 14px; white-space: nowrap; }
 .connected-status > span:first-child { width: 9px; height: 9px; border-radius: 50%; background: var(--green); }
 .connected-status.disconnected { color: #8b442a; }
