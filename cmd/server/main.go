@@ -42,18 +42,34 @@ func main() {
 		logger.Error("create agent workspace", "error", err)
 		os.Exit(1)
 	}
+	contextDirectory, err := filepath.Abs(cfg.AgentContextDir)
+	if err != nil {
+		logger.Error("resolve agent context directory", "error", err)
+		os.Exit(1)
+	}
 
 	ollamaClient := ollama.NewClient(cfg.OllamaBaseURL)
+	artifacts, err := agent.NewArtifactManager(contextDirectory, database)
+	if err != nil {
+		logger.Error("initialize agent context storage", "error", err)
+		os.Exit(1)
+	}
+	if err := artifacts.Reconcile(ctx); err != nil {
+		logger.Warn("reconcile agent context storage", "error", err)
+	}
 	runner := agent.Runner{
 		Chat: ollamaClient, Steps: database,
 		Shell:             agent.ShellExecutor{Workspace: workspace, Timeout: cfg.ShellTimeout, MaxOutput: cfg.ShellMaxOutput},
 		Stager:            agent.InputStager{Workspace: workspace, MaxInlineBytes: cfg.InlineInputMax},
 		MaxTurns:          cfg.AgentMaxTurns,
 		ToolFeedbackLimit: cfg.ToolFeedbackMax,
+		Context:           &agent.ContextPreparer{Chat: ollamaClient, Store: database},
+		Artifacts:         artifacts,
 	}
 	handler := httpapi.New(database, ollamaClient, runner, httpapi.RuntimeSettings{
 		Workspace: workspace, MaxTurns: cfg.AgentMaxTurns, ShellTimeout: cfg.ShellTimeout,
 		ShellMaxOutput: cfg.ShellMaxOutput, InlineInputMax: cfg.InlineInputMax, ToolFeedbackLimit: cfg.ToolFeedbackMax,
+		ContextDirectory: contextDirectory, ContextTokens: cfg.ContextTokens,
 	}, cfg.WebDistDir, logger)
 	server := &http.Server{
 		Addr:              cfg.ListenAddr,

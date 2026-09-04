@@ -28,7 +28,34 @@ var shellTool = ollama.Tool{
 	},
 }
 
-const SystemPrompt = `You are a general-purpose autonomous assistant. Continue until the user's task is actually complete, but answer directly when no tool is needed. A shell tool is available as an optional capability for calculation, search, inspection, execution, and verification; do not inspect or edit files unless that helps the user's request. When a user message says its full input was staged to a file, use bounded line ranges to inspect only the relevant portions, keep concise intermediate notes, and avoid printing the whole file into the conversation. Prefer narrow commands and small outputs so local model context remains focused. Do not stop after merely describing a plan. When the task is complete, reply with a concise final answer and do not call a tool. The user can interrupt you at any time.`
+var contextListTool = ollama.Tool{
+	Type: "function",
+	Function: ollama.ToolFunction{
+		Name:        "context_list",
+		Description: "List durable notes and large outputs saved for this conversation. Use it to rediscover an artifact before reading it.",
+		Parameters:  json.RawMessage(`{"type":"object","properties":{"cursor":{"type":"integer","minimum":0,"description":"Zero-based list cursor."},"limit":{"type":"integer","minimum":1,"maximum":20,"description":"Number of artifacts to return."}},"additionalProperties":false}`),
+	},
+}
+
+var contextReadTool = ollama.Tool{
+	Type: "function",
+	Function: ollama.ToolFunction{
+		Name:        "context_read",
+		Description: "Read a bounded byte range from an artifact owned by this conversation. Continue from next_offset when eof is false.",
+		Parameters:  json.RawMessage(`{"type":"object","properties":{"artifact_id":{"type":"string","description":"Opaque artifact ID returned by a context tool."},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":8192}},"required":["artifact_id"],"additionalProperties":false}`),
+	},
+}
+
+var contextWriteTool = ollama.Tool{
+	Type: "function",
+	Function: ollama.ToolFunction{
+		Name:        "context_write",
+		Description: "Save a durable note for this conversation when its details should survive prompt compaction. Prefer concise notes and use the workspace for user-owned deliverables.",
+		Parameters:  json.RawMessage(`{"type":"object","properties":{"name":{"type":"string","description":"Short descriptive name."},"content":{"type":"string","description":"Text to preserve."}},"required":["name","content"],"additionalProperties":false}`),
+	},
+}
+
+const SystemPrompt = `You are a general-purpose autonomous assistant. Continue until the user's task is actually complete, but answer directly when no tool is needed. A shell tool is available as an optional capability for calculation, search, inspection, execution, and verification; do not inspect or edit files unless that helps the user's request. Context tools can persist important notes or large outputs outside the prompt and retrieve them later within this conversation. When a user message says its full input was staged to a file, use bounded line ranges to inspect only the relevant portions, keep concise intermediate notes, and avoid printing the whole file into the conversation. Prefer narrow commands and small outputs so local model context remains focused. Do not stop after merely describing a plan. When the task is complete, reply with a concise final answer and do not call a tool. The user can interrupt you at any time.`
 
 type ChatClient interface {
 	Chat(context.Context, ollama.ChatRequest, func(ollama.ChatChunk) error) error
@@ -50,9 +77,12 @@ type Runner struct {
 	Stager            InputStager
 	MaxTurns          int
 	ToolFeedbackLimit int
+	Context           *ContextPreparer
+	Artifacts         *ArtifactManager
 }
 
 type RunInput struct {
+	ConversationID     int64
 	Model              string
 	Mode               string
 	Messages           []ollama.Message
@@ -117,6 +147,9 @@ func (runner Runner) Run(ctx context.Context, input RunInput, emit func(Event) e
 	if agentMode {
 		maxTurns = runner.MaxTurns
 		tools = []ollama.Tool{shellTool}
+		if runner.Artifacts != nil && input.ConversationID > 0 {
+			tools = append(tools, contextListTool, contextReadTool, contextWriteTool)
+		}
 	}
 	for turn := 1; turn <= maxTurns; turn++ {
 		if err := emit(Event{Type: "turn.started", Turn: turn}); err != nil {
@@ -174,7 +207,7 @@ func (runner Runner) Run(ctx context.Context, input RunInput, emit func(Event) e
 		}
 
 		for _, call := range assistant.ToolCalls {
-			resultContent, err := runner.executeTool(ctx, input.AssistantMessageID, turn, call, emit)
+			resultContent, err := runner.executeTool(ctx, input.ConversationID, input.AssistantMessageID, turn, call, emit)
 			if err != nil {
 				return RunResult{Content: visible.String(), Thinking: thinking.String(), Metadata: metadata}, err
 			}
@@ -191,7 +224,156 @@ type shellArguments struct {
 	TimeoutSeconds int    `json:"timeout_seconds,omitempty"`
 }
 
-func (runner Runner) executeTool(ctx context.Context, messageID int64, turn int, call ollama.ToolCall, emit func(Event) error) (string, error) {
+type contextReadArguments struct {
+	ArtifactID string `json:"artifact_id"`
+	Offset     int64  `json:"offset,omitempty"`
+	Limit      int64  `json:"limit,omitempty"`
+}
+
+type contextListArguments struct {
+	Cursor int `json:"cursor,omitempty"`
+	Limit  int `json:"limit,omitempty"`
+}
+
+type contextWriteArguments struct {
+	Name    string `json:"name"`
+	Content string `json:"content"`
+}
+
+func (runner Runner) executeContextTool(ctx context.Context, conversationID, messageID int64, name string, raw json.RawMessage) (ShellResult, string) {
+	encode := func(value any) (ShellResult, string) {
+		payload, err := json.Marshal(value)
+		if err != nil {
+			return ShellResult{ExitCode: -1, Output: err.Error()}, "error"
+		}
+		return ShellResult{Output: string(payload)}, "complete"
+	}
+	fail := func(err error) (ShellResult, string) {
+		return ShellResult{ExitCode: -1, Output: err.Error()}, "error"
+	}
+
+	switch name {
+	case "context_list":
+		var arguments contextListArguments
+		if err := decodeToolArguments(raw, &arguments); err != nil {
+			return fail(err)
+		}
+		if arguments.Cursor < 0 || arguments.Limit < 0 || arguments.Limit > 20 {
+			return fail(errors.New("cursor must be non-negative and limit must be between 1 and 20"))
+		}
+		if arguments.Limit == 0 {
+			arguments.Limit = 10
+		}
+		artifacts, err := runner.Artifacts.List(ctx, conversationID)
+		if err != nil {
+			return fail(err)
+		}
+		total := len(artifacts)
+		start := arguments.Cursor
+		if start > total {
+			start = total
+		}
+		end := start + arguments.Limit
+		if end > total {
+			end = total
+		}
+		items := make([]map[string]any, 0, end-start)
+		for _, artifact := range artifacts[start:end] {
+			items = append(items, map[string]any{
+				"artifact_id": artifact.StorageKey, "kind": artifact.Kind, "name": artifact.DisplayName,
+				"bytes": artifact.SizeBytes, "sha256": artifact.SHA256, "summary": artifact.Summary,
+				"created_at": artifact.CreatedAt,
+			})
+		}
+		response := map[string]any{"items": items, "total": total, "cursor": start, "has_more": end < total}
+		if end < total {
+			response["next_cursor"] = end
+		}
+		return encode(response)
+	case "context_read":
+		var arguments contextReadArguments
+		if err := decodeToolArguments(raw, &arguments); err != nil {
+			return fail(err)
+		}
+		if arguments.ArtifactID == "" {
+			return fail(errors.New("artifact_id is required"))
+		}
+		if arguments.Limit == 0 {
+			arguments.Limit = 4096
+		}
+		feedbackLimit := runner.ToolFeedbackLimit
+		if feedbackLimit <= 0 {
+			feedbackLimit = defaultToolFeedbackBytes
+		}
+		maxPage := int64(feedbackLimit / 3)
+		if maxPage < 256 {
+			maxPage = 256
+		}
+		if maxPage > 4096 {
+			maxPage = 4096
+		}
+		if arguments.Limit > maxPage {
+			arguments.Limit = maxPage
+		}
+		page, err := runner.Artifacts.Read(ctx, conversationID, arguments.ArtifactID, arguments.Offset, arguments.Limit)
+		if err != nil {
+			return fail(err)
+		}
+		return encode(map[string]any{
+			"artifact_id": page.Artifact.StorageKey, "content": string(page.Data), "offset": page.Offset,
+			"next_offset": page.NextOffset, "eof": page.EOF, "bytes": len(page.Data),
+		})
+	case "context_write":
+		var arguments contextWriteArguments
+		if err := decodeToolArguments(raw, &arguments); err != nil {
+			return fail(err)
+		}
+		arguments.Name = strings.TrimSpace(arguments.Name)
+		if arguments.Name == "" {
+			return fail(errors.New("name is required"))
+		}
+		if len(arguments.Name) > 200 {
+			return fail(errors.New("name exceeds 200 bytes"))
+		}
+		if len(arguments.Content) == 0 {
+			return fail(errors.New("content is required"))
+		}
+		if len(arguments.Content) > 64<<10 {
+			return fail(errors.New("content exceeds 64 KiB"))
+		}
+		messageIDCopy := messageID
+		artifact, err := runner.Artifacts.Write(ctx, store.CreateContextArtifactParams{
+			ConversationID: conversationID, SourceMessageID: &messageIDCopy, Kind: "agent_note",
+			DisplayName: arguments.Name, MediaType: "text/plain", Summary: "Agent-authored durable conversation note.",
+		}, []byte(arguments.Content))
+		if err != nil {
+			return fail(err)
+		}
+		return encode(map[string]any{
+			"artifact_id": artifact.StorageKey, "name": artifact.DisplayName,
+			"bytes": artifact.SizeBytes, "sha256": artifact.SHA256,
+		})
+	default:
+		return fail(fmt.Errorf("unknown context tool %q", name))
+	}
+}
+
+func decodeToolArguments(raw json.RawMessage, target any) error {
+	if len(raw) > maxToolArguments {
+		return errors.New("arguments exceed 128 KiB")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return fmt.Errorf("invalid arguments: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return errors.New("arguments must contain one JSON object")
+	}
+	return nil
+}
+
+func (runner Runner) executeTool(ctx context.Context, conversationID, messageID int64, turn int, call ollama.ToolCall, emit func(Event) error) (string, error) {
 	raw := call.Function.Arguments
 	if len(raw) == 0 {
 		raw = json.RawMessage(`{}`)
@@ -206,19 +388,30 @@ func (runner Runner) executeTool(ctx context.Context, messageID int64, turn int,
 
 	var result ShellResult
 	status := "complete"
-	if call.Function.Name != "shell" {
+	switch call.Function.Name {
+	case "shell":
+		arguments, decodeErr := decodeShellArguments(raw)
+		if decodeErr != nil {
+			result = ShellResult{ExitCode: -1, Output: "invalid shell arguments: " + decodeErr.Error()}
+			status = "error"
+		} else {
+			result = runner.Shell.Run(ctx, arguments.Command, time.Duration(arguments.TimeoutSeconds)*time.Second)
+			if result.TimedOut {
+				status = "error"
+			} else if result.Cancelled {
+				status = "cancelled"
+			}
+		}
+	case "context_list", "context_read", "context_write":
+		if runner.Artifacts == nil || conversationID <= 0 {
+			result = ShellResult{ExitCode: -1, Output: "context storage is unavailable"}
+			status = "error"
+		} else {
+			result, status = runner.executeContextTool(ctx, conversationID, messageID, call.Function.Name, raw)
+		}
+	default:
 		result = ShellResult{ExitCode: -1, Output: fmt.Sprintf("unknown tool %q", call.Function.Name)}
 		status = "error"
-	} else if arguments, decodeErr := decodeShellArguments(raw); decodeErr != nil {
-		result = ShellResult{ExitCode: -1, Output: "invalid shell arguments: " + decodeErr.Error()}
-		status = "error"
-	} else {
-		result = runner.Shell.Run(ctx, arguments.Command, time.Duration(arguments.TimeoutSeconds)*time.Second)
-		if result.TimedOut {
-			status = "error"
-		} else if result.Cancelled {
-			status = "cancelled"
-		}
 	}
 
 	completed, persistErr := runner.completeStep(step, result, status)
@@ -234,11 +427,28 @@ func (runner Runner) executeTool(ctx context.Context, messageID int64, turn int,
 		return "", err
 	}
 	feedback, feedbackTruncated := boundedToolFeedback(result.Output, runner.ToolFeedbackLimit)
-	payload, err := json.Marshal(map[string]any{
+	payloadData := map[string]any{
 		"output": feedback, "output_bytes": len(result.Output), "feedback_truncated": feedbackTruncated, "exit_code": result.ExitCode,
 		"duration_ms": result.Duration.Milliseconds(), "timed_out": result.TimedOut,
 		"cancelled": result.Cancelled, "truncated": result.Truncated,
-	})
+	}
+	if call.Function.Name == "shell" && feedbackTruncated && runner.Artifacts != nil && conversationID > 0 {
+		messageIDCopy, stepID := messageID, completed.ID
+		artifact, artifactErr := runner.Artifacts.Write(ctx, store.CreateContextArtifactParams{
+			ConversationID: conversationID, SourceMessageID: &messageIDCopy, SourceStepID: &stepID,
+			Kind: "shell_output", DisplayName: fmt.Sprintf("shell-turn-%03d.txt", turn), MediaType: "text/plain",
+			Summary: "Captured shell output; use context_read with the artifact ID to inspect bounded ranges.",
+		}, []byte(result.Output))
+		if artifactErr == nil {
+			payloadData["artifact_id"] = artifact.StorageKey
+			payloadData["artifact_bytes"] = artifact.SizeBytes
+			payloadData["artifact_sha256"] = artifact.SHA256
+			payloadData["artifact_source_truncated"] = result.Truncated
+		} else {
+			payloadData["artifact_error"] = artifactErr.Error()
+		}
+	}
+	payload, err := json.Marshal(payloadData)
 	if err != nil {
 		return "", err
 	}

@@ -70,7 +70,7 @@ func TestInputStagerPreservesContentAndCleansOnlyRunDirectory(t *testing.T) {
 func TestInputStagerAdaptsToSmallContextWindow(t *testing.T) {
 	workspace := t.TempDir()
 	contextWindow := 4096
-	content := strings.Repeat("x", 4097)
+	content := strings.Repeat("x", contextWindow*estimatedBytesPerToken+1)
 	prepared, cleanup, err := (InputStager{Workspace: workspace, MaxInlineBytes: 16 << 10}).Stage(
 		[]ollama.Message{{Role: "user", Content: content}}, &contextWindow,
 	)

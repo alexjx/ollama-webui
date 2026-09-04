@@ -3,10 +3,12 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -111,7 +113,22 @@ func TestDeleteConversationCascadesAndPreservesOthers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	api := New(database, nil, agent.Runner{}, RuntimeSettings{}, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	contextRoot := filepath.Join(t.TempDir(), "context")
+	artifacts, err := agent.NewArtifactManager(contextRoot, database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deletedArtifact, err := artifacts.Write(context.Background(), store.CreateContextArtifactParams{ConversationID: deleted.ID}, []byte("deleted context"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	keptArtifact, err := artifacts.Write(context.Background(), store.CreateContextArtifactParams{ConversationID: kept.ID}, []byte("kept context"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	deletedContext, _ := database.GetConversationContext(context.Background(), deleted.ID)
+	keptContext, _ := database.GetConversationContext(context.Background(), kept.ID)
+	api := New(database, nil, agent.Runner{Artifacts: artifacts}, RuntimeSettings{}, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	request := httptest.NewRequest(http.MethodDelete, "/api/conversations/1", nil)
 	request.SetPathValue("id", "1")
@@ -129,6 +146,12 @@ func TestDeleteConversationCascadesAndPreservesOthers(t *testing.T) {
 	if conversation, err := database.GetConversation(context.Background(), kept.ID); err != nil || conversation.Title != "Keep me" {
 		t.Fatalf("unrelated conversation changed: %#v, %v", conversation, err)
 	}
+	if _, err := os.Stat(filepath.Join(contextRoot, deletedContext.StorageKey, deletedArtifact.StorageKey)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("deleted conversation artifact survived: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(contextRoot, keptContext.StorageKey, keptArtifact.StorageKey)); err != nil {
+		t.Fatalf("unrelated conversation artifact changed: %v", err)
+	}
 }
 
 func TestSystemSettingsAndBulkClear(t *testing.T) {
@@ -145,13 +168,25 @@ func TestSystemSettingsAndBulkClear(t *testing.T) {
 	if _, err := database.AddMessage(ctx, conversation.ID, "user", "hello", "complete"); err != nil {
 		t.Fatal(err)
 	}
+	contextRoot := filepath.Join(t.TempDir(), "context")
+	artifacts, err := agent.NewArtifactManager(contextRoot, database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact, err := artifacts.Write(ctx, store.CreateContextArtifactParams{ConversationID: conversation.ID}, []byte("clear context"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversationContext, _ := database.GetConversationContext(ctx, conversation.ID)
 	runner := agent.Runner{
 		Shell:  agent.ShellExecutor{Workspace: "/workspace", Timeout: 10 * time.Minute, MaxOutput: 65536},
 		Stager: agent.InputStager{MaxInlineBytes: 16384}, MaxTurns: 200, ToolFeedbackLimit: 8192,
+		Artifacts: artifacts,
 	}
 	api := New(database, nil, runner, RuntimeSettings{
 		Workspace: "/workspace", MaxTurns: 200, ShellTimeout: 10 * time.Minute,
 		ShellMaxOutput: 65536, InlineInputMax: 16384, ToolFeedbackLimit: 8192,
+		ContextDirectory: contextRoot, ContextTokens: 32768,
 	}, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	request := httptest.NewRequest(http.MethodGet, "/api/settings", nil)
@@ -162,15 +197,17 @@ func TestSystemSettingsAndBulkClear(t *testing.T) {
 	}
 	var settings struct {
 		Agent struct {
-			Workspace string `json:"workspace"`
-			MaxTurns  int    `json:"max_turns"`
+			Workspace     string `json:"workspace"`
+			MaxTurns      int    `json:"max_turns"`
+			ContextPath   string `json:"context_path"`
+			ContextBudget int    `json:"context_budget_tokens"`
 		} `json:"agent"`
 		Storage store.Stats `json:"storage"`
 	}
 	if err := json.NewDecoder(response.Body).Decode(&settings); err != nil {
 		t.Fatal(err)
 	}
-	if settings.Agent.Workspace != "/workspace" || settings.Agent.MaxTurns != 200 || settings.Storage.Conversations != 1 || settings.Storage.Messages != 1 {
+	if settings.Agent.Workspace != "/workspace" || settings.Agent.MaxTurns != 200 || settings.Agent.ContextPath != contextRoot || settings.Agent.ContextBudget != 32768 || settings.Storage.Conversations != 1 || settings.Storage.Messages != 1 || settings.Storage.ContextArtifacts != 1 {
 		t.Fatalf("unexpected settings payload: %#v", settings)
 	}
 
@@ -205,5 +242,8 @@ func TestSystemSettingsAndBulkClear(t *testing.T) {
 	}
 	if _, err := database.GetConversation(ctx, conversation.ID); err != store.ErrNotFound {
 		t.Fatalf("bulk clear preserved conversation: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(contextRoot, conversationContext.StorageKey, artifact.StorageKey)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("bulk clear preserved context artifact: %v", err)
 	}
 }

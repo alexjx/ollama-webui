@@ -13,6 +13,7 @@ import (
 const (
 	defaultInlineInputBytes = 16 << 10
 	minimumInlineInputBytes = 4 << 10
+	estimatedBytesPerToken  = 3
 )
 
 // InputStager keeps oversized user input out of the repeated model request while
@@ -74,7 +75,10 @@ func (stager InputStager) inlineLimit(contextWindow *int) int {
 		limit = defaultInlineInputBytes
 	}
 	if contextWindow != nil && *contextWindow > 0 {
-		contextLimit := *contextWindow
+		contextLimit := limit
+		if *contextWindow <= int(^uint(0)>>1)/estimatedBytesPerToken {
+			contextLimit = *contextWindow * estimatedBytesPerToken
+		}
 		if contextLimit < minimumInlineInputBytes {
 			contextLimit = minimumInlineInputBytes
 		}

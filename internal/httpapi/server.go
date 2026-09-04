@@ -45,6 +45,8 @@ type RuntimeSettings struct {
 	ShellMaxOutput    int
 	InlineInputMax    int
 	ToolFeedbackLimit int
+	ContextDirectory  string
+	ContextTokens     int
 }
 
 func New(database *store.Store, ollamaClient *ollama.Client, runner agent.Runner, runtime RuntimeSettings, webDir string, logger *slog.Logger) *Server {
@@ -103,6 +105,8 @@ func (s *Server) settings(response http.ResponseWriter, request *http.Request) {
 			"shell_max_output_bytes": s.runtime.ShellMaxOutput,
 			"inline_input_bytes":     s.runtime.InlineInputMax,
 			"tool_feedback_bytes":    s.runtime.ToolFeedbackLimit,
+			"context_path":           s.runtime.ContextDirectory,
+			"context_budget_tokens":  s.runtime.ContextTokens,
 		},
 		"storage": stats,
 	})
@@ -126,15 +130,29 @@ func (s *Server) clearConversations(response http.ResponseWriter, request *http.
 		return
 	}
 	s.activeMu.Lock()
-	defer s.activeMu.Unlock()
 	if len(s.active) > 0 {
+		s.activeMu.Unlock()
 		writeError(response, http.StatusConflict, "generation_active", "stop active responses before clearing conversations")
 		return
 	}
+	contexts, err := s.store.ListConversationContexts(request.Context())
+	if err != nil {
+		s.activeMu.Unlock()
+		s.internalError(response, err)
+		return
+	}
 	deleted, err := s.store.ClearConversations(request.Context())
+	s.activeMu.Unlock()
 	if err != nil {
 		s.internalError(response, err)
 		return
+	}
+	if s.agent.Artifacts != nil {
+		for _, item := range contexts {
+			if err := s.agent.Artifacts.RemoveConversation(item.StorageKey); err != nil {
+				s.logger.Warn("remove cleared conversation context", "error", err, "conversation_id", item.ConversationID)
+			}
+		}
 	}
 	writeJSON(response, http.StatusOK, map[string]any{"deleted": deleted})
 }
@@ -216,14 +234,29 @@ func (s *Server) deleteConversation(response http.ResponseWriter, request *http.
 		return
 	}
 	s.activeMu.Lock()
-	defer s.activeMu.Unlock()
 	if _, active := s.active[id]; active {
+		s.activeMu.Unlock()
 		writeError(response, http.StatusConflict, "generation_active", "stop the active response before deleting this conversation")
 		return
 	}
+	storageKey := ""
+	if item, err := s.store.GetConversationContext(request.Context(), id); err == nil {
+		storageKey = item.StorageKey
+	} else if !errors.Is(err, store.ErrNotFound) {
+		s.activeMu.Unlock()
+		s.internalError(response, err)
+		return
+	}
 	if err := s.store.DeleteConversation(request.Context(), id); err != nil {
+		s.activeMu.Unlock()
 		s.storeError(response, err)
 		return
+	}
+	s.activeMu.Unlock()
+	if storageKey != "" && s.agent.Artifacts != nil {
+		if err := s.agent.Artifacts.RemoveConversation(storageKey); err != nil {
+			s.logger.Warn("remove conversation context", "error", err, "conversation_id", id)
+		}
 	}
 	response.WriteHeader(http.StatusNoContent)
 }
@@ -325,7 +358,6 @@ func (s *Server) generate(response http.ResponseWriter, request *http.Request) {
 	response.WriteHeader(http.StatusOK)
 	writeEvent(response, flusher, map[string]any{"type": "started", "user_message": userMessage, "assistant_message": assistantMessage})
 
-	upstreamMessages := make([]ollama.Message, 0, len(history)+1)
 	systemPrompt := conversation.SystemPrompt
 	if agentMode {
 		systemPrompt = agent.SystemPrompt
@@ -333,22 +365,57 @@ func (s *Server) generate(response http.ResponseWriter, request *http.Request) {
 			systemPrompt += "\n\nAdditional instructions from the user:\n" + conversation.SystemPrompt
 		}
 	}
-	if systemPrompt != "" {
-		upstreamMessages = append(upstreamMessages, ollama.Message{Role: "system", Content: systemPrompt})
-	}
-	for _, message := range history {
-		if message.ID == assistantMessage.ID || message.Status == "error" || message.Status == "cancelled" {
-			continue
+	upstreamMessages := make([]ollama.Message, 0, len(history)+1)
+	var preparedContext agent.PreparedContext
+	if agentMode && s.agent.Context != nil {
+		contextWindow := s.runtime.ContextTokens
+		if conversation.ContextWindow != nil {
+			contextWindow = *conversation.ContextWindow
 		}
-		images := make([][]byte, 0, len(message.Attachments))
-		for _, attachment := range message.Attachments {
-			images = append(images, attachment.Data)
+		prepared, prepareErr := s.agent.Context.Prepare(request.Context(), agent.ContextPrepareInput{
+			ConversationID: conversation.ID, Model: conversation.Model, SystemPrompt: systemPrompt,
+			History: history, ContextWindow: contextWindow,
+		})
+		if prepareErr != nil {
+			status := "error"
+			if errors.Is(prepareErr, context.Canceled) || errors.Is(request.Context().Err(), context.Canceled) {
+				status = "cancelled"
+			}
+			s.persistStreamResult(assistantMessage.ID, "", "", status, map[string]any{"context_compaction_failed": true})
+			if status == "error" {
+				_ = writeEvent(response, flusher, map[string]any{"type": "error", "message": prepareErr.Error()})
+			}
+			return
 		}
-		upstreamMessages = append(upstreamMessages, ollama.Message{Role: message.Role, Content: message.Content, Images: images})
+		preparedContext = prepared
+		if prepared.CompactionError != "" || prepared.Fallback || prepared.Oversized {
+			s.logger.Warn("agent context compaction degraded", "conversation_id", conversation.ID,
+				"fallback", prepared.Fallback, "oversized", prepared.Oversized, "error", prepared.CompactionError)
+		}
+		upstreamMessages = prepared.Messages
+	} else {
+		if systemPrompt != "" {
+			upstreamMessages = append(upstreamMessages, ollama.Message{Role: "system", Content: systemPrompt})
+		}
+		for _, message := range history {
+			if message.ID == assistantMessage.ID || message.Status == "error" || message.Status == "cancelled" {
+				continue
+			}
+			images := make([][]byte, 0, len(message.Attachments))
+			for _, attachment := range message.Attachments {
+				images = append(images, attachment.Data)
+			}
+			upstreamMessages = append(upstreamMessages, ollama.Message{Role: message.Role, Content: message.Content, Images: images})
+		}
 	}
 	var options *ollama.ChatOptions
-	if conversation.ContextWindow != nil || conversation.Temperature != nil {
-		options = &ollama.ChatOptions{NumCtx: conversation.ContextWindow, Temperature: conversation.Temperature}
+	effectiveContextWindow := conversation.ContextWindow
+	if effectiveContextWindow == nil && agentMode && s.runtime.ContextTokens > 0 {
+		value := s.runtime.ContextTokens
+		effectiveContextWindow = &value
+	}
+	if effectiveContextWindow != nil || conversation.Temperature != nil {
+		options = &ollama.ChatOptions{NumCtx: effectiveContextWindow, Temperature: conversation.Temperature}
 	}
 	var think *ollama.ThinkValue
 	if conversation.ThinkingMode != nil {
@@ -356,12 +423,13 @@ func (s *Server) generate(response http.ResponseWriter, request *http.Request) {
 		think = &value
 	}
 	result, err := s.agent.Run(request.Context(), agent.RunInput{
-		Model: conversation.Model, Mode: conversation.Mode, Messages: upstreamMessages, Options: options,
+		ConversationID: conversation.ID, Model: conversation.Model, Mode: conversation.Mode, Messages: upstreamMessages, Options: options,
 		Think:              think,
 		AssistantMessageID: assistantMessage.ID,
 	}, func(event agent.Event) error {
 		return writeEvent(response, flusher, event)
 	})
+	result.Metadata = withContextMetadata(result.Metadata, preparedContext)
 	if err != nil {
 		status := "error"
 		if errors.Is(err, context.Canceled) || errors.Is(request.Context().Err(), context.Canceled) {
@@ -507,6 +575,32 @@ func containsString(value any, wanted string) bool {
 		}
 	}
 	return false
+}
+
+func withContextMetadata(metadata map[string]any, prepared agent.PreparedContext) map[string]any {
+	if prepared.ContextWindow <= 0 {
+		return metadata
+	}
+	if metadata == nil {
+		metadata = make(map[string]any)
+	}
+	metadata["context_estimated_tokens"] = prepared.EstimatedTokens
+	metadata["context_budget_tokens"] = prepared.ContextWindow
+	metadata["context_compacted"] = prepared.Compacted
+	if prepared.ThroughMessageID > 0 {
+		metadata["context_through_message_id"] = prepared.ThroughMessageID
+	}
+	if prepared.Fallback {
+		metadata["context_compaction_fallback"] = true
+	}
+	if prepared.Oversized {
+		metadata["context_oversized"] = true
+	}
+	if prepared.CompactionError != "" {
+		metadata["context_compaction_failed"] = true
+		metadata["context_compaction_error"] = prepared.CompactionError
+	}
+	return metadata
 }
 
 func (s *Server) persistStreamResult(messageID int64, content, thinking, status string, metadata map[string]any) {

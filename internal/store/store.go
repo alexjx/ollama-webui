@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,7 +16,10 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-var ErrNotFound = errors.New("not found")
+var (
+	ErrNotFound          = errors.New("not found")
+	ErrInvalidStorageKey = errors.New("invalid storage key")
+)
 
 type Conversation struct {
 	ID              int64      `json:"id"`
@@ -74,18 +79,73 @@ type NewAttachment struct {
 	Data      []byte
 }
 
+type ConversationContext struct {
+	ConversationID int64     `json:"conversation_id"`
+	StorageKey     string    `json:"storage_key"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
+type ContextCheckpoint struct {
+	ConversationID   int64          `json:"conversation_id"`
+	ThroughMessageID int64          `json:"through_message_id"`
+	Summary          string         `json:"summary"`
+	State            map[string]any `json:"state,omitempty"`
+	EstimatedTokens  int            `json:"estimated_tokens"`
+	CreatedAt        time.Time      `json:"created_at"`
+	UpdatedAt        time.Time      `json:"updated_at"`
+}
+
+type UpsertCheckpointParams struct {
+	ConversationID   int64
+	ThroughMessageID int64
+	Summary          string
+	State            map[string]any
+	EstimatedTokens  int
+}
+
+type ContextArtifact struct {
+	ID              int64     `json:"id"`
+	ConversationID  int64     `json:"conversation_id"`
+	StorageKey      string    `json:"storage_key"`
+	SourceMessageID *int64    `json:"source_message_id,omitempty"`
+	SourceStepID    *int64    `json:"source_step_id,omitempty"`
+	Kind            string    `json:"kind"`
+	DisplayName     string    `json:"display_name"`
+	MediaType       string    `json:"media_type"`
+	SizeBytes       int64     `json:"size_bytes"`
+	SHA256          string    `json:"sha256"`
+	Summary         string    `json:"summary"`
+	CreatedAt       time.Time `json:"created_at"`
+}
+
+type CreateContextArtifactParams struct {
+	ConversationID  int64
+	StorageKey      string
+	SourceMessageID *int64
+	SourceStepID    *int64
+	Kind            string
+	DisplayName     string
+	MediaType       string
+	SizeBytes       int64
+	SHA256          string
+	Summary         string
+}
+
 type Store struct {
 	db   *sql.DB
 	path string
 }
 
 type Stats struct {
-	Conversations   int64 `json:"conversations"`
-	Messages        int64 `json:"messages"`
-	Attachments     int64 `json:"attachments"`
-	AgentSteps      int64 `json:"agent_steps"`
-	AttachmentBytes int64 `json:"attachment_bytes"`
-	DatabaseBytes   int64 `json:"database_bytes"`
+	Conversations        int64 `json:"conversations"`
+	Messages             int64 `json:"messages"`
+	Attachments          int64 `json:"attachments"`
+	AgentSteps           int64 `json:"agent_steps"`
+	ContextCheckpoints   int64 `json:"context_checkpoints"`
+	ContextArtifacts     int64 `json:"context_artifacts"`
+	AttachmentBytes      int64 `json:"attachment_bytes"`
+	ContextArtifactBytes int64 `json:"context_artifact_bytes"`
+	DatabaseBytes        int64 `json:"database_bytes"`
 }
 
 func Open(ctx context.Context, path string) (*Store, error) {
@@ -166,6 +226,38 @@ CREATE TABLE IF NOT EXISTS agent_steps (
   completed_at TEXT
 );
 CREATE INDEX IF NOT EXISTS agent_steps_message_idx ON agent_steps(message_id, id);
+CREATE TABLE IF NOT EXISTS conversation_contexts (
+  conversation_id INTEGER PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+  storage_key TEXT NOT NULL UNIQUE
+    CHECK (length(storage_key) = 32 AND storage_key NOT GLOB '*[^0-9a-f]*'),
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS context_checkpoints (
+  conversation_id INTEGER PRIMARY KEY REFERENCES conversation_contexts(conversation_id) ON DELETE CASCADE,
+  through_message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  summary TEXT NOT NULL,
+  state_json TEXT NOT NULL DEFAULT '{}',
+  estimated_tokens INTEGER NOT NULL DEFAULT 0 CHECK (estimated_tokens >= 0),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS context_artifacts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  conversation_id INTEGER NOT NULL REFERENCES conversation_contexts(conversation_id) ON DELETE CASCADE,
+  storage_key TEXT NOT NULL UNIQUE
+    CHECK (length(storage_key) = 32 AND storage_key NOT GLOB '*[^0-9a-f]*'),
+  source_message_id INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+  source_step_id INTEGER REFERENCES agent_steps(id) ON DELETE SET NULL,
+  kind TEXT NOT NULL,
+  display_name TEXT NOT NULL DEFAULT '',
+  media_type TEXT NOT NULL DEFAULT 'text/plain',
+  size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+  sha256 TEXT NOT NULL,
+  summary TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS context_artifacts_conversation_created_idx
+  ON context_artifacts(conversation_id, created_at, id);
 `
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("migrate database: %w", err)
@@ -346,6 +438,246 @@ func (s *Store) ClearConversations(ctx context.Context) (int64, error) {
 	return deleted, nil
 }
 
+func (s *Store) EnsureConversationContext(ctx context.Context, conversationID int64) (ConversationContext, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ConversationContext{}, fmt.Errorf("begin conversation context transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	stored, err := getConversationContext(ctx, tx, conversationID)
+	if err == nil {
+		return stored, tx.Commit()
+	}
+	if !errors.Is(err, ErrNotFound) {
+		return ConversationContext{}, err
+	}
+	var exists bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM conversations WHERE id = ?)`, conversationID).Scan(&exists); err != nil {
+		return ConversationContext{}, fmt.Errorf("check conversation for context: %w", err)
+	}
+	if !exists {
+		return ConversationContext{}, ErrNotFound
+	}
+	key, err := newStorageKey()
+	if err != nil {
+		return ConversationContext{}, err
+	}
+	now := time.Now().UTC()
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO conversation_contexts (conversation_id, storage_key, created_at)
+VALUES (?, ?, ?)`, conversationID, key, formatTime(now)); err != nil {
+		return ConversationContext{}, fmt.Errorf("create conversation context: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return ConversationContext{}, fmt.Errorf("commit conversation context: %w", err)
+	}
+	return ConversationContext{ConversationID: conversationID, StorageKey: key, CreatedAt: now}, nil
+}
+
+func (s *Store) GetConversationContext(ctx context.Context, conversationID int64) (ConversationContext, error) {
+	return getConversationContext(ctx, s.db, conversationID)
+}
+
+func (s *Store) ListConversationContexts(ctx context.Context) ([]ConversationContext, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT conversation_id, storage_key, created_at
+FROM conversation_contexts ORDER BY conversation_id`)
+	if err != nil {
+		return nil, fmt.Errorf("list conversation contexts: %w", err)
+	}
+	defer rows.Close()
+	items := make([]ConversationContext, 0)
+	for rows.Next() {
+		item, err := scanConversationContext(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (s *Store) UpsertCheckpoint(ctx context.Context, params UpsertCheckpointParams) (ContextCheckpoint, error) {
+	if _, err := s.EnsureConversationContext(ctx, params.ConversationID); err != nil {
+		return ContextCheckpoint{}, err
+	}
+	state := params.State
+	if state == nil {
+		state = map[string]any{}
+	}
+	encodedState, err := json.Marshal(state)
+	if err != nil {
+		return ContextCheckpoint{}, fmt.Errorf("encode checkpoint state: %w", err)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ContextCheckpoint{}, fmt.Errorf("begin checkpoint transaction: %w", err)
+	}
+	defer tx.Rollback()
+	belongs, err := messageBelongsToConversation(ctx, tx, params.ThroughMessageID, params.ConversationID)
+	if err != nil {
+		return ContextCheckpoint{}, err
+	}
+	if !belongs {
+		return ContextCheckpoint{}, ErrNotFound
+	}
+	now := time.Now().UTC()
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO context_checkpoints
+  (conversation_id, through_message_id, summary, state_json, estimated_tokens, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(conversation_id) DO UPDATE SET
+  through_message_id = excluded.through_message_id,
+  summary = excluded.summary,
+  state_json = excluded.state_json,
+  estimated_tokens = excluded.estimated_tokens,
+  updated_at = excluded.updated_at`, params.ConversationID, params.ThroughMessageID, params.Summary,
+		string(encodedState), params.EstimatedTokens, formatTime(now), formatTime(now)); err != nil {
+		return ContextCheckpoint{}, fmt.Errorf("upsert checkpoint: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return ContextCheckpoint{}, fmt.Errorf("commit checkpoint: %w", err)
+	}
+	return s.GetCheckpoint(ctx, params.ConversationID)
+}
+
+func (s *Store) GetCheckpoint(ctx context.Context, conversationID int64) (ContextCheckpoint, error) {
+	row := s.db.QueryRowContext(ctx, `
+SELECT c.conversation_id, c.through_message_id, c.summary, c.state_json,
+       c.estimated_tokens, c.created_at, c.updated_at
+FROM context_checkpoints c
+JOIN messages m ON m.id = c.through_message_id
+WHERE c.conversation_id = ? AND m.conversation_id = c.conversation_id`, conversationID)
+	var checkpoint ContextCheckpoint
+	var stateJSON, createdAt, updatedAt string
+	if err := row.Scan(&checkpoint.ConversationID, &checkpoint.ThroughMessageID, &checkpoint.Summary,
+		&stateJSON, &checkpoint.EstimatedTokens, &createdAt, &updatedAt); errors.Is(err, sql.ErrNoRows) {
+		return ContextCheckpoint{}, ErrNotFound
+	} else if err != nil {
+		return ContextCheckpoint{}, fmt.Errorf("get checkpoint: %w", err)
+	}
+	if err := json.Unmarshal([]byte(stateJSON), &checkpoint.State); err != nil {
+		return ContextCheckpoint{}, fmt.Errorf("decode checkpoint state: %w", err)
+	}
+	var err error
+	if checkpoint.CreatedAt, err = parseTime(createdAt); err != nil {
+		return ContextCheckpoint{}, err
+	}
+	if checkpoint.UpdatedAt, err = parseTime(updatedAt); err != nil {
+		return ContextCheckpoint{}, err
+	}
+	return checkpoint, nil
+}
+
+func (s *Store) CreateContextArtifact(ctx context.Context, params CreateContextArtifactParams) (ContextArtifact, error) {
+	key := params.StorageKey
+	if key != "" && !validStorageKey(key) {
+		return ContextArtifact{}, ErrInvalidStorageKey
+	}
+	if key == "" {
+		var err error
+		key, err = newStorageKey()
+		if err != nil {
+			return ContextArtifact{}, err
+		}
+	}
+	if params.MediaType == "" {
+		params.MediaType = "text/plain"
+	}
+	if _, err := s.EnsureConversationContext(ctx, params.ConversationID); err != nil {
+		return ContextArtifact{}, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ContextArtifact{}, fmt.Errorf("begin context artifact transaction: %w", err)
+	}
+	defer tx.Rollback()
+	if params.SourceMessageID != nil {
+		belongs, err := messageBelongsToConversation(ctx, tx, *params.SourceMessageID, params.ConversationID)
+		if err != nil {
+			return ContextArtifact{}, err
+		}
+		if !belongs {
+			return ContextArtifact{}, ErrNotFound
+		}
+	}
+	if params.SourceStepID != nil {
+		var belongs bool
+		if err := tx.QueryRowContext(ctx, `
+SELECT EXISTS(
+  SELECT 1 FROM agent_steps s JOIN messages m ON m.id = s.message_id
+  WHERE s.id = ? AND m.conversation_id = ?
+)`, *params.SourceStepID, params.ConversationID).Scan(&belongs); err != nil {
+			return ContextArtifact{}, fmt.Errorf("check artifact source step: %w", err)
+		}
+		if !belongs {
+			return ContextArtifact{}, ErrNotFound
+		}
+	}
+	now := time.Now().UTC()
+	result, err := tx.ExecContext(ctx, `
+INSERT INTO context_artifacts
+  (conversation_id, storage_key, source_message_id, source_step_id, kind, display_name,
+   media_type, size_bytes, sha256, summary, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, params.ConversationID, key, params.SourceMessageID,
+		params.SourceStepID, params.Kind, params.DisplayName, params.MediaType, params.SizeBytes,
+		params.SHA256, params.Summary, formatTime(now))
+	if err != nil {
+		return ContextArtifact{}, fmt.Errorf("create context artifact: %w", err)
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return ContextArtifact{}, fmt.Errorf("read context artifact id: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return ContextArtifact{}, fmt.Errorf("commit context artifact: %w", err)
+	}
+	return ContextArtifact{
+		ID: id, ConversationID: params.ConversationID, StorageKey: key,
+		SourceMessageID: params.SourceMessageID, SourceStepID: params.SourceStepID,
+		Kind: params.Kind, DisplayName: params.DisplayName, MediaType: params.MediaType,
+		SizeBytes: params.SizeBytes, SHA256: params.SHA256, Summary: params.Summary, CreatedAt: now,
+	}, nil
+}
+
+func (s *Store) GetContextArtifact(ctx context.Context, conversationID, artifactID int64) (ContextArtifact, error) {
+	return scanContextArtifact(s.db.QueryRowContext(ctx, contextArtifactSelect+`
+WHERE conversation_id = ? AND id = ?`, conversationID, artifactID))
+}
+
+func (s *Store) GetContextArtifactByStorageKey(ctx context.Context, conversationID int64, storageKey string) (ContextArtifact, error) {
+	return scanContextArtifact(s.db.QueryRowContext(ctx, contextArtifactSelect+`
+WHERE conversation_id = ? AND storage_key = ?`, conversationID, storageKey))
+}
+
+func (s *Store) ListContextArtifacts(ctx context.Context, conversationID int64) ([]ContextArtifact, error) {
+	rows, err := s.db.QueryContext(ctx, contextArtifactSelect+`
+WHERE conversation_id = ? ORDER BY created_at, id`, conversationID)
+	if err != nil {
+		return nil, fmt.Errorf("list context artifacts: %w", err)
+	}
+	defer rows.Close()
+	items := make([]ContextArtifact, 0)
+	for rows.Next() {
+		item, err := scanContextArtifact(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (s *Store) DeleteContextArtifact(ctx context.Context, conversationID, artifactID int64) error {
+	result, err := s.db.ExecContext(ctx, `
+DELETE FROM context_artifacts WHERE conversation_id = ? AND id = ?`, conversationID, artifactID)
+	if err != nil {
+		return fmt.Errorf("delete context artifact: %w", err)
+	}
+	return requireAffected(result)
+}
+
 func (s *Store) Stats(ctx context.Context) (Stats, error) {
 	var stats Stats
 	err := s.db.QueryRowContext(ctx, `
@@ -354,8 +686,12 @@ SELECT
   (SELECT COUNT(*) FROM messages),
   (SELECT COUNT(*) FROM message_attachments),
   (SELECT COUNT(*) FROM agent_steps),
-  (SELECT COALESCE(SUM(LENGTH(data)), 0) FROM message_attachments)`).Scan(
-		&stats.Conversations, &stats.Messages, &stats.Attachments, &stats.AgentSteps, &stats.AttachmentBytes)
+  (SELECT COUNT(*) FROM context_checkpoints),
+  (SELECT COUNT(*) FROM context_artifacts),
+  (SELECT COALESCE(SUM(LENGTH(data)), 0) FROM message_attachments),
+  (SELECT COALESCE(SUM(size_bytes), 0) FROM context_artifacts)`).Scan(
+		&stats.Conversations, &stats.Messages, &stats.Attachments, &stats.AgentSteps,
+		&stats.ContextCheckpoints, &stats.ContextArtifacts, &stats.AttachmentBytes, &stats.ContextArtifactBytes)
 	if err != nil {
 		return Stats{}, fmt.Errorf("read database stats: %w", err)
 	}
@@ -581,6 +917,91 @@ FROM message_attachments WHERE id = ?`, id).Scan(&attachment.ID, &attachment.Mes
 }
 
 type rowScanner interface{ Scan(...any) error }
+
+type queryRower interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+const contextArtifactSelect = `
+SELECT id, conversation_id, storage_key, source_message_id, source_step_id, kind,
+       display_name, media_type, size_bytes, sha256, summary, created_at
+FROM context_artifacts `
+
+func getConversationContext(ctx context.Context, query queryRower, conversationID int64) (ConversationContext, error) {
+	return scanConversationContext(query.QueryRowContext(ctx, `
+SELECT conversation_id, storage_key, created_at
+FROM conversation_contexts WHERE conversation_id = ?`, conversationID))
+}
+
+func scanConversationContext(row rowScanner) (ConversationContext, error) {
+	var item ConversationContext
+	var createdAt string
+	if err := row.Scan(&item.ConversationID, &item.StorageKey, &createdAt); errors.Is(err, sql.ErrNoRows) {
+		return ConversationContext{}, ErrNotFound
+	} else if err != nil {
+		return ConversationContext{}, fmt.Errorf("scan conversation context: %w", err)
+	}
+	var err error
+	if item.CreatedAt, err = parseTime(createdAt); err != nil {
+		return ConversationContext{}, err
+	}
+	return item, nil
+}
+
+func scanContextArtifact(row rowScanner) (ContextArtifact, error) {
+	var item ContextArtifact
+	var sourceMessageID, sourceStepID sql.NullInt64
+	var createdAt string
+	if err := row.Scan(&item.ID, &item.ConversationID, &item.StorageKey, &sourceMessageID,
+		&sourceStepID, &item.Kind, &item.DisplayName, &item.MediaType, &item.SizeBytes,
+		&item.SHA256, &item.Summary, &createdAt); errors.Is(err, sql.ErrNoRows) {
+		return ContextArtifact{}, ErrNotFound
+	} else if err != nil {
+		return ContextArtifact{}, fmt.Errorf("scan context artifact: %w", err)
+	}
+	if sourceMessageID.Valid {
+		value := sourceMessageID.Int64
+		item.SourceMessageID = &value
+	}
+	if sourceStepID.Valid {
+		value := sourceStepID.Int64
+		item.SourceStepID = &value
+	}
+	var err error
+	if item.CreatedAt, err = parseTime(createdAt); err != nil {
+		return ContextArtifact{}, err
+	}
+	return item, nil
+}
+
+func messageBelongsToConversation(ctx context.Context, query queryRower, messageID, conversationID int64) (bool, error) {
+	var belongs bool
+	if err := query.QueryRowContext(ctx, `
+SELECT EXISTS(SELECT 1 FROM messages WHERE id = ? AND conversation_id = ?)`, messageID, conversationID).Scan(&belongs); err != nil {
+		return false, fmt.Errorf("check message conversation: %w", err)
+	}
+	return belongs, nil
+}
+
+func newStorageKey() (string, error) {
+	value := make([]byte, 16)
+	if _, err := rand.Read(value); err != nil {
+		return "", fmt.Errorf("generate storage key: %w", err)
+	}
+	return hex.EncodeToString(value), nil
+}
+
+func validStorageKey(value string) bool {
+	if len(value) != 32 {
+		return false
+	}
+	for _, character := range value {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
+}
 
 func scanConversation(row rowScanner) (Conversation, error) {
 	var conversation Conversation

@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -178,6 +180,118 @@ func TestRunnerBoundsToolFeedbackButPersistsFullOutput(t *testing.T) {
 	}
 	if !payload.FeedbackTruncated || payload.OutputBytes != len(fullOutput) || !strings.Contains(payload.Output, "bytes omitted") || !strings.HasPrefix(payload.Output, "HEAD-") || !strings.HasSuffix(payload.Output, "-TAIL") {
 		t.Fatalf("tool feedback was not bounded head-and-tail output: %#v", payload)
+	}
+}
+
+func TestRunnerExternalizesLargeShellFeedback(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	conversation, err := database.CreateConversation(ctx, store.CreateConversationParams{Title: "Artifacts", Model: "tools"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assistant, err := database.AddMessage(ctx, conversation.ID, "assistant", "", "streaming")
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifacts, err := NewArtifactManager(filepath.Join(t.TempDir(), "context"), database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := ollama.ToolCall{ID: "large", Function: ollama.ToolCallFunction{Name: "shell", Arguments: json.RawMessage(`{"command":"large"}`)}}
+	chat := &scriptedChat{turns: [][]ollama.ChatChunk{
+		{{Message: ollama.Message{ToolCalls: []ollama.ToolCall{call}}, Done: true}},
+		{{Message: ollama.Message{Content: "done"}, Done: true}},
+	}}
+	fullOutput := "HEAD-" + strings.Repeat("x", 80) + "-TAIL"
+	runner := Runner{
+		Chat: chat, Steps: database, Shell: &recordingShell{result: ShellResult{Output: fullOutput}},
+		MaxTurns: 2, ToolFeedbackLimit: 24, Artifacts: artifacts,
+	}
+	if _, err := runner.Run(ctx, RunInput{
+		ConversationID: conversation.ID, Model: "tools", AssistantMessageID: assistant.ID,
+	}, func(Event) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	feedback := chat.requests[1].Messages[len(chat.requests[1].Messages)-1]
+	var payload struct {
+		ArtifactID string `json:"artifact_id"`
+	}
+	if err := json.Unmarshal([]byte(feedback.Content), &payload); err != nil || payload.ArtifactID == "" {
+		t.Fatalf("tool feedback did not reference an artifact: %s, %v", feedback.Content, err)
+	}
+	page, err := artifacts.Read(ctx, conversation.ID, payload.ArtifactID, 0, 8192)
+	if err != nil || string(page.Data) != fullOutput {
+		t.Fatalf("externalized output mismatch: %#v, %v", page, err)
+	}
+}
+
+func TestRunnerContextToolsWriteListAndRead(t *testing.T) {
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	conversation, err := database.CreateConversation(ctx, store.CreateConversationParams{Title: "Context tools", Model: "tools"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assistant, err := database.AddMessage(ctx, conversation.ID, "assistant", "", "streaming")
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifacts, err := NewArtifactManager(filepath.Join(t.TempDir(), "context"), database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := Runner{Artifacts: artifacts}
+	written, status := runner.executeContextTool(ctx, conversation.ID, assistant.ID, "context_write", json.RawMessage(`{"name":"decision","content":"keep this exact value"}`))
+	if status != "complete" {
+		t.Fatalf("context_write failed: %#v", written)
+	}
+	var writePayload struct {
+		ArtifactID string `json:"artifact_id"`
+	}
+	if err := json.Unmarshal([]byte(written.Output), &writePayload); err != nil || writePayload.ArtifactID == "" {
+		t.Fatalf("invalid write payload: %s, %v", written.Output, err)
+	}
+	listed, status := runner.executeContextTool(ctx, conversation.ID, assistant.ID, "context_list", json.RawMessage(`{}`))
+	if status != "complete" || !strings.Contains(listed.Output, writePayload.ArtifactID) {
+		t.Fatalf("context_list omitted artifact: %#v", listed)
+	}
+	read, status := runner.executeContextTool(ctx, conversation.ID, assistant.ID, "context_read", json.RawMessage(fmt.Sprintf(`{"artifact_id":%q,"limit":8}`, writePayload.ArtifactID)))
+	if status != "complete" || !strings.Contains(read.Output, "keep thi") || !strings.Contains(read.Output, `"eof":false`) {
+		t.Fatalf("context_read returned wrong page: %#v", read)
+	}
+}
+
+func TestRunnerContextListPaginates(t *testing.T) {
+	ctx := context.Background()
+	database, conversationID := artifactTestStore(t, ctx)
+	manager, err := NewArtifactManager(filepath.Join(t.TempDir(), "context"), database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 3; index++ {
+		if _, err := manager.Write(ctx, store.CreateContextArtifactParams{
+			ConversationID: conversationID, DisplayName: fmt.Sprintf("note-%d", index),
+		}, []byte("value")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runner := Runner{Artifacts: manager}
+	first, status := runner.executeContextTool(ctx, conversationID, 1, "context_list", json.RawMessage(`{"limit":2}`))
+	if status != "complete" || !strings.Contains(first.Output, `"next_cursor":2`) || !strings.Contains(first.Output, `"has_more":true`) {
+		t.Fatalf("first page was not pageable: %#v", first)
+	}
+	second, status := runner.executeContextTool(ctx, conversationID, 1, "context_list", json.RawMessage(`{"cursor":2,"limit":2}`))
+	if status != "complete" || !strings.Contains(second.Output, `"has_more":false`) || !strings.Contains(second.Output, "note-2") {
+		t.Fatalf("second page was incorrect: %#v", second)
 	}
 }
 

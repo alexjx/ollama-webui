@@ -133,6 +133,86 @@ func TestGenerateRunsShellAgentAndPersistsTrace(t *testing.T) {
 	}
 }
 
+func TestGenerateCompactsLongAgentHistoryBeforeRunning(t *testing.T) {
+	var mu sync.Mutex
+	chatRequests := make([]map[string]any, 0)
+	ollamaServer := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api/tags":
+			_, _ = response.Write([]byte(`{"models":[{"name":"agent","capabilities":["completion","tools"]}]}`))
+		case "/api/chat":
+			var payload map[string]any
+			if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+				t.Fatal(err)
+			}
+			mu.Lock()
+			chatRequests = append(chatRequests, payload)
+			call := len(chatRequests)
+			mu.Unlock()
+			if call == 1 {
+				_, _ = response.Write([]byte("{\"message\":{\"role\":\"assistant\",\"content\":\"## Goal\\nPreserve the verified decision.\"},\"done\":true}\n"))
+			} else {
+				_, _ = response.Write([]byte("{\"message\":{\"role\":\"assistant\",\"content\":\"continued\"},\"done\":true}\n"))
+			}
+		default:
+			http.NotFound(response, request)
+		}
+	}))
+	defer ollamaServer.Close()
+
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	window := 1000
+	conversation, err := database.CreateConversation(ctx, store.CreateConversationParams{
+		Title: "Long agent", Model: "agent", ContextWindow: &window,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, content := range []string{
+		strings.Repeat("old-user-", 180), strings.Repeat("old-assistant-", 150),
+		"recent user one", "recent answer one", "recent user two", "recent answer two",
+	} {
+		role := "user"
+		if index%2 == 1 {
+			role = "assistant"
+		}
+		if _, err := database.AddMessage(ctx, conversation.ID, role, content, "complete"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	client := ollama.NewClient(ollamaServer.URL)
+	runner := agent.Runner{
+		Chat: client, Steps: database, Shell: agent.ShellExecutor{Workspace: t.TempDir(), Timeout: time.Second, MaxOutput: 4096},
+		Stager: agent.InputStager{Workspace: t.TempDir(), MaxInlineBytes: 16384}, MaxTurns: 4,
+		Context: &agent.ContextPreparer{Chat: client, Store: database},
+	}
+	api := New(database, client, runner, RuntimeSettings{ContextTokens: 32768}, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	request := httptest.NewRequest(http.MethodPost, "/api/conversations/1/messages", strings.NewReader(`{"content":"current request"}`))
+	request.SetPathValue("id", "1")
+	response := httptest.NewRecorder()
+	api.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"type":"done"`) {
+		t.Fatalf("unexpected response %d: %s", response.Code, response.Body.String())
+	}
+	if len(chatRequests) != 2 {
+		t.Fatalf("expected summary and agent calls, got %d", len(chatRequests))
+	}
+	actualMessages := chatRequests[1]["messages"].([]any)
+	encoded, _ := json.Marshal(actualMessages)
+	if !strings.Contains(string(encoded), "Preserve the verified decision") || strings.Contains(string(encoded), "old-user-") || !strings.Contains(string(encoded), "current request") {
+		t.Fatalf("agent received wrong compacted history: %s", encoded)
+	}
+	checkpoint, err := database.GetCheckpoint(ctx, conversation.ID)
+	if err != nil || checkpoint.ThroughMessageID != 2 || !strings.Contains(checkpoint.Summary, "verified decision") {
+		t.Fatalf("checkpoint was not persisted: %#v, %v", checkpoint, err)
+	}
+}
+
 func TestGenerateChatModeSupportsNonToolModelWithoutAgentPrompt(t *testing.T) {
 	var captured map[string]any
 	ollamaServer := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {

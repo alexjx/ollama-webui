@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -14,7 +15,9 @@ type Config struct {
 	DatabasePath    string
 	WebDistDir      string
 	AgentWorkspace  string
+	AgentContextDir string
 	AgentMaxTurns   int
+	ContextTokens   int
 	InlineInputMax  int
 	ShellTimeout    time.Duration
 	ShellMaxOutput  int
@@ -29,11 +32,15 @@ func Load() (Config, error) {
 		WebDistDir:     valueOrDefault("WEB_DIST_DIR", "./web/dist/client"),
 		AgentWorkspace: valueOrDefault("AGENT_WORKSPACE", "./workspace"),
 	}
+	cfg.AgentContextDir = valueOrDefault("AGENT_CONTEXT_PATH", filepath.Join(filepath.Dir(cfg.DatabasePath), "agent-context"))
 	if cfg.OllamaBaseURL == "" {
 		return Config{}, fmt.Errorf("OLLAMA_BASE_URL cannot be empty")
 	}
 	var err error
 	if cfg.AgentMaxTurns, err = positiveInt("AGENT_MAX_TURNS", 200); err != nil {
+		return Config{}, err
+	}
+	if cfg.ContextTokens, err = positiveInt("AGENT_CONTEXT_BUDGET_TOKENS", 32768); err != nil {
 		return Config{}, err
 	}
 	if cfg.InlineInputMax, err = positiveInt("AGENT_INLINE_INPUT_BYTES", 16<<10); err != nil {

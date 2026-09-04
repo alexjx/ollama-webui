@@ -40,7 +40,7 @@ import {
 } from "@phosphor-icons/react";
 
 const contextWindows = [
-  { value: "default", label: "Ollama default" },
+  { value: "default", label: "Application default" },
   { value: "4096", label: "4,096 tokens" },
   { value: "8192", label: "8,192 tokens" },
   { value: "16384", label: "16,384 tokens" },
@@ -297,7 +297,7 @@ function ConversationSettings({
           {modelLoaded ? (
             <p className="locked-setting"><span className="lock-dot" />Model loaded. Start a new chat to choose a different context window.</p>
           ) : (
-            <p>Applied when the first message loads this model. Ollama default sends no context override.</p>
+            <p>Agent uses the managed server budget; Chat leaves the limit to Ollama.</p>
           )}
         </section>
 
@@ -412,6 +412,8 @@ function SystemSettings({ connected, modelCount, runtime, loading, error, stream
           </div>
           <dl className="runtime-details">
             <div><dt>Workspace boundary</dt><dd title={agent?.workspace}>{agent?.workspace || "—"}</dd></div>
+            <div><dt>Managed context</dt><dd title={agent?.context_path}>{agent?.context_path || "—"}</dd></div>
+            <div><dt>Context budget</dt><dd>{agent ? `${agent.context_budget_tokens?.toLocaleString() || "—"} tokens` : "—"}</dd></div>
             <div><dt>Shell output limit</dt><dd>{agent ? formatBytes(agent.shell_max_output_bytes) : "—"}</dd></div>
             <div><dt>Inline input limit</dt><dd>{agent ? formatBytes(agent.inline_input_bytes) : "—"}</dd></div>
             <div><dt>Tool feedback limit</dt><dd>{agent ? formatBytes(agent.tool_feedback_bytes) : "—"}</dd></div>
@@ -420,15 +422,19 @@ function SystemSettings({ connected, modelCount, runtime, loading, error, stream
         </section>
 
         <section className="settings-section data-settings-section">
-          <div className="system-section-heading"><div><h3>Local data</h3><p>Conversations and images stored in SQLite.</p></div><span className="storage-size">{storage ? formatBytes(storage.database_bytes) : "—"}</span></div>
+          <div className="system-section-heading"><div><h3>Local data</h3><p>Conversations, images, and managed context stored locally.</p></div><span className="storage-size">{storage ? formatBytes(storage.database_bytes) : "—"}</span></div>
           <dl className="data-counts">
             <div><dt>Conversations</dt><dd>{storage?.conversations ?? "—"}</dd></div>
             <div><dt>Messages</dt><dd>{storage?.messages ?? "—"}</dd></div>
             <div><dt>Images</dt><dd>{storage?.attachments ?? "—"}</dd></div>
             <div><dt>Agent actions</dt><dd>{storage?.agent_steps ?? "—"}</dd></div>
+            <div><dt>Context checkpoints</dt><dd>{storage?.context_checkpoints ?? "—"}</dd></div>
+            <div><dt>Context artifacts</dt><dd>{storage?.context_artifacts ?? "—"}</dd></div>
+            <div><dt>Context storage</dt><dd>{storage ? formatBytes(storage.context_artifact_bytes) : "—"}</dd></div>
+            <div><dt>Image storage</dt><dd>{storage ? formatBytes(storage.attachment_bytes) : "—"}</dd></div>
           </dl>
           <div className="danger-zone">
-            <div><strong>Clear conversation history</strong><p>Deletes every conversation, message, image, and recorded Agent action.</p></div>
+            <div><strong>Clear conversation history</strong><p>Deletes every conversation, message, image, Agent action, checkpoint, and context artifact.</p></div>
             <button type="button" onClick={onRequestClear} disabled={streaming || !storage?.conversations}><Trash size={18} />Clear all</button>
           </div>
           {streaming && <p className="locked-setting"><span className="lock-dot" />Stop the active response before clearing data.</p>}
@@ -725,8 +731,8 @@ function Composer({ streaming, onStop, onSend, empty, model, models, setModel, c
   const contextLabel = contextLimit
     ? `${contextUsedTokens.toLocaleString()} / ${contextLimit.toLocaleString()} tokens (${displayPercent}%)`
     : contextUsedTokens > 0
-      ? `${contextUsedTokens.toLocaleString()} tokens · Ollama default limit`
-      : "Ollama default · usage available after response";
+      ? `${contextUsedTokens.toLocaleString()} tokens · ${conversationMode === "agent" ? "managed limit" : "Ollama limit"}`
+      : `${conversationMode === "agent" ? "Managed" : "Ollama"} default · usage available after response`;
 
   const messageField = (
     <textarea

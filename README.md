@@ -7,13 +7,16 @@ continues until the task is complete. The Go service streams both modes to a
 responsive React interface and stores chats, model thinking, image attachments,
 and tool traces in SQLite.
 
-To protect short local-model context windows, user messages above 16 KiB are
-temporarily staged as private files in the mounted workspace. Ollama receives a
-small reference and can inspect the source in bounded line ranges rather than
-receiving the whole text again on every agent turn. The original message remains
-unchanged in SQLite, staged files are removed when the run ends, prior thinking
-is not sent back to the model, and shell feedback sent to later turns is capped
-separately from the fuller activity log.
+To protect short local-model context windows, Agent mode automatically replaces
+an immutable prefix of long conversations with a durable checkpoint summary while
+keeping recent messages verbatim. Original messages remain unchanged in SQLite.
+Large captured shell outputs are stored under the managed context directory and
+represented in later model turns by a bounded excerpt plus a conversation-scoped
+artifact ID; the Agent can list and page through those artifacts when needed.
+User messages above 16 KiB are still temporarily staged as private workspace files,
+and prior thinking is never sent back to the model. Artifacts preserve the output
+captured by the shell executor; output beyond `SHELL_MAX_OUTPUT_BYTES` is still
+discarded at capture time and is marked as source-truncated.
 
 New-chat setup offers **Ollama default**, **Off**, **On**, and the native
 **Low**, **Medium**, **High**, and **Max** effort levels for models that advertise
@@ -102,9 +105,10 @@ required. GHCR package visibility is controlled separately in the package settin
 so make the package public there if anonymous pulls should work.
 
 The WebUI never sends `keep_alive` unless a future explicit override is added,
-so Ollama remains responsible for model lifetime. Choosing **Ollama default** for
-the context window similarly omits `num_ctx`; an explicit context selection is
-saved with the conversation and sent on every turn. The Thinking setting follows
+so Ollama remains responsible for model lifetime. In Chat mode, choosing
+**Ollama default** for the context window omits `num_ctx`. Agent mode instead uses
+the managed context budget unless an explicit per-conversation value is selected;
+that value is saved with the conversation and sent on every turn. The Thinking setting follows
 the same inherited-default behavior and is also fixed once a chat starts. Explicit
 effort levels are model-dependent; **Ollama default** is the safest portable choice.
 
@@ -114,8 +118,10 @@ These startup values are read-only in the WebUI: update the environment variable
 below and recreate the WebUI container to change them. Per-chat model controls live
 under **Conversation settings** in the composer or conversation menu. System settings
 also provides a guarded **Clear all** action; it requires typing `DELETE`, refuses to
-run while a response is active, and removes conversations and their dependent data
-in one database transaction.
+run while a response is active, removes database records in one transaction, and
+then removes the corresponding managed context directories. Startup reconciliation
+cleans up an interrupted filesystem removal. Back up both `DATABASE_PATH` and
+`AGENT_CONTEXT_PATH` together when artifact recovery must remain consistent.
 
 ## Local development
 
@@ -138,7 +144,9 @@ Configuration is provided with environment variables:
 | `DATABASE_PATH` | `./data/ollama-webui.db` | SQLite database path |
 | `WEB_DIST_DIR` | `./web/dist/client` | Built frontend directory |
 | `AGENT_WORKSPACE` | `./workspace` | Shell starting directory |
+| `AGENT_CONTEXT_PATH` | Next to `DATABASE_PATH` under `agent-context` | Private managed checkpoint artifact directory; the container image sets `/data/agent-context` |
 | `AGENT_MAX_TURNS` | `200` | Emergency ceiling on model turns per task |
+| `AGENT_CONTEXT_BUDGET_TOKENS` | `32768` | Conservative prompt budget when a conversation does not set an explicit context window; compaction starts near 70% |
 | `AGENT_INLINE_INPUT_BYTES` | `16384` | Largest user message kept inline; small context selections lower this to a 4 KiB floor |
 | `AGENT_TOOL_FEEDBACK_BYTES` | `8192` | Maximum shell-output excerpt returned to later model turns |
 | `SHELL_TIMEOUT_SECONDS` | `600` | Maximum time for each shell command |
