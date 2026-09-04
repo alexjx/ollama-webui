@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { contextUsage } from "./context-usage";
 import { formatDuration, formatRate, responseMetrics } from "./response-metrics";
+import { scrollToEnd } from "./scroll-position";
 import { selectElementText } from "./select-text";
 import { thinkingModeForRequest, thinkingModeFromConversation } from "./thinking-mode";
 import {
@@ -957,7 +958,12 @@ export function App() {
   const clearAllInputRef = useRef(null);
   const clearAllReturnRef = useRef(null);
   const actionReturnRef = useRef(null);
+  const transcriptRef = useRef(null);
   const currentContextUsage = useMemo(() => contextUsage(messages, contextWindow), [messages, contextWindow]);
+
+  useLayoutEffect(() => {
+    if (activeId) scrollToEnd(transcriptRef.current);
+  }, [activeId]);
 
   async function refreshConversations(search = query, signal) {
     const items = await listConversations(search, signal);
@@ -1561,7 +1567,7 @@ export function App() {
           </div>
         </header>
 
-        <section className="transcript" aria-label="Conversation">
+        <section className="transcript" aria-label="Conversation" ref={transcriptRef}>
           <ChatTranscript
             empty={!activeId}
             messages={messages}
