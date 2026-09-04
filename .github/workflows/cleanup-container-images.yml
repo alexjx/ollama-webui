@@ -1,0 +1,29 @@
+name: Cleanup container images
+
+on:
+  schedule:
+    # Every Sunday at 11:23 Asia/Shanghai (03:23 UTC).
+    - cron: "23 3 * * 0"
+  workflow_dispatch:
+
+concurrency:
+  group: cleanup-container-images
+  cancel-in-progress: false
+
+permissions:
+  packages: write
+
+jobs:
+  cleanup:
+    name: Keep latest image
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Delete old GHCR images
+        uses: dataaxiom/ghcr-cleanup-action@d52806a0dc70b430571a37da1fde39733ffd640f # v1.2.2
+        with:
+          package: ${{ github.event.repository.name }}
+          keep-n-tagged: 1
+          delete-untagged: true
+          validate: true
+          token: ${{ secrets.GITHUB_TOKEN }}
