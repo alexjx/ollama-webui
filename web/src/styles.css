@@ -393,6 +393,22 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .user-message > p { max-width: 500px; }
 .assistant-message > p:first-of-type { max-width: 500px; margin-bottom: 0; }
 .assistant-message > p:last-child { margin-top: 9px; }
+.select-response-button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 44px;
+  margin-top: 4px;
+  padding: 0 6px;
+  border-radius: 7px;
+  color: #65717a;
+  background: transparent;
+  font-size: 12px;
+  font-weight: 620;
+  transition: color 160ms ease, background 160ms ease;
+}
+.select-response-button:hover { color: var(--blue-dark); background: #eef1f2; }
+.select-response-button svg { flex: 0 0 auto; }
 .response-metrics { max-width: 500px; margin-top: 10px; color: #66717a; font-size: 12px; }
 .response-metrics summary {
   display: flex;

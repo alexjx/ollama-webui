@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { contextUsage } from "./context-usage";
 import { formatDuration, formatRate, responseMetrics } from "./response-metrics";
+import { selectElementText } from "./select-text";
 import { thinkingModeForRequest, thinkingModeFromConversation } from "./thinking-mode";
 import {
   clearConversations as clearAllConversations,
@@ -28,6 +29,7 @@ import {
   MagnifyingGlass,
   NotePencil,
   Paperclip,
+  SelectionAll,
   SidebarSimple,
   SlidersHorizontal,
   Stop,
@@ -546,6 +548,36 @@ function ResponseMetrics({ message }) {
   );
 }
 
+function AssistantResponse({ message }) {
+  const contentRef = useRef(null);
+  const [selected, setSelected] = useState(false);
+  const selectedTimerRef = useRef(null);
+
+  useEffect(() => () => window.clearTimeout(selectedTimerRef.current), []);
+
+  function selectResponse() {
+    if (!selectElementText(contentRef.current)) return;
+    setSelected(true);
+    window.clearTimeout(selectedTimerRef.current);
+    selectedTimerRef.current = window.setTimeout(() => setSelected(false), 1600);
+  }
+
+  return (
+    <>
+      <p className="message-content" ref={contentRef}>
+        {message.content || (message.status === "streaming" ? "" : "No response was generated.")}
+        {message.status === "streaming" && <span className="stream-cursor" aria-hidden="true" />}
+      </p>
+      {message.content && message.status !== "streaming" && (
+        <button className="select-response-button" type="button" onClick={selectResponse}>
+          <SelectionAll size={16} aria-hidden="true" />
+          <span aria-live="polite">{selected ? "Selected" : "Select response"}</span>
+        </button>
+      )}
+    </>
+  );
+}
+
 function ChatTranscript({
   empty,
   messages,
@@ -582,11 +614,9 @@ function ChatTranscript({
             </div>
           )}
           {message.role === "assistant" && <AgentActivity message={message} mode={conversationMode} />}
-          {(message.content || message.role === "assistant" && message.status !== "streaming") && (
-            <p className="message-content">{message.content || (message.status === "streaming" ? "" : "No response was generated.")}
-              {message.role === "assistant" && message.status === "streaming" && <span className="stream-cursor" aria-hidden="true" />}
-            </p>
-          )}
+          {message.role === "assistant"
+            ? (message.content || message.status !== "streaming") && <AssistantResponse message={message} />
+            : message.content && <p className="message-content">{message.content}</p>}
           {message.status === "cancelled" && <p className="message-status">Generation stopped</p>}
           {message.status === "error" && <p className="message-status error">Generation failed</p>}
           {message.role === "assistant" && <ResponseMetrics message={message} />}
