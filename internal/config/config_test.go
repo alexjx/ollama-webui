@@ -33,3 +33,33 @@ func TestLoadDerivesContextPathFromDatabase(t *testing.T) {
 		t.Fatalf("unexpected context path %q", cfg.AgentContextDir)
 	}
 }
+
+func TestLoadSubagentDefaultsAndOverrides(t *testing.T) {
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.SubagentsEnabled || cfg.SubagentConcurrency != 1 || cfg.SubagentContextTokens != 8192 || cfg.SubagentMaxTurns != 20 || cfg.SubagentResultBytes != 4096 {
+		t.Fatalf("unexpected subagent defaults: %#v", cfg)
+	}
+
+	t.Setenv("AGENT_SUBAGENTS_ENABLED", "false")
+	t.Setenv("AGENT_SUBAGENT_CONCURRENCY", "3")
+	t.Setenv("AGENT_SUBAGENT_CONTEXT_TOKENS", "4096")
+	t.Setenv("AGENT_SUBAGENT_MAX_TURNS", "12")
+	t.Setenv("AGENT_SUBAGENT_RESULT_BYTES", "2048")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SubagentsEnabled || cfg.SubagentConcurrency != 3 || cfg.SubagentContextTokens != 4096 || cfg.SubagentMaxTurns != 12 || cfg.SubagentResultBytes != 2048 {
+		t.Fatalf("subagent overrides were not loaded: %#v", cfg)
+	}
+}
+
+func TestLoadRejectsInvalidSubagentSettings(t *testing.T) {
+	t.Setenv("AGENT_SUBAGENTS_ENABLED", "sometimes")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected invalid subagent enabled flag to fail")
+	}
+}

@@ -39,14 +39,19 @@ type Server struct {
 }
 
 type RuntimeSettings struct {
-	Workspace         string
-	MaxTurns          int
-	ShellTimeout      time.Duration
-	ShellMaxOutput    int
-	InlineInputMax    int
-	ToolFeedbackLimit int
-	ContextDirectory  string
-	ContextTokens     int
+	Workspace             string
+	MaxTurns              int
+	ShellTimeout          time.Duration
+	ShellMaxOutput        int
+	InlineInputMax        int
+	ToolFeedbackLimit     int
+	ContextDirectory      string
+	ContextTokens         int
+	SubagentsEnabled      bool
+	SubagentConcurrency   int
+	SubagentContextTokens int
+	SubagentMaxTurns      int
+	SubagentResultBytes   int
 }
 
 func New(database *store.Store, ollamaClient *ollama.Client, runner agent.Runner, runtime RuntimeSettings, webDir string, logger *slog.Logger) *Server {
@@ -99,14 +104,19 @@ func (s *Server) settings(response http.ResponseWriter, request *http.Request) {
 	}
 	writeJSON(response, http.StatusOK, map[string]any{
 		"agent": map[string]any{
-			"workspace":              s.runtime.Workspace,
-			"max_turns":              s.runtime.MaxTurns,
-			"shell_timeout_seconds":  int(s.runtime.ShellTimeout.Seconds()),
-			"shell_max_output_bytes": s.runtime.ShellMaxOutput,
-			"inline_input_bytes":     s.runtime.InlineInputMax,
-			"tool_feedback_bytes":    s.runtime.ToolFeedbackLimit,
-			"context_path":           s.runtime.ContextDirectory,
-			"context_budget_tokens":  s.runtime.ContextTokens,
+			"workspace":               s.runtime.Workspace,
+			"max_turns":               s.runtime.MaxTurns,
+			"shell_timeout_seconds":   int(s.runtime.ShellTimeout.Seconds()),
+			"shell_max_output_bytes":  s.runtime.ShellMaxOutput,
+			"inline_input_bytes":      s.runtime.InlineInputMax,
+			"tool_feedback_bytes":     s.runtime.ToolFeedbackLimit,
+			"context_path":            s.runtime.ContextDirectory,
+			"context_budget_tokens":   s.runtime.ContextTokens,
+			"subagents_enabled":       s.runtime.SubagentsEnabled,
+			"subagent_concurrency":    s.runtime.SubagentConcurrency,
+			"subagent_context_tokens": s.runtime.SubagentContextTokens,
+			"subagent_max_turns":      s.runtime.SubagentMaxTurns,
+			"subagent_result_bytes":   s.runtime.SubagentResultBytes,
 		},
 		"storage": stats,
 	})
@@ -425,6 +435,7 @@ func (s *Server) generate(response http.ResponseWriter, request *http.Request) {
 	result, err := s.agent.Run(request.Context(), agent.RunInput{
 		ConversationID: conversation.ID, Model: conversation.Model, Mode: conversation.Mode, Messages: upstreamMessages, Options: options,
 		Think:              think,
+		Vision:             containsCapability(modelInfo.Capabilities, "vision"),
 		AssistantMessageID: assistantMessage.ID,
 	}, func(event agent.Event) error {
 		return writeEvent(response, flusher, event)

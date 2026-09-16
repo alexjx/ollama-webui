@@ -19,6 +19,7 @@ import (
 var (
 	ErrNotFound          = errors.New("not found")
 	ErrInvalidStorageKey = errors.New("invalid storage key")
+	ErrInvalidAgentState = errors.New("invalid agent work state transition")
 )
 
 type Conversation struct {
@@ -47,6 +48,7 @@ type Message struct {
 	Metadata       map[string]any `json:"metadata,omitempty"`
 	Attachments    []Attachment   `json:"attachments,omitempty"`
 	AgentSteps     []AgentStep    `json:"agent_steps,omitempty"`
+	SubagentRuns   []AgentRun     `json:"subagent_runs,omitempty"`
 	CreatedAt      time.Time      `json:"created_at"`
 }
 
@@ -131,6 +133,70 @@ type CreateContextArtifactParams struct {
 	Summary         string
 }
 
+const (
+	AgentStatusQueued    = "queued"
+	AgentStatusRunning   = "running"
+	AgentStatusComplete  = "complete"
+	AgentStatusFailed    = "failed"
+	AgentStatusCancelled = "cancelled"
+)
+
+type AgentJob struct {
+	ID                  int64      `json:"id"`
+	ConversationID      int64      `json:"conversation_id"`
+	RequestingMessageID int64      `json:"requesting_message_id"`
+	Task                string     `json:"task"`
+	Status              string     `json:"status"`
+	ResultSummary       string     `json:"result_summary"`
+	OutputRefs          []string   `json:"output_refs"`
+	Error               string     `json:"error,omitempty"`
+	CreatedAt           time.Time  `json:"created_at"`
+	UpdatedAt           time.Time  `json:"updated_at"`
+	StartedAt           *time.Time `json:"started_at,omitempty"`
+	CompletedAt         *time.Time `json:"completed_at,omitempty"`
+}
+
+type CreateAgentJobParams struct {
+	ConversationID      int64
+	RequestingMessageID int64
+	Task                string
+}
+
+type AgentRun struct {
+	ID                  int64      `json:"id"`
+	JobID               int64      `json:"job_id"`
+	ParentRunID         *int64     `json:"parent_run_id,omitempty"`
+	ConversationID      int64      `json:"conversation_id"`
+	RequestingMessageID int64      `json:"requesting_message_id"`
+	Task                string     `json:"task"`
+	Status              string     `json:"status"`
+	Model               string     `json:"model"`
+	ContextWindow       int        `json:"context_window"`
+	Depth               int        `json:"depth"`
+	ResultSummary       string     `json:"result_summary"`
+	OutputRefs          []string   `json:"output_refs"`
+	Error               string     `json:"error,omitempty"`
+	CreatedAt           time.Time  `json:"created_at"`
+	UpdatedAt           time.Time  `json:"updated_at"`
+	StartedAt           *time.Time `json:"started_at,omitempty"`
+	CompletedAt         *time.Time `json:"completed_at,omitempty"`
+}
+
+type CreateAgentRunParams struct {
+	JobID         int64
+	ParentRunID   *int64
+	Task          string
+	Model         string
+	ContextWindow int
+	Depth         int
+}
+
+type RecoveredAgentWork struct {
+	Jobs     int64 `json:"jobs"`
+	Runs     int64 `json:"runs"`
+	Messages int64 `json:"messages"`
+}
+
 type Store struct {
 	db   *sql.DB
 	path string
@@ -146,6 +212,8 @@ type Stats struct {
 	AttachmentBytes      int64 `json:"attachment_bytes"`
 	ContextArtifactBytes int64 `json:"context_artifact_bytes"`
 	DatabaseBytes        int64 `json:"database_bytes"`
+	AgentJobs            int64 `json:"agent_jobs"`
+	AgentRuns            int64 `json:"agent_runs"`
 }
 
 func Open(ctx context.Context, path string) (*Store, error) {
@@ -258,6 +326,44 @@ CREATE TABLE IF NOT EXISTS context_artifacts (
 );
 CREATE INDEX IF NOT EXISTS context_artifacts_conversation_created_idx
   ON context_artifacts(conversation_id, created_at, id);
+CREATE TABLE IF NOT EXISTS agent_jobs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  requesting_message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  task TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'queued'
+    CHECK (status IN ('queued', 'running', 'complete', 'failed', 'cancelled')),
+  result_summary TEXT NOT NULL DEFAULT '',
+  output_refs_json TEXT NOT NULL DEFAULT '[]',
+  error TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  started_at TEXT,
+  completed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS agent_jobs_requesting_message_idx
+  ON agent_jobs(requesting_message_id, created_at, id);
+CREATE TABLE IF NOT EXISTS agent_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id INTEGER NOT NULL REFERENCES agent_jobs(id) ON DELETE CASCADE,
+  parent_run_id INTEGER REFERENCES agent_runs(id) ON DELETE CASCADE,
+  task TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'queued'
+    CHECK (status IN ('queued', 'running', 'complete', 'failed', 'cancelled')),
+  model TEXT NOT NULL,
+  context_window INTEGER NOT NULL CHECK (context_window > 0),
+  depth INTEGER NOT NULL CHECK (depth >= 0),
+  result_summary TEXT NOT NULL DEFAULT '',
+  output_refs_json TEXT NOT NULL DEFAULT '[]',
+  error TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  started_at TEXT,
+  completed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS agent_runs_job_created_idx
+  ON agent_runs(job_id, created_at, id);
+CREATE INDEX IF NOT EXISTS agent_runs_parent_idx ON agent_runs(parent_run_id, id);
 `
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("migrate database: %w", err)
@@ -436,6 +542,261 @@ func (s *Store) ClearConversations(ctx context.Context) (int64, error) {
 		return 0, fmt.Errorf("commit clear conversations: %w", err)
 	}
 	return deleted, nil
+}
+
+func (s *Store) CreateAgentJob(ctx context.Context, params CreateAgentJobParams) (AgentJob, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return AgentJob{}, fmt.Errorf("begin agent job transaction: %w", err)
+	}
+	defer tx.Rollback()
+	belongs, err := messageBelongsToConversation(ctx, tx, params.RequestingMessageID, params.ConversationID)
+	if err != nil {
+		return AgentJob{}, err
+	}
+	if !belongs {
+		return AgentJob{}, ErrNotFound
+	}
+	now := time.Now().UTC()
+	result, err := tx.ExecContext(ctx, `
+INSERT INTO agent_jobs
+  (conversation_id, requesting_message_id, task, status, created_at, updated_at)
+VALUES (?, ?, ?, 'queued', ?, ?)`, params.ConversationID, params.RequestingMessageID,
+		params.Task, formatTime(now), formatTime(now))
+	if err != nil {
+		return AgentJob{}, fmt.Errorf("create agent job: %w", err)
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return AgentJob{}, fmt.Errorf("read agent job id: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return AgentJob{}, fmt.Errorf("commit agent job: %w", err)
+	}
+	return s.GetAgentJob(ctx, id)
+}
+
+func (s *Store) GetAgentJob(ctx context.Context, id int64) (AgentJob, error) {
+	return scanAgentJob(s.db.QueryRowContext(ctx, agentJobSelect+` WHERE id = ?`, id))
+}
+
+func (s *Store) ListAgentJobsByRequestingMessage(ctx context.Context, messageID int64) ([]AgentJob, error) {
+	rows, err := s.db.QueryContext(ctx, agentJobSelect+`
+WHERE requesting_message_id = ? ORDER BY created_at, id`, messageID)
+	if err != nil {
+		return nil, fmt.Errorf("list agent jobs: %w", err)
+	}
+	defer rows.Close()
+	items := make([]AgentJob, 0)
+	for rows.Next() {
+		item, err := scanAgentJob(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (s *Store) StartAgentJob(ctx context.Context, id int64) (AgentJob, error) {
+	now := time.Now().UTC()
+	result, err := s.db.ExecContext(ctx, `
+UPDATE agent_jobs SET status = 'running', started_at = ?, updated_at = ?
+WHERE id = ? AND status = 'queued'`, formatTime(now), formatTime(now), id)
+	if err != nil {
+		return AgentJob{}, fmt.Errorf("start agent job: %w", err)
+	}
+	if err := requireAgentTransition(ctx, s.db, "agent_jobs", id, result); err != nil {
+		return AgentJob{}, err
+	}
+	return s.GetAgentJob(ctx, id)
+}
+
+func (s *Store) TouchAgentJob(ctx context.Context, id int64) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE agent_jobs SET updated_at = ? WHERE id = ? AND status = 'running'`,
+		formatTime(time.Now().UTC()), id)
+	if err != nil {
+		return fmt.Errorf("touch agent job: %w", err)
+	}
+	return requireAgentTransition(ctx, s.db, "agent_jobs", id, result)
+}
+
+func (s *Store) CompleteAgentJob(ctx context.Context, id int64, summary string, outputRefs []string) (AgentJob, error) {
+	if err := s.finishAgentJob(ctx, id, AgentStatusComplete, summary, outputRefs, ""); err != nil {
+		return AgentJob{}, err
+	}
+	return s.GetAgentJob(ctx, id)
+}
+
+func (s *Store) FailAgentJob(ctx context.Context, id int64, failure string) (AgentJob, error) {
+	if err := s.finishAgentJob(ctx, id, AgentStatusFailed, "", nil, failure); err != nil {
+		return AgentJob{}, err
+	}
+	return s.GetAgentJob(ctx, id)
+}
+
+func (s *Store) CancelAgentJob(ctx context.Context, id int64, reason string) (AgentJob, error) {
+	if err := s.finishAgentJob(ctx, id, AgentStatusCancelled, "", nil, reason); err != nil {
+		return AgentJob{}, err
+	}
+	return s.GetAgentJob(ctx, id)
+}
+
+func (s *Store) CreateAgentRun(ctx context.Context, params CreateAgentRunParams) (AgentRun, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return AgentRun{}, fmt.Errorf("begin agent run transaction: %w", err)
+	}
+	defer tx.Rollback()
+	var expectedDepth int
+	if params.ParentRunID == nil {
+		expectedDepth = 0
+	} else {
+		if err := tx.QueryRowContext(ctx, `
+SELECT depth + 1 FROM agent_runs WHERE id = ? AND job_id = ?`, *params.ParentRunID, params.JobID).Scan(&expectedDepth); errors.Is(err, sql.ErrNoRows) {
+			return AgentRun{}, ErrNotFound
+		} else if err != nil {
+			return AgentRun{}, fmt.Errorf("check parent agent run: %w", err)
+		}
+	}
+	if params.Depth != expectedDepth {
+		return AgentRun{}, fmt.Errorf("%w: depth %d, want %d", ErrInvalidAgentState, params.Depth, expectedDepth)
+	}
+	now := time.Now().UTC()
+	result, err := tx.ExecContext(ctx, `
+INSERT INTO agent_runs
+  (job_id, parent_run_id, task, status, model, context_window, depth, created_at, updated_at)
+VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?)`, params.JobID, params.ParentRunID, params.Task,
+		params.Model, params.ContextWindow, params.Depth, formatTime(now), formatTime(now))
+	if err != nil {
+		return AgentRun{}, fmt.Errorf("create agent run: %w", err)
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return AgentRun{}, fmt.Errorf("read agent run id: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return AgentRun{}, fmt.Errorf("commit agent run: %w", err)
+	}
+	return s.GetAgentRun(ctx, id)
+}
+
+func (s *Store) GetAgentRun(ctx context.Context, id int64) (AgentRun, error) {
+	return scanAgentRun(s.db.QueryRowContext(ctx, agentRunSelect+` WHERE r.id = ?`, id))
+}
+
+func (s *Store) ListAgentRunsByRequestingMessage(ctx context.Context, messageID int64) ([]AgentRun, error) {
+	rows, err := s.db.QueryContext(ctx, agentRunSelect+`
+WHERE j.requesting_message_id = ? ORDER BY r.created_at, r.id`, messageID)
+	if err != nil {
+		return nil, fmt.Errorf("list agent runs: %w", err)
+	}
+	defer rows.Close()
+	items := make([]AgentRun, 0)
+	for rows.Next() {
+		item, err := scanAgentRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (s *Store) StartAgentRun(ctx context.Context, id int64) (AgentRun, error) {
+	now := time.Now().UTC()
+	result, err := s.db.ExecContext(ctx, `
+UPDATE agent_runs SET status = 'running', started_at = ?, updated_at = ?
+WHERE id = ? AND status = 'queued'`, formatTime(now), formatTime(now), id)
+	if err != nil {
+		return AgentRun{}, fmt.Errorf("start agent run: %w", err)
+	}
+	if err := requireAgentTransition(ctx, s.db, "agent_runs", id, result); err != nil {
+		return AgentRun{}, err
+	}
+	return s.GetAgentRun(ctx, id)
+}
+
+func (s *Store) TouchAgentRun(ctx context.Context, id int64) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE agent_runs SET updated_at = ? WHERE id = ? AND status = 'running'`,
+		formatTime(time.Now().UTC()), id)
+	if err != nil {
+		return fmt.Errorf("touch agent run: %w", err)
+	}
+	return requireAgentTransition(ctx, s.db, "agent_runs", id, result)
+}
+
+func (s *Store) CompleteAgentRun(ctx context.Context, id int64, summary string, outputRefs []string) (AgentRun, error) {
+	if err := s.finishAgentRun(ctx, id, AgentStatusComplete, summary, outputRefs, ""); err != nil {
+		return AgentRun{}, err
+	}
+	return s.GetAgentRun(ctx, id)
+}
+
+func (s *Store) FailAgentRun(ctx context.Context, id int64, failure string) (AgentRun, error) {
+	if err := s.finishAgentRun(ctx, id, AgentStatusFailed, "", nil, failure); err != nil {
+		return AgentRun{}, err
+	}
+	return s.GetAgentRun(ctx, id)
+}
+
+func (s *Store) CancelAgentRun(ctx context.Context, id int64, reason string) (AgentRun, error) {
+	if err := s.finishAgentRun(ctx, id, AgentStatusCancelled, "", nil, reason); err != nil {
+		return AgentRun{}, err
+	}
+	return s.GetAgentRun(ctx, id)
+}
+
+func (s *Store) RecoverStaleAgentWork(ctx context.Context, staleBefore time.Time) (RecoveredAgentWork, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return RecoveredAgentWork{}, fmt.Errorf("begin stale agent work recovery: %w", err)
+	}
+	defer tx.Rollback()
+	now := formatTime(time.Now().UTC())
+	cutoff := formatTime(staleBefore.UTC())
+	messageResult, err := tx.ExecContext(ctx, `
+UPDATE messages
+SET status = 'error'
+WHERE role = 'assistant' AND status = 'streaming' AND EXISTS (
+  SELECT 1 FROM agent_jobs
+  WHERE agent_jobs.requesting_message_id = messages.id
+    AND agent_jobs.status IN ('queued', 'running')
+    AND agent_jobs.updated_at < ?
+)`, cutoff)
+	if err != nil {
+		return RecoveredAgentWork{}, fmt.Errorf("recover requesting agent messages: %w", err)
+	}
+	runResult, err := tx.ExecContext(ctx, `
+UPDATE agent_runs
+SET status = 'failed', error = 'interrupted before completion', updated_at = ?, completed_at = ?
+WHERE status IN ('queued', 'running') AND updated_at < ?`, now, now, cutoff)
+	if err != nil {
+		return RecoveredAgentWork{}, fmt.Errorf("recover stale agent runs: %w", err)
+	}
+	jobResult, err := tx.ExecContext(ctx, `
+UPDATE agent_jobs
+SET status = 'failed', error = 'interrupted before completion', updated_at = ?, completed_at = ?
+WHERE status IN ('queued', 'running') AND updated_at < ?`, now, now, cutoff)
+	if err != nil {
+		return RecoveredAgentWork{}, fmt.Errorf("recover stale agent jobs: %w", err)
+	}
+	runs, err := runResult.RowsAffected()
+	if err != nil {
+		return RecoveredAgentWork{}, fmt.Errorf("count recovered agent runs: %w", err)
+	}
+	jobs, err := jobResult.RowsAffected()
+	if err != nil {
+		return RecoveredAgentWork{}, fmt.Errorf("count recovered agent jobs: %w", err)
+	}
+	messages, err := messageResult.RowsAffected()
+	if err != nil {
+		return RecoveredAgentWork{}, fmt.Errorf("count recovered requesting messages: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return RecoveredAgentWork{}, fmt.Errorf("commit stale agent work recovery: %w", err)
+	}
+	return RecoveredAgentWork{Jobs: jobs, Runs: runs, Messages: messages}, nil
 }
 
 func (s *Store) EnsureConversationContext(ctx context.Context, conversationID int64) (ConversationContext, error) {
@@ -688,10 +1049,13 @@ SELECT
   (SELECT COUNT(*) FROM agent_steps),
   (SELECT COUNT(*) FROM context_checkpoints),
   (SELECT COUNT(*) FROM context_artifacts),
+  (SELECT COUNT(*) FROM agent_jobs),
+  (SELECT COUNT(*) FROM agent_runs),
   (SELECT COALESCE(SUM(LENGTH(data)), 0) FROM message_attachments),
   (SELECT COALESCE(SUM(size_bytes), 0) FROM context_artifacts)`).Scan(
 		&stats.Conversations, &stats.Messages, &stats.Attachments, &stats.AgentSteps,
-		&stats.ContextCheckpoints, &stats.ContextArtifacts, &stats.AttachmentBytes, &stats.ContextArtifactBytes)
+		&stats.ContextCheckpoints, &stats.ContextArtifacts, &stats.AgentJobs, &stats.AgentRuns,
+		&stats.AttachmentBytes, &stats.ContextArtifactBytes)
 	if err != nil {
 		return Stats{}, fmt.Errorf("read database stats: %w", err)
 	}
@@ -869,7 +1233,28 @@ WHERE m.conversation_id = ? ORDER BY s.id`, conversationID)
 			messages[index].AgentSteps = append(messages[index].AgentSteps, step)
 		}
 	}
-	return messages, stepRows.Err()
+	if err := stepRows.Err(); err != nil {
+		return nil, err
+	}
+	if err := stepRows.Close(); err != nil {
+		return nil, err
+	}
+	runRows, err := s.db.QueryContext(ctx, agentRunSelect+`
+WHERE j.conversation_id = ? ORDER BY r.created_at, r.id`, conversationID)
+	if err != nil {
+		return nil, fmt.Errorf("list message subagent runs: %w", err)
+	}
+	defer runRows.Close()
+	for runRows.Next() {
+		run, err := scanAgentRun(runRows)
+		if err != nil {
+			return nil, err
+		}
+		if index, ok := messageIndexes[run.RequestingMessageID]; ok {
+			messages[index].SubagentRuns = append(messages[index].SubagentRuns, run)
+		}
+	}
+	return messages, runRows.Err()
 }
 
 func (s *Store) BeginAgentStep(ctx context.Context, messageID int64, turn int, toolName, input string) (AgentStep, error) {
@@ -926,6 +1311,162 @@ const contextArtifactSelect = `
 SELECT id, conversation_id, storage_key, source_message_id, source_step_id, kind,
        display_name, media_type, size_bytes, sha256, summary, created_at
 FROM context_artifacts `
+
+const agentJobSelect = `
+SELECT id, conversation_id, requesting_message_id, task, status, result_summary,
+       output_refs_json, error, created_at, updated_at, started_at, completed_at
+FROM agent_jobs `
+
+const agentRunSelect = `
+SELECT r.id, r.job_id, r.parent_run_id, j.conversation_id, j.requesting_message_id,
+       r.task, r.status, r.model, r.context_window, r.depth, r.result_summary,
+       r.output_refs_json, r.error, r.created_at, r.updated_at, r.started_at, r.completed_at
+FROM agent_runs r JOIN agent_jobs j ON j.id = r.job_id `
+
+func (s *Store) finishAgentJob(ctx context.Context, id int64, status, summary string, outputRefs []string, failure string) error {
+	encodedRefs, err := encodeOutputRefs(outputRefs)
+	if err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin agent job completion: %w", err)
+	}
+	defer tx.Rollback()
+	now := formatTime(time.Now().UTC())
+	allowedStates := "status = 'running'"
+	if status == AgentStatusCancelled {
+		allowedStates = "status IN ('queued', 'running')"
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE agent_jobs
+SET status = ?, result_summary = ?, output_refs_json = ?, error = ?, updated_at = ?, completed_at = ?
+WHERE id = ? AND `+allowedStates, status, summary, encodedRefs, failure, now, now, id)
+	if err != nil {
+		return fmt.Errorf("finish agent job: %w", err)
+	}
+	if err := requireAgentTransition(ctx, tx, "agent_jobs", id, result); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit agent job completion: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) finishAgentRun(ctx context.Context, id int64, status, summary string, outputRefs []string, failure string) error {
+	encodedRefs, err := encodeOutputRefs(outputRefs)
+	if err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin agent run completion: %w", err)
+	}
+	defer tx.Rollback()
+	now := formatTime(time.Now().UTC())
+	allowedStates := "status = 'running'"
+	if status == AgentStatusCancelled {
+		allowedStates = "status IN ('queued', 'running')"
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE agent_runs
+SET status = ?, result_summary = ?, output_refs_json = ?, error = ?, updated_at = ?, completed_at = ?
+WHERE id = ? AND `+allowedStates, status, summary, encodedRefs, failure, now, now, id)
+	if err != nil {
+		return fmt.Errorf("finish agent run: %w", err)
+	}
+	if err := requireAgentTransition(ctx, tx, "agent_runs", id, result); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit agent run completion: %w", err)
+	}
+	return nil
+}
+
+func encodeOutputRefs(outputRefs []string) (string, error) {
+	if outputRefs == nil {
+		outputRefs = []string{}
+	}
+	encoded, err := json.Marshal(outputRefs)
+	if err != nil {
+		return "", fmt.Errorf("encode agent output references: %w", err)
+	}
+	return string(encoded), nil
+}
+
+func scanAgentJob(row rowScanner) (AgentJob, error) {
+	var item AgentJob
+	var outputRefsJSON, createdAt, updatedAt string
+	var startedAt, completedAt sql.NullString
+	if err := row.Scan(&item.ID, &item.ConversationID, &item.RequestingMessageID, &item.Task,
+		&item.Status, &item.ResultSummary, &outputRefsJSON, &item.Error, &createdAt, &updatedAt,
+		&startedAt, &completedAt); errors.Is(err, sql.ErrNoRows) {
+		return AgentJob{}, ErrNotFound
+	} else if err != nil {
+		return AgentJob{}, fmt.Errorf("scan agent job: %w", err)
+	}
+	if err := json.Unmarshal([]byte(outputRefsJSON), &item.OutputRefs); err != nil {
+		return AgentJob{}, fmt.Errorf("decode agent job output references: %w", err)
+	}
+	if err := parseAgentWorkTimes(createdAt, updatedAt, startedAt, completedAt,
+		&item.CreatedAt, &item.UpdatedAt, &item.StartedAt, &item.CompletedAt); err != nil {
+		return AgentJob{}, err
+	}
+	return item, nil
+}
+
+func scanAgentRun(row rowScanner) (AgentRun, error) {
+	var item AgentRun
+	var parentRunID sql.NullInt64
+	var outputRefsJSON, createdAt, updatedAt string
+	var startedAt, completedAt sql.NullString
+	if err := row.Scan(&item.ID, &item.JobID, &parentRunID, &item.ConversationID,
+		&item.RequestingMessageID, &item.Task, &item.Status, &item.Model, &item.ContextWindow,
+		&item.Depth, &item.ResultSummary, &outputRefsJSON, &item.Error, &createdAt, &updatedAt,
+		&startedAt, &completedAt); errors.Is(err, sql.ErrNoRows) {
+		return AgentRun{}, ErrNotFound
+	} else if err != nil {
+		return AgentRun{}, fmt.Errorf("scan agent run: %w", err)
+	}
+	if parentRunID.Valid {
+		value := parentRunID.Int64
+		item.ParentRunID = &value
+	}
+	if err := json.Unmarshal([]byte(outputRefsJSON), &item.OutputRefs); err != nil {
+		return AgentRun{}, fmt.Errorf("decode agent run output references: %w", err)
+	}
+	if err := parseAgentWorkTimes(createdAt, updatedAt, startedAt, completedAt,
+		&item.CreatedAt, &item.UpdatedAt, &item.StartedAt, &item.CompletedAt); err != nil {
+		return AgentRun{}, err
+	}
+	return item, nil
+}
+
+func parseAgentWorkTimes(createdAt, updatedAt string, startedAt, completedAt sql.NullString,
+	created, updated *time.Time, started, completed **time.Time) error {
+	var err error
+	if *created, err = parseTime(createdAt); err != nil {
+		return err
+	}
+	if *updated, err = parseTime(updatedAt); err != nil {
+		return err
+	}
+	if startedAt.Valid {
+		value, err := parseTime(startedAt.String)
+		if err != nil {
+			return err
+		}
+		*started = &value
+	}
+	if completedAt.Valid {
+		value, err := parseTime(completedAt.String)
+		if err != nil {
+			return err
+		}
+		*completed = &value
+	}
+	return nil
+}
 
 func getConversationContext(ctx context.Context, query queryRower, conversationID int64) (ConversationContext, error) {
 	return scanConversationContext(query.QueryRowContext(ctx, `
@@ -1055,6 +1596,24 @@ func requireAffected(result sql.Result) error {
 	}
 	if count == 0 {
 		return ErrNotFound
+	}
+	return nil
+}
+
+func requireAgentTransition(ctx context.Context, query queryRower, table string, id int64, result sql.Result) error {
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count == 0 {
+		var exists bool
+		if err := query.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM "+table+" WHERE id = ?)", id).Scan(&exists); err != nil {
+			return fmt.Errorf("check agent work state: %w", err)
+		}
+		if !exists {
+			return ErrNotFound
+		}
+		return ErrInvalidAgentState
 	}
 	return nil
 }

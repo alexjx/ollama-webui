@@ -7,6 +7,7 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestConversationPersistenceAndSearch(t *testing.T) {
@@ -450,5 +451,318 @@ func TestContextArtifactsAreConversationScopedAndCascade(t *testing.T) {
 	}
 	if _, err := database.GetConversation(ctx, second.ID); err != nil {
 		t.Fatalf("unrelated conversation was changed: %v", err)
+	}
+}
+
+func TestAgentJobsAndRunsHierarchyLifecycleReloadAndCascade(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "agent-work.db")
+	database, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := database.CreateConversation(ctx, CreateConversationParams{Title: "Delegate", Model: "parent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := database.AddMessage(ctx, conversation.ID, "user", "label images", "complete")
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := database.CreateAgentJob(ctx, CreateAgentJobParams{
+		ConversationID: conversation.ID, RequestingMessageID: request.ID, Task: "label a directory",
+	})
+	if err != nil || job.Status != AgentStatusQueued || job.OutputRefs == nil {
+		t.Fatalf("agent job was not created in a usable queued state: %#v, %v", job, err)
+	}
+	root, err := database.CreateAgentRun(ctx, CreateAgentRunParams{
+		JobID: job.ID, Task: "create manifest", Model: "qwen3-vl", ContextWindow: 8192, Depth: 0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := database.CreateAgentRun(ctx, CreateAgentRunParams{
+		JobID: job.ID, ParentRunID: &root.ID, Task: "label shard 1", Model: "qwen3-vl", ContextWindow: 4096, Depth: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if child.ParentRunID == nil || *child.ParentRunID != root.ID || child.ConversationID != conversation.ID || child.RequestingMessageID != request.ID {
+		t.Fatalf("agent run hierarchy or ownership did not round trip: %#v", child)
+	}
+	if _, err := database.CreateAgentRun(ctx, CreateAgentRunParams{
+		JobID: job.ID, ParentRunID: &root.ID, Task: "bad depth", Model: "test", ContextWindow: 1024, Depth: 3,
+	}); !errors.Is(err, ErrInvalidAgentState) {
+		t.Fatalf("invalid child depth was accepted: %v", err)
+	}
+	otherJob, err := database.CreateAgentJob(ctx, CreateAgentJobParams{
+		ConversationID: conversation.ID, RequestingMessageID: request.ID, Task: "other",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.CreateAgentRun(ctx, CreateAgentRunParams{
+		JobID: otherJob.ID, ParentRunID: &root.ID, Task: "cross-job child", Model: "test", ContextWindow: 1024, Depth: 1,
+	}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cross-job parent was accepted: %v", err)
+	}
+	if _, err := database.StartAgentJob(ctx, job.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.StartAgentRun(ctx, root.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.StartAgentRun(ctx, child.ID); err != nil {
+		t.Fatal(err)
+	}
+	child, err = database.CompleteAgentRun(ctx, child.ID, "12 images labeled", []string{"labels/part-1.jsonl"})
+	if err != nil || child.Status != AgentStatusComplete || child.CompletedAt == nil || child.OutputRefs[0] != "labels/part-1.jsonl" {
+		t.Fatalf("agent run completion did not round trip: %#v, %v", child, err)
+	}
+	if _, err := database.FailAgentRun(ctx, root.ID, "manifest invalid"); err != nil {
+		t.Fatal(err)
+	}
+	job, err = database.CompleteAgentJob(ctx, job.ID, "partial output retained", []string{"labels/part-1.jsonl"})
+	if err != nil || job.StartedAt == nil || job.CompletedAt == nil || job.Status != AgentStatusComplete {
+		t.Fatalf("agent job lifecycle did not round trip: %#v, %v", job, err)
+	}
+	if _, err := database.StartAgentJob(ctx, job.ID); !errors.Is(err, ErrInvalidAgentState) {
+		t.Fatalf("terminal job was restarted: %v", err)
+	}
+	cancelledRun, err := database.CreateAgentRun(ctx, CreateAgentRunParams{
+		JobID: otherJob.ID, Task: "cancel me", Model: "test", ContextWindow: 1024, Depth: 0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cancelledRun, err = database.CancelAgentRun(ctx, cancelledRun.ID, "no longer needed"); err != nil || cancelledRun.Status != AgentStatusCancelled {
+		t.Fatalf("queued run was not cancelled: %#v, %v", cancelledRun, err)
+	}
+	if _, err := database.CancelAgentJob(ctx, otherJob.ID, "no longer needed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	database, err = Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	jobs, err := database.ListAgentJobsByRequestingMessage(ctx, request.ID)
+	if err != nil || len(jobs) != 2 || jobs[0].ID != job.ID {
+		t.Fatalf("agent jobs did not survive reload: %#v, %v", jobs, err)
+	}
+	runs, err := database.ListAgentRunsByRequestingMessage(ctx, request.ID)
+	if err != nil || len(runs) != 3 || runs[0].ID != root.ID || runs[1].ID != child.ID {
+		t.Fatalf("agent runs did not survive reload in creation order: %#v, %v", runs, err)
+	}
+	if err := database.DeleteConversation(ctx, conversation.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.GetAgentJob(ctx, job.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("agent job did not cascade with conversation: %v", err)
+	}
+	if _, err := database.GetAgentRun(ctx, child.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("agent run did not cascade with conversation: %v", err)
+	}
+}
+
+func TestAgentWorkOwnershipAndStaleRecovery(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	first, err := database.CreateConversation(ctx, CreateConversationParams{Title: "First", Model: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := database.CreateConversation(ctx, CreateConversationParams{Title: "Second", Model: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := database.AddMessage(ctx, first.ID, "user", "delegate", "complete")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.CreateAgentJob(ctx, CreateAgentJobParams{
+		ConversationID: second.ID, RequestingMessageID: request.ID, Task: "cross boundary",
+	}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cross-conversation requesting message was accepted: %v", err)
+	}
+
+	staleJob, err := database.CreateAgentJob(ctx, CreateAgentJobParams{
+		ConversationID: first.ID, RequestingMessageID: request.ID, Task: "stale job",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleRun, err := database.CreateAgentRun(ctx, CreateAgentRunParams{
+		JobID: staleJob.ID, Task: "stale run", Model: "test", ContextWindow: 2048, Depth: 0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.StartAgentJob(ctx, staleJob.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.StartAgentRun(ctx, staleRun.ID); err != nil {
+		t.Fatal(err)
+	}
+	freshJob, err := database.CreateAgentJob(ctx, CreateAgentJobParams{
+		ConversationID: first.ID, RequestingMessageID: request.ID, Task: "fresh job",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	freshRun, err := database.CreateAgentRun(ctx, CreateAgentRunParams{
+		JobID: freshJob.ID, Task: "fresh run", Model: "test", ContextWindow: 2048, Depth: 0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.StartAgentJob(ctx, freshJob.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.StartAgentRun(ctx, freshRun.ID); err != nil {
+		t.Fatal(err)
+	}
+	old := formatTime(time.Now().UTC().Add(-2 * time.Hour))
+	if _, err := database.db.ExecContext(ctx, `UPDATE agent_jobs SET updated_at = ? WHERE id = ?`, old, staleJob.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.ExecContext(ctx, `UPDATE agent_runs SET updated_at = ? WHERE id = ?`, old, staleRun.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.ExecContext(ctx, `UPDATE agent_jobs SET updated_at = ? WHERE id = ?`, old, freshJob.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.ExecContext(ctx, `UPDATE agent_runs SET updated_at = ? WHERE id = ?`, old, freshRun.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.TouchAgentJob(ctx, freshJob.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.TouchAgentRun(ctx, freshRun.ID); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := database.RecoverStaleAgentWork(ctx, time.Now().UTC().Add(-time.Hour))
+	if err != nil || recovered.Jobs != 1 || recovered.Runs != 1 {
+		t.Fatalf("unexpected stale recovery result: %#v, %v", recovered, err)
+	}
+	staleJob, err = database.GetAgentJob(ctx, staleJob.ID)
+	if err != nil || staleJob.Status != AgentStatusFailed || staleJob.CompletedAt == nil || staleJob.Error == "" {
+		t.Fatalf("stale job was not failed durably: %#v, %v", staleJob, err)
+	}
+	staleRun, err = database.GetAgentRun(ctx, staleRun.ID)
+	if err != nil || staleRun.Status != AgentStatusFailed || staleRun.CompletedAt == nil || staleRun.Error == "" {
+		t.Fatalf("stale run was not failed durably: %#v, %v", staleRun, err)
+	}
+	freshJob, err = database.GetAgentJob(ctx, freshJob.ID)
+	if err != nil || freshJob.Status != AgentStatusRunning {
+		t.Fatalf("fresh running job was recovered incorrectly: %#v, %v", freshJob, err)
+	}
+	freshRun, err = database.GetAgentRun(ctx, freshRun.ID)
+	if err != nil || freshRun.Status != AgentStatusRunning {
+		t.Fatalf("fresh running run was recovered incorrectly: %#v, %v", freshRun, err)
+	}
+}
+
+func TestRecoverStaleAgentWorkReloadsQueuedAndRunningParents(t *testing.T) {
+	ctx := context.Background()
+	database, err := Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	conversation, err := database.CreateConversation(ctx, CreateConversationParams{Title: "Recovery", Model: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	type work struct {
+		message Message
+		job     AgentJob
+		run     AgentRun
+	}
+	createWork := func(task string, start bool) work {
+		t.Helper()
+		message, err := database.AddMessage(ctx, conversation.ID, "assistant", "", "streaming")
+		if err != nil {
+			t.Fatal(err)
+		}
+		job, err := database.CreateAgentJob(ctx, CreateAgentJobParams{
+			ConversationID: conversation.ID, RequestingMessageID: message.ID, Task: task,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		run, err := database.CreateAgentRun(ctx, CreateAgentRunParams{
+			JobID: job.ID, Task: task, Model: "test", ContextWindow: 2048, Depth: 0,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if start {
+			job, err = database.StartAgentJob(ctx, job.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			run, err = database.StartAgentRun(ctx, run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		return work{message: message, job: job, run: run}
+	}
+
+	queued := createWork("queued before crash", false)
+	running := createWork("running before crash", true)
+	fresh := createWork("still active", true)
+	old := formatTime(time.Now().UTC().Add(-2 * time.Hour))
+	for _, item := range []work{queued, running} {
+		if _, err := database.db.ExecContext(ctx, `UPDATE agent_jobs SET updated_at = ? WHERE id = ?`, old, item.job.ID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := database.db.ExecContext(ctx, `UPDATE agent_runs SET updated_at = ? WHERE id = ?`, old, item.run.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	recovered, err := database.RecoverStaleAgentWork(ctx, time.Now().UTC().Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.Jobs != 2 || recovered.Runs != 2 || recovered.Messages != 2 {
+		t.Fatalf("unexpected recovery counts: %#v", recovered)
+	}
+	messages, err := database.Messages(ctx, conversation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := make(map[int64]Message, len(messages))
+	for _, message := range messages {
+		byID[message.ID] = message
+	}
+	for _, item := range []work{queued, running} {
+		message := byID[item.message.ID]
+		if message.Status != "error" || len(message.SubagentRuns) != 1 {
+			t.Fatalf("recovered parent did not reload with one child: %#v", message)
+		}
+		run := message.SubagentRuns[0]
+		if run.ID != item.run.ID || run.Status != AgentStatusFailed || run.CompletedAt == nil || run.Error != "interrupted before completion" {
+			t.Fatalf("recovered child did not reload as failed: %#v", run)
+		}
+	}
+	freshMessage := byID[fresh.message.ID]
+	if freshMessage.Status != "streaming" || len(freshMessage.SubagentRuns) != 1 || freshMessage.SubagentRuns[0].Status != AgentStatusRunning {
+		t.Fatalf("fresh parent or child was recovered incorrectly: %#v", freshMessage)
+	}
+	freshJob, err := database.GetAgentJob(ctx, fresh.job.ID)
+	if err != nil || freshJob.Status != AgentStatusRunning {
+		t.Fatalf("fresh job was recovered incorrectly: %#v, %v", freshJob, err)
 	}
 }

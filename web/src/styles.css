@@ -459,7 +459,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .agent-activity.stopped .agent-progress-icon, .agent-activity.stopped .agent-progress strong,
 .agent-activity.error .agent-progress-icon, .agent-activity.error .agent-progress strong { color: #954b2d; }
 @keyframes agent-spin { to { transform: rotate(360deg); } }
-.agent-steps { display: grid; gap: 7px; }
+.agent-steps, .subagent-runs { display: grid; gap: 7px; }
 .thinking-step, .agent-step { overflow: hidden; border: 1px solid var(--line); border-radius: 8px; background: #f8f9f8; }
 .thinking-step summary, .agent-step summary {
   display: grid;
@@ -489,10 +489,31 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .agent-step.running { border-color: #a9c8d8; background: #f2f8fa; }
 .agent-step.error, .agent-step.cancelled { border-color: #dec2b6; background: #fff8f4; }
 .agent-step-icon { display: grid; place-items: center; color: var(--blue); }
-.agent-step summary code { overflow: hidden; color: #343b40; font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.agent-step-command, .agent-step-label { overflow: hidden; color: #343b40; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.agent-step-command { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
+.agent-step-label { font-weight: 620; }
 .agent-step-status { color: var(--muted); font-size: 11px; font-weight: 650; white-space: nowrap; }
 .agent-step.running .agent-step-status { color: var(--blue-dark); }
 .agent-step pre { max-height: 280px; margin: 0; padding: 10px 12px; overflow: auto; border-top: 1px solid var(--line); color: #2e3539; background: #fff; font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 11.5px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
+.subagent-run { overflow: hidden; border: 1px solid #d4dde1; border-radius: 8px; background: #fafbfa; }
+.subagent-run.running { border-color: #a9c8d8; background: #f2f8fa; }
+.subagent-run.failed, .subagent-run.cancelled { border-color: #dec2b6; background: #fff8f4; }
+.subagent-run summary { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; align-items: center; gap: 7px; min-height: 44px; padding: 6px 10px; cursor: pointer; list-style: none; }
+.subagent-run summary::-webkit-details-marker { display: none; }
+.subagent-run-icon { display: grid; place-items: center; color: var(--blue); }
+.subagent-run.running .subagent-run-icon svg { animation: agent-spin 1.1s linear infinite; }
+.subagent-run.complete .subagent-run-icon { color: var(--green); }
+.subagent-run.failed .subagent-run-icon, .subagent-run.cancelled .subagent-run-icon { color: #954b2d; }
+.subagent-run-task { overflow: hidden; color: #3f4c54; font-size: 12.5px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.subagent-run-status { color: var(--muted); font-size: 11px; font-weight: 650; white-space: nowrap; }
+.subagent-run.running .subagent-run-status { color: var(--blue-dark); }
+.subagent-run-result { padding: 9px 12px 10px; border-top: 1px solid var(--line); color: #566169; background: #fff; font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+.subagent-run-result p { margin: 0; white-space: pre-wrap; }
+.subagent-run-error { color: #954b2d; }
+.subagent-output-refs { margin-top: 8px; }
+.subagent-output-refs strong { color: #657078; font-size: 11px; }
+.subagent-output-refs ul { display: grid; gap: 3px; margin: 4px 0 0; padding-left: 18px; }
+.subagent-output-refs code { color: #35434c; font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 11.5px; }
 
 .code-block { overflow: hidden; border: 1px solid var(--line-strong); border-radius: 8px; background: #fbfbfa; }
 .code-toolbar { display: flex; align-items: center; justify-content: space-between; min-height: 31px; padding: 0 10px 0 14px; color: #68717a; font-size: 12px; }

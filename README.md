@@ -18,6 +18,13 @@ and prior thinking is never sent back to the model. Artifacts preserve the outpu
 captured by the shell executor; output beyond `SHELL_MAX_OUTPUT_BYTES` is still
 discarded at capture time and is marked as source-truncated.
 
+Agent mode can delegate focused work to child agents. Each child starts with a
+private system-and-task context instead of inheriting the full conversation, and
+only a bounded summary plus verified workspace output paths returns to the parent.
+For directory image labeling, the dedicated batch tool performs one stateless
+vision request per image and atomically writes JSONL under the workspace, so prior
+images and raw per-image reasoning never accumulate in the main prompt.
+
 New-chat setup offers **Ollama default**, **Off**, **On**, and the native
 **Low**, **Medium**, **High**, and **Max** effort levels for models that advertise
 Ollama's `thinking` capability. Ollama default omits the `think` field; On and Off
@@ -29,24 +36,30 @@ without the broad capability show Thinking as unsupported.
 
 ## Optional shell access: safety boundary
 
-The agent can execute arbitrary shell commands. `/workspace` is its starting
-directory, **not a security sandbox**: commands can access any file that the
-`webui` container user can read or write, including the chat database in `/data`.
-Docker is the security boundary.
+The agent can execute arbitrary shell commands. Commands may read paths visible to
+the WebUI process when normal operating-system permissions allow it, but Linux
+Landlock restricts file-content and directory-structure writes to
+`AGENT_WORKSPACE`. The command is rejected before execution when Landlock ABI 3 or
+newer is unavailable. In Docker, “system paths” means the container filesystem and
+explicitly mounted host paths; unmounted host paths are not visible.
 
 - Never mount the Docker socket, SSH keys, cloud credentials, or other secrets
   into the `webui` container.
-- Only mount a workspace whose contents the model is allowed to read and change.
+- Only mount system paths whose contents the model is allowed to read. Mount the
+  sole writable working tree at `AGENT_WORKSPACE`.
 - The container retains only the startup capabilities needed to set volume
   ownership and switch to UID/GID 1000, blocks privilege escalation, and runs the
-  WebUI and commands as that unprivileged user. Those measures do not make
-  untrusted model output safe.
+  WebUI and commands as that unprivileged user. Landlock does not mediate a few
+  metadata-only operations such as timestamps, mode bits, and extended attributes.
+  Device ioctls are denied when the host provides Landlock ABI 5 or newer; on ABI
+  3–4, do not expose devices or sensitive writable files owned by UID 1000 outside
+  the workspace.
 - Shell commands are shown in the conversation and can be interrupted with
   **Stop**. Child processes are terminated with the active command.
 
-When running the Go service directly for local development, there is no container
-boundary: shell commands run as your current operating-system user and can reach
-that user's files and processes. Use Compose for the safer default deployment.
+When running the Go service directly, commands retain the current user's normal
+read access while the same fail-closed Landlock write policy applies. Landlock is
+a filesystem boundary, not a process, network, or secret-redaction boundary.
 
 ## Run with Docker Compose
 
@@ -149,6 +162,11 @@ Configuration is provided with environment variables:
 | `AGENT_CONTEXT_BUDGET_TOKENS` | `32768` | Conservative prompt budget when a conversation does not set an explicit context window; compaction starts near 70% |
 | `AGENT_INLINE_INPUT_BYTES` | `16384` | Largest user message kept inline; small context selections lower this to a 4 KiB floor |
 | `AGENT_TOOL_FEEDBACK_BYTES` | `8192` | Maximum shell-output excerpt returned to later model turns |
+| `AGENT_SUBAGENTS_ENABLED` | `true` | Expose isolated child-agent and image-batch tools |
+| `AGENT_SUBAGENT_CONCURRENCY` | `1` | Maximum child jobs running across conversations; increase only when Ollama and available memory can sustain it |
+| `AGENT_SUBAGENT_CONTEXT_TOKENS` | `8192` | Context window used by each isolated child |
+| `AGENT_SUBAGENT_MAX_TURNS` | `20` | Emergency model-turn ceiling for each child |
+| `AGENT_SUBAGENT_RESULT_BYTES` | `4096` | Maximum child summary returned to the parent prompt |
 | `SHELL_TIMEOUT_SECONDS` | `600` | Maximum time for each shell command |
 | `SHELL_MAX_OUTPUT_BYTES` | `65536` | Combined stdout/stderr retained per command |
 
@@ -162,7 +180,7 @@ either Chat or Agent mode; the choice is fixed after the conversation starts.
 ## Current scope
 
 The daily-use core now supports model discovery, ordinary Chat and general Agent
-tasks with optional shell use, new
+tasks with optional shell use, isolated child delegation, directory image labeling, new
 conversations, context and temperature overrides before first load, streamed
 responses with Stop, durable history and shell traces, title/message search, and
 persisted image input for vision-capable models. Images may be pasted, dropped,

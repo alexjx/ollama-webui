@@ -57,19 +57,38 @@ func main() {
 	if err := artifacts.Reconcile(ctx); err != nil {
 		logger.Warn("reconcile agent context storage", "error", err)
 	}
+	if recovered, err := database.RecoverStaleAgentWork(ctx, time.Now().UTC()); err != nil {
+		logger.Warn("recover interrupted subagent work", "error", err)
+	} else if recovered.Jobs > 0 || recovered.Runs > 0 {
+		logger.Info("recovered interrupted subagent work", "jobs", recovered.Jobs, "runs", recovered.Runs, "messages", recovered.Messages)
+	}
+	shellExecutor := agent.ShellExecutor{Workspace: workspace, Timeout: cfg.ShellTimeout, MaxOutput: cfg.ShellMaxOutput}
 	runner := agent.Runner{
 		Chat: ollamaClient, Steps: database,
-		Shell:             agent.ShellExecutor{Workspace: workspace, Timeout: cfg.ShellTimeout, MaxOutput: cfg.ShellMaxOutput},
+		Shell:             shellExecutor,
 		Stager:            agent.InputStager{Workspace: workspace, MaxInlineBytes: cfg.InlineInputMax},
 		MaxTurns:          cfg.AgentMaxTurns,
 		ToolFeedbackLimit: cfg.ToolFeedbackMax,
 		Context:           &agent.ContextPreparer{Chat: ollamaClient, Store: database},
 		Artifacts:         artifacts,
 	}
+	if cfg.SubagentsEnabled {
+		subagents, err := agent.NewSubagentOrchestrator(database, ollamaClient, shellExecutor, artifacts,
+			workspace, "", cfg.SubagentContextTokens, cfg.SubagentMaxTurns, cfg.SubagentConcurrency,
+			cfg.SubagentResultBytes, cfg.ToolFeedbackMax)
+		if err != nil {
+			logger.Error("initialize subagent orchestrator", "error", err)
+			os.Exit(1)
+		}
+		runner.Subagents = subagents
+	}
 	handler := httpapi.New(database, ollamaClient, runner, httpapi.RuntimeSettings{
 		Workspace: workspace, MaxTurns: cfg.AgentMaxTurns, ShellTimeout: cfg.ShellTimeout,
 		ShellMaxOutput: cfg.ShellMaxOutput, InlineInputMax: cfg.InlineInputMax, ToolFeedbackLimit: cfg.ToolFeedbackMax,
 		ContextDirectory: contextDirectory, ContextTokens: cfg.ContextTokens,
+		SubagentsEnabled:    cfg.SubagentsEnabled,
+		SubagentConcurrency: cfg.SubagentConcurrency, SubagentContextTokens: cfg.SubagentContextTokens,
+		SubagentMaxTurns: cfg.SubagentMaxTurns, SubagentResultBytes: cfg.SubagentResultBytes,
 	}, cfg.WebDistDir, logger)
 	server := &http.Server{
 		Addr:              cfg.ListenAddr,

@@ -10,18 +10,23 @@ import (
 )
 
 type Config struct {
-	ListenAddr      string
-	OllamaBaseURL   string
-	DatabasePath    string
-	WebDistDir      string
-	AgentWorkspace  string
-	AgentContextDir string
-	AgentMaxTurns   int
-	ContextTokens   int
-	InlineInputMax  int
-	ShellTimeout    time.Duration
-	ShellMaxOutput  int
-	ToolFeedbackMax int
+	ListenAddr            string
+	OllamaBaseURL         string
+	DatabasePath          string
+	WebDistDir            string
+	AgentWorkspace        string
+	AgentContextDir       string
+	AgentMaxTurns         int
+	ContextTokens         int
+	InlineInputMax        int
+	ShellTimeout          time.Duration
+	ShellMaxOutput        int
+	ToolFeedbackMax       int
+	SubagentsEnabled      bool
+	SubagentConcurrency   int
+	SubagentContextTokens int
+	SubagentMaxTurns      int
+	SubagentResultBytes   int
 }
 
 func Load() (Config, error) {
@@ -57,7 +62,31 @@ func Load() (Config, error) {
 	if cfg.ToolFeedbackMax, err = positiveInt("AGENT_TOOL_FEEDBACK_BYTES", 8<<10); err != nil {
 		return Config{}, err
 	}
+	if cfg.SubagentsEnabled, err = boolean("AGENT_SUBAGENTS_ENABLED", true); err != nil {
+		return Config{}, err
+	}
+	if cfg.SubagentConcurrency, err = positiveInt("AGENT_SUBAGENT_CONCURRENCY", 1); err != nil {
+		return Config{}, err
+	}
+	if cfg.SubagentContextTokens, err = positiveInt("AGENT_SUBAGENT_CONTEXT_TOKENS", 8192); err != nil {
+		return Config{}, err
+	}
+	if cfg.SubagentMaxTurns, err = positiveInt("AGENT_SUBAGENT_MAX_TURNS", 20); err != nil {
+		return Config{}, err
+	}
+	if cfg.SubagentResultBytes, err = positiveInt("AGENT_SUBAGENT_RESULT_BYTES", 4096); err != nil {
+		return Config{}, err
+	}
 	return cfg, nil
+}
+
+func boolean(key string, fallback bool) (bool, error) {
+	value := valueOrDefault(key, strconv.FormatBool(fallback))
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, fmt.Errorf("%s must be true or false", key)
+	}
+	return parsed, nil
 }
 
 func positiveInt(key string, fallback int) (int, error) {

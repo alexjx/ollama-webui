@@ -133,6 +133,149 @@ func TestGenerateRunsShellAgentAndPersistsTrace(t *testing.T) {
 	}
 }
 
+func TestGenerateStreamsAndPersistsSuccessfulSubagentRun(t *testing.T) {
+	var mu sync.Mutex
+	chatRequests := make([]map[string]any, 0, 3)
+	ollamaServer := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api/tags":
+			_, _ = response.Write([]byte(`{"models":[{"name":"agent","modified_at":"2026-01-01T00:00:00Z","capabilities":["completion","tools"]}]}`))
+		case "/api/chat":
+			var payload map[string]any
+			if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+				t.Fatal(err)
+			}
+			messages, ok := payload["messages"].([]any)
+			if !ok || len(messages) == 0 {
+				t.Fatalf("chat request omitted messages: %#v", payload)
+			}
+			first, _ := messages[0].(map[string]any)
+			firstContent, _ := first["content"].(string)
+
+			mu.Lock()
+			chatRequests = append(chatRequests, payload)
+			mu.Unlock()
+			response.Header().Set("Content-Type", "application/x-ndjson")
+			switch {
+			case strings.Contains(firstContent, "focused child agent"):
+				_, _ = response.Write([]byte(`{"message":{"role":"assistant","content":"Child task completed."},"done":false}` + "\n" + `{"done":true,"done_reason":"stop"}` + "\n"))
+			case len(messages) == 2:
+				_, _ = response.Write([]byte(`{"message":{"role":"assistant","tool_calls":[{"id":"call_delegate","function":{"index":0,"name":"delegate_task","arguments":{"task":"Inspect the named input and report the result."}}}]},"done":false}` + "\n" + `{"done":true,"done_reason":"stop"}` + "\n"))
+			default:
+				_, _ = response.Write([]byte(`{"message":{"role":"assistant","content":"Parent received the child result."},"done":false}` + "\n" + `{"done":true,"done_reason":"stop"}` + "\n"))
+			}
+		default:
+			http.NotFound(response, request)
+		}
+	}))
+	defer ollamaServer.Close()
+
+	ctx := context.Background()
+	database, err := store.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	conversation, err := database.CreateConversation(ctx, store.CreateConversationParams{Title: "Delegation", Model: "agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := ollama.NewClient(ollamaServer.URL)
+	workspace := t.TempDir()
+	shell := agent.ShellExecutor{Workspace: workspace, Timeout: time.Second, MaxOutput: 4096}
+	subagents, err := agent.NewSubagentOrchestrator(database, client, shell, nil, workspace, "agent", 4096, 4, 1, 4096, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := agent.Runner{
+		Chat: client, Steps: database, Shell: shell, Subagents: subagents, MaxTurns: 4, ToolFeedbackLimit: 4096,
+	}
+	api := New(database, client, runner, RuntimeSettings{}, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	request := httptest.NewRequest(http.MethodPost, "/api/conversations/1/messages", strings.NewReader(`{"content":"delegate this task"}`))
+	request.SetPathValue("id", "1")
+	response := httptest.NewRecorder()
+	api.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("unexpected response %d: %s", response.Code, response.Body.String())
+	}
+
+	eventTypes := make([]string, 0)
+	scanner := bufio.NewScanner(strings.NewReader(response.Body.String()))
+	for scanner.Scan() {
+		var event struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
+			t.Fatal(err)
+		}
+		eventTypes = append(eventTypes, event.Type)
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+	wantEvents := "started,turn.started,tool.started,subagent.started,subagent.done,tool.done,turn.started,delta,done"
+	if joined := strings.Join(eventTypes, ","); joined != wantEvents {
+		t.Fatalf("unexpected subagent event flow: %s\n%s", joined, response.Body.String())
+	}
+
+	messages, err := database.Messages(ctx, conversation.ID)
+	if err != nil || len(messages) != 2 {
+		t.Fatalf("reload messages: %#v, %v", messages, err)
+	}
+	if len(messages[0].SubagentRuns) != 0 || len(messages[1].SubagentRuns) != 1 {
+		t.Fatalf("subagent run attached to wrong message: %#v", messages)
+	}
+	run := messages[1].SubagentRuns[0]
+	if run.Status != store.AgentStatusComplete || run.Task != "Inspect the named input and report the result." || run.ResultSummary != "Child task completed." {
+		t.Fatalf("unexpected persisted subagent run: %#v", run)
+	}
+	getRequest := httptest.NewRequest(http.MethodGet, "/api/conversations/1", nil)
+	getRequest.SetPathValue("id", "1")
+	getResponse := httptest.NewRecorder()
+	api.ServeHTTP(getResponse, getRequest)
+	var reloaded struct {
+		Messages []store.Message `json:"messages"`
+	}
+	if getResponse.Code != http.StatusOK {
+		t.Fatalf("conversation API returned %d: %s", getResponse.Code, getResponse.Body.String())
+	}
+	if err := json.NewDecoder(getResponse.Body).Decode(&reloaded); err != nil {
+		t.Fatal(err)
+	}
+	if len(reloaded.Messages) != 2 || len(reloaded.Messages[1].SubagentRuns) != 1 || reloaded.Messages[1].SubagentRuns[0].ID != run.ID {
+		t.Fatalf("conversation API omitted persisted subagent run: %#v", reloaded.Messages)
+	}
+
+	mu.Lock()
+	requests := append([]map[string]any(nil), chatRequests...)
+	mu.Unlock()
+	if len(requests) != 3 {
+		t.Fatalf("expected parent, child, parent calls; got %d: %#v", len(requests), requests)
+	}
+	var childMessages []any
+	for _, payload := range requests {
+		candidate, _ := payload["messages"].([]any)
+		if len(candidate) == 0 {
+			continue
+		}
+		first, _ := candidate[0].(map[string]any)
+		if content, _ := first["content"].(string); strings.Contains(content, "focused child agent") {
+			childMessages = candidate
+			break
+		}
+	}
+	if len(childMessages) != 2 {
+		t.Fatalf("child request should contain only system and task messages: %#v", childMessages)
+	}
+	if childMessages[0].(map[string]any)["role"] != "system" || childMessages[1].(map[string]any)["role"] != "user" {
+		t.Fatalf("unexpected child message roles: %#v", childMessages)
+	}
+	childTask, _ := childMessages[1].(map[string]any)["content"].(string)
+	if !strings.Contains(childTask, "Inspect the named input and report the result.") || strings.Contains(childTask, "delegate this task") {
+		t.Fatalf("child request inherited parent conversation instead of its task: %#v", childMessages)
+	}
+}
+
 func TestGenerateCompactsLongAgentHistoryBeforeRunning(t *testing.T) {
 	var mu sync.Mutex
 	chatRequests := make([]map[string]any, 0)

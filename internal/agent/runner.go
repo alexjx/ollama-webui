@@ -55,7 +55,25 @@ var contextWriteTool = ollama.Tool{
 	},
 }
 
-const SystemPrompt = `You are a general-purpose autonomous assistant. Continue until the user's task is actually complete, but answer directly when no tool is needed. A shell tool is available as an optional capability for calculation, search, inspection, execution, and verification; do not inspect or edit files unless that helps the user's request. Context tools can persist important notes or large outputs outside the prompt and retrieve them later within this conversation. When a user message says its full input was staged to a file, use bounded line ranges to inspect only the relevant portions, keep concise intermediate notes, and avoid printing the whole file into the conversation. Prefer narrow commands and small outputs so local model context remains focused. Do not stop after merely describing a plan. When the task is complete, reply with a concise final answer and do not call a tool. The user can interrupt you at any time.`
+var delegateTaskTool = ollama.Tool{
+	Type: "function",
+	Function: ollama.ToolFunction{
+		Name:        "delegate_task",
+		Description: "Run a focused task in an isolated child-agent context. Use it for substantial independent exploration, analysis, or file work whose intermediate details should not fill the main context. The child receives only the task, named workspace/system image inputs, and the standard agent instructions. Put user deliverables under the workspace and declare their paths. The parent receives only a bounded summary and verified output paths.",
+		Parameters:  json.RawMessage(`{"type":"object","properties":{"task":{"type":"string","description":"Self-contained objective, constraints, relevant paths, and expected result."},"image_paths":{"type":"array","items":{"type":"string"},"maxItems":4,"description":"Optional workspace-relative or absolute system image paths for a vision-capable model."},"output_paths":{"type":"array","items":{"type":"string"},"maxItems":20,"description":"Files the child must create under the workspace."}},"required":["task"],"additionalProperties":false}`),
+	},
+}
+
+var labelImageDirectoryTool = ollama.Tool{
+	Type: "function",
+	Function: ollama.ToolFunction{
+		Name:        "label_image_directory",
+		Description: "Label every supported image in a directory using isolated one-image model calls, then atomically write JSONL under AGENT_WORKSPACE. Use this instead of inspecting many images in the main context. Each row contains path, labels, confidence, needs_review, notes, and an optional error.",
+		Parameters:  json.RawMessage(`{"type":"object","properties":{"directory":{"type":"string","description":"Workspace-relative or absolute system directory to read."},"instructions":{"type":"string","description":"Complete label taxonomy and decision rules."},"output_path":{"type":"string","description":"Workspace-relative JSONL output path."},"recursive":{"type":"boolean","description":"Whether to traverse subdirectories."},"max_images":{"type":"integer","minimum":1,"maximum":10000,"description":"Safety cap; defaults to 1000."}},"required":["directory","instructions","output_path"],"additionalProperties":false}`),
+	},
+}
+
+const SystemPrompt = `You are a general-purpose autonomous assistant. Continue until the user's task is actually complete, but answer directly when no tool is needed. A shell tool is available as an optional capability for calculation, search, inspection, execution, and verification; do not inspect or edit files unless that helps the user's request. The shell may read system paths allowed by normal OS permissions, while writes are restricted to AGENT_WORKSPACE. Delegate substantial independent work when its intermediate details would crowd the main context. For a directory of images, use the dedicated image-labeling tool so each image is processed in an isolated request and results go to a workspace JSONL file. Context tools can persist important notes or large outputs outside the prompt and retrieve them later within this conversation. When a user message says its full input was staged to a file, use bounded line ranges to inspect only the relevant portions, keep concise intermediate notes, and avoid printing the whole file into the conversation. Prefer narrow commands and small outputs so local model context remains focused. Do not stop after merely describing a plan. When the task is complete, reply with a concise final answer and do not call a tool. The user can interrupt you at any time.`
 
 type ChatClient interface {
 	Chat(context.Context, ollama.ChatRequest, func(ollama.ChatChunk) error) error
@@ -79,6 +97,7 @@ type Runner struct {
 	ToolFeedbackLimit int
 	Context           *ContextPreparer
 	Artifacts         *ArtifactManager
+	Subagents         SubagentExecutor
 }
 
 type RunInput struct {
@@ -89,6 +108,7 @@ type RunInput struct {
 	Options            *ollama.ChatOptions
 	Think              *ollama.ThinkValue
 	AssistantMessageID int64
+	Vision             bool
 }
 
 type Event struct {
@@ -96,6 +116,7 @@ type Event struct {
 	Content string           `json:"content,omitempty"`
 	Turn    int              `json:"turn,omitempty"`
 	Step    *store.AgentStep `json:"step,omitempty"`
+	Run     *store.AgentRun  `json:"run,omitempty"`
 }
 
 type RunResult struct {
@@ -149,6 +170,12 @@ func (runner Runner) Run(ctx context.Context, input RunInput, emit func(Event) e
 		tools = []ollama.Tool{shellTool}
 		if runner.Artifacts != nil && input.ConversationID > 0 {
 			tools = append(tools, contextListTool, contextReadTool, contextWriteTool)
+		}
+		if runner.Subagents != nil && input.ConversationID > 0 && input.AssistantMessageID > 0 {
+			tools = append(tools, delegateTaskTool)
+			if _, ok := runner.Subagents.(ImageBatchExecutor); ok && input.Vision {
+				tools = append(tools, labelImageDirectoryTool)
+			}
 		}
 	}
 	for turn := 1; turn <= maxTurns; turn++ {
@@ -207,7 +234,7 @@ func (runner Runner) Run(ctx context.Context, input RunInput, emit func(Event) e
 		}
 
 		for _, call := range assistant.ToolCalls {
-			resultContent, err := runner.executeTool(ctx, input.ConversationID, input.AssistantMessageID, turn, call, emit)
+			resultContent, err := runner.executeTool(ctx, input.ConversationID, input.AssistantMessageID, input.Model, input.Vision, turn, call, emit)
 			if err != nil {
 				return RunResult{Content: visible.String(), Thinking: thinking.String(), Metadata: metadata}, err
 			}
@@ -238,6 +265,20 @@ type contextListArguments struct {
 type contextWriteArguments struct {
 	Name    string `json:"name"`
 	Content string `json:"content"`
+}
+
+type delegateTaskArguments struct {
+	Task        string   `json:"task"`
+	ImagePaths  []string `json:"image_paths,omitempty"`
+	OutputPaths []string `json:"output_paths,omitempty"`
+}
+
+type labelImageDirectoryArguments struct {
+	Directory    string `json:"directory"`
+	Instructions string `json:"instructions"`
+	OutputPath   string `json:"output_path"`
+	Recursive    bool   `json:"recursive,omitempty"`
+	MaxImages    int    `json:"max_images,omitempty"`
 }
 
 func (runner Runner) executeContextTool(ctx context.Context, conversationID, messageID int64, name string, raw json.RawMessage) (ShellResult, string) {
@@ -341,9 +382,13 @@ func (runner Runner) executeContextTool(ctx context.Context, conversationID, mes
 		if len(arguments.Content) > 64<<10 {
 			return fail(errors.New("content exceeds 64 KiB"))
 		}
-		messageIDCopy := messageID
+		var sourceMessageID *int64
+		if messageID > 0 {
+			messageIDCopy := messageID
+			sourceMessageID = &messageIDCopy
+		}
 		artifact, err := runner.Artifacts.Write(ctx, store.CreateContextArtifactParams{
-			ConversationID: conversationID, SourceMessageID: &messageIDCopy, Kind: "agent_note",
+			ConversationID: conversationID, SourceMessageID: sourceMessageID, Kind: "agent_note",
 			DisplayName: arguments.Name, MediaType: "text/plain", Summary: "Agent-authored durable conversation note.",
 		}, []byte(arguments.Content))
 		if err != nil {
@@ -373,7 +418,7 @@ func decodeToolArguments(raw json.RawMessage, target any) error {
 	return nil
 }
 
-func (runner Runner) executeTool(ctx context.Context, conversationID, messageID int64, turn int, call ollama.ToolCall, emit func(Event) error) (string, error) {
+func (runner Runner) executeTool(ctx context.Context, conversationID, messageID int64, model string, vision bool, turn int, call ollama.ToolCall, emit func(Event) error) (string, error) {
 	raw := call.Function.Arguments
 	if len(raw) == 0 {
 		raw = json.RawMessage(`{}`)
@@ -409,6 +454,56 @@ func (runner Runner) executeTool(ctx context.Context, conversationID, messageID 
 		} else {
 			result, status = runner.executeContextTool(ctx, conversationID, messageID, call.Function.Name, raw)
 		}
+	case "delegate_task":
+		if runner.Subagents == nil || conversationID <= 0 || messageID <= 0 {
+			result = ShellResult{ExitCode: -1, Output: "subagent delegation is unavailable"}
+			status = "error"
+		} else {
+			var arguments delegateTaskArguments
+			if decodeErr := decodeToolArguments(raw, &arguments); decodeErr != nil {
+				result = ShellResult{ExitCode: -1, Output: "invalid delegation arguments: " + decodeErr.Error()}
+				status = "error"
+			} else {
+				delegated, delegateErr := runner.Subagents.Execute(ctx, SubagentRequest{
+					ConversationID: conversationID, RequestingMessageID: messageID,
+					Model: model, SupportsVision: vision, Task: arguments.Task, ImagePaths: arguments.ImagePaths, OutputPaths: arguments.OutputPaths,
+				}, emit)
+				result = ShellResult{Output: delegated.Feedback, ExitCode: delegated.ExitCode, Duration: delegated.Duration,
+					Cancelled: errors.Is(delegateErr, context.Canceled)}
+				if delegateErr != nil {
+					status = "error"
+					if result.Output == "" {
+						result.Output = delegateErr.Error()
+					}
+				}
+			}
+		}
+	case "label_image_directory":
+		batcher, ok := runner.Subagents.(ImageBatchExecutor)
+		if !ok || !vision || conversationID <= 0 || messageID <= 0 {
+			result = ShellResult{ExitCode: -1, Output: "image batch delegation is unavailable"}
+			status = "error"
+		} else {
+			var arguments labelImageDirectoryArguments
+			if decodeErr := decodeToolArguments(raw, &arguments); decodeErr != nil {
+				result = ShellResult{ExitCode: -1, Output: "invalid image batch arguments: " + decodeErr.Error()}
+				status = "error"
+			} else {
+				delegated, delegateErr := batcher.LabelImageDirectory(ctx, ImageBatchRequest{
+					ConversationID: conversationID, RequestingMessageID: messageID, Model: model, SupportsVision: vision,
+					Directory: arguments.Directory, Instructions: arguments.Instructions, OutputPath: arguments.OutputPath,
+					Recursive: arguments.Recursive, MaxImages: arguments.MaxImages,
+				}, emit)
+				result = ShellResult{Output: delegated.Feedback, ExitCode: delegated.ExitCode, Duration: delegated.Duration,
+					Cancelled: errors.Is(delegateErr, context.Canceled)}
+				if delegateErr != nil {
+					status = "error"
+					if result.Output == "" {
+						result.Output = delegateErr.Error()
+					}
+				}
+			}
+		}
 	default:
 		result = ShellResult{ExitCode: -1, Output: fmt.Sprintf("unknown tool %q", call.Function.Name)}
 		status = "error"
@@ -432,7 +527,7 @@ func (runner Runner) executeTool(ctx context.Context, conversationID, messageID 
 		"duration_ms": result.Duration.Milliseconds(), "timed_out": result.TimedOut,
 		"cancelled": result.Cancelled, "truncated": result.Truncated,
 	}
-	if call.Function.Name == "shell" && feedbackTruncated && runner.Artifacts != nil && conversationID > 0 {
+	if call.Function.Name == "shell" && feedbackTruncated && runner.Artifacts != nil && conversationID > 0 && messageID > 0 {
 		messageIDCopy, stepID := messageID, completed.ID
 		artifact, artifactErr := runner.Artifacts.Write(ctx, store.CreateContextArtifactParams{
 			ConversationID: conversationID, SourceMessageID: &messageIDCopy, SourceStepID: &stepID,

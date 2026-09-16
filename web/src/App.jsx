@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { contextUsage } from "./context-usage";
+import { cancelRunningSubagents, reduceSubagentEvent } from "./agent-events";
 import { formatDuration, formatRate, responseMetrics } from "./response-metrics";
 import { scrollToEnd } from "./scroll-position";
 import { selectElementText } from "./select-text";
@@ -411,12 +412,16 @@ function SystemSettings({ connected, modelCount, runtime, loading, error, stream
             </article>
           </div>
           <dl className="runtime-details">
-            <div><dt>Workspace boundary</dt><dd title={agent?.workspace}>{agent?.workspace || "—"}</dd></div>
+            <div><dt>Filesystem policy</dt><dd>System read · workspace write</dd></div>
+            <div><dt>Writable workspace</dt><dd title={agent?.workspace}>{agent?.workspace || "—"}</dd></div>
             <div><dt>Managed context</dt><dd title={agent?.context_path}>{agent?.context_path || "—"}</dd></div>
             <div><dt>Context budget</dt><dd>{agent ? `${agent.context_budget_tokens?.toLocaleString() || "—"} tokens` : "—"}</dd></div>
+            <div><dt>Child agents</dt><dd>{agent ? agent.subagents_enabled ? `Enabled · ${agent.subagent_concurrency} concurrent` : "Disabled" : "—"}</dd></div>
+            <div><dt>Child context</dt><dd>{agent?.subagents_enabled ? `${agent.subagent_context_tokens?.toLocaleString()} tokens · ${agent.subagent_max_turns} turns` : "—"}</dd></div>
             <div><dt>Shell output limit</dt><dd>{agent ? formatBytes(agent.shell_max_output_bytes) : "—"}</dd></div>
             <div><dt>Inline input limit</dt><dd>{agent ? formatBytes(agent.inline_input_bytes) : "—"}</dd></div>
             <div><dt>Tool feedback limit</dt><dd>{agent ? formatBytes(agent.tool_feedback_bytes) : "—"}</dd></div>
+            <div><dt>Child result limit</dt><dd>{agent ? formatBytes(agent.subagent_result_bytes) : "—"}</dd></div>
           </dl>
           <p className="managed-note"><Info size={17} />These values come from Docker Compose environment settings. Change them there, then recreate the WebUI container.</p>
         </section>
@@ -428,6 +433,8 @@ function SystemSettings({ connected, modelCount, runtime, loading, error, stream
             <div><dt>Messages</dt><dd>{storage?.messages ?? "—"}</dd></div>
             <div><dt>Images</dt><dd>{storage?.attachments ?? "—"}</dd></div>
             <div><dt>Agent actions</dt><dd>{storage?.agent_steps ?? "—"}</dd></div>
+            <div><dt>Child jobs</dt><dd>{storage?.agent_jobs ?? "—"}</dd></div>
+            <div><dt>Child runs</dt><dd>{storage?.agent_runs ?? "—"}</dd></div>
             <div><dt>Context checkpoints</dt><dd>{storage?.context_checkpoints ?? "—"}</dd></div>
             <div><dt>Context artifacts</dt><dd>{storage?.context_artifacts ?? "—"}</dd></div>
             <div><dt>Context storage</dt><dd>{storage ? formatBytes(storage.context_artifact_bytes) : "—"}</dd></div>
@@ -448,7 +455,8 @@ function SystemSettings({ connected, modelCount, runtime, loading, error, stream
 function AgentActivity({ message, mode }) {
   const thinkingRef = useRef(null);
   const steps = message.agent_steps || [];
-  const hasActivity = message.status === "streaming" || Boolean(message.thinking) || steps.length > 0;
+  const subagentRuns = message.subagent_runs || [];
+  const hasActivity = message.status === "streaming" || Boolean(message.thinking) || steps.length > 0 || subagentRuns.length > 0;
 
   const phaseLabels = {
     starting: "Starting",
@@ -495,19 +503,58 @@ function AgentActivity({ message, mode }) {
       )}
 
       {steps.length > 0 && (
-        <div className="agent-steps" aria-label="Shell activity">
+        <div className="agent-steps" aria-label="Tool activity">
           {steps.map((step) => {
-            let command = step.input;
-            try { command = JSON.parse(step.input).command || step.input; } catch { /* Show the recorded input. */ }
-            const statusLabel = step.status === "running" ? "Running" : step.status === "complete" ? `Exited ${step.exit_code ?? 0}` : step.status === "cancelled" ? "Stopped" : "Failed";
+            let parsedInput = {};
+            try { parsedInput = JSON.parse(step.input); } catch { /* Show the recorded input. */ }
+            const shellStep = step.tool_name === "shell" || !step.tool_name;
+            const label = shellStep
+              ? parsedInput.command || step.input
+              : step.tool_name === "delegate_task"
+                ? parsedInput.task || "Delegated task"
+                : step.tool_name === "label_image_directory"
+                  ? `Label images in ${parsedInput.directory || "directory"}`
+                  : step.tool_name?.replaceAll("_", " ") || "Tool action";
+            const statusLabel = step.status === "running" ? "Running" : step.status === "complete" ? shellStep ? `Exited ${step.exit_code ?? 0}` : "Complete" : step.status === "cancelled" ? "Stopped" : "Failed";
+            const StepIcon = step.tool_name === "delegate_task" ? Brain : step.tool_name === "label_image_directory" ? SelectionAll : shellStep ? TerminalWindow : Gear;
             return (
               <details className={`agent-step ${step.status}`} key={step.id} open={step.status === "running"}>
                 <summary>
-                  <span className="agent-step-icon"><TerminalWindow size={17} /></span>
-                  <code>{command}</code>
+                  <span className="agent-step-icon"><StepIcon size={17} /></span>
+                  <span className={shellStep ? "agent-step-command" : "agent-step-label"}>{label}</span>
                   <span className="agent-step-status">{statusLabel}</span>
                 </summary>
                 {step.output && <pre>{step.output}</pre>}
+              </details>
+            );
+          })}
+        </div>
+      )}
+
+      {subagentRuns.length > 0 && (
+        <div className="subagent-runs" aria-label="Child tasks" aria-live="polite">
+          {subagentRuns.map((run) => {
+            const statusLabel = run.status === "running" ? "Running" : run.status === "complete" ? "Complete" : run.status === "cancelled" ? "Stopped" : run.status === "failed" ? "Failed" : "Queued";
+            const RunIcon = run.status === "running" || run.status === "queued" ? CircleNotch : run.status === "complete" ? CheckCircle : Stop;
+            return (
+              <details className={`subagent-run ${run.status}`} key={run.id} open={run.status === "running"}>
+                <summary>
+                  <span className="subagent-run-icon" aria-hidden="true"><RunIcon size={17} /></span>
+                  <span className="subagent-run-task">{run.task || "Child task"}</span>
+                  <span className="subagent-run-status">{statusLabel}</span>
+                </summary>
+                <div className="subagent-run-result">
+                  {run.result_summary && <p>{run.result_summary}</p>}
+                  {run.error && <p className="subagent-run-error">{run.error}</p>}
+                  {run.progress?.total > 0 && <p>{run.progress.processed} of {run.progress.total} processed · {run.progress.failed || 0} failed · {run.progress.needs_review || 0} need review</p>}
+                  {run.output_refs?.length > 0 && (
+                    <div className="subagent-output-refs">
+                      <strong>Outputs</strong>
+                      <ul>{run.output_refs.map((path) => <li key={path}><code>{path}</code></li>)}</ul>
+                    </div>
+                  )}
+                  {!run.result_summary && !run.error && !run.output_refs?.length && <p>{statusLabel}.</p>}
+                </div>
               </details>
             );
           })}
@@ -1450,6 +1497,11 @@ export function App() {
               index === current.length - 1
                 ? { ...message, agent_steps: (message.agent_steps || []).map((step) => step.id === event.step.id ? event.step : step), agent_phase: "reviewing", agent_turn: event.turn }
                 : message));
+          } else if (event.type.startsWith("subagent.")) {
+            setMessages((current) => current.map((message, index) =>
+              index === current.length - 1
+                ? { ...message, subagent_runs: reduceSubagentEvent(message.subagent_runs, event) }
+                : message));
           } else if (event.type === "done") {
             setMessages((current) => current.map((message, index) =>
               index === current.length - 1 ? { ...message, status: "complete", metadata: event.metadata, agent_phase: "finished", agent_turn: event.metadata?.agent_turns || message.agent_turn } : message));
@@ -1468,6 +1520,7 @@ export function App() {
               agent_phase: cancelled ? "stopped" : "error",
               agent_steps: (message.agent_steps || []).map((step) =>
                 step.status === "running" ? { ...step, status: cancelled ? "cancelled" : "error" } : step),
+              subagent_runs: cancelled ? cancelRunningSubagents(message.subagent_runs) : message.subagent_runs,
             }
           : message));
       if (!cancelled) setChatError(error.message);

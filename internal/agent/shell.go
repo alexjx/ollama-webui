@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -36,10 +36,19 @@ func (executor ShellExecutor) Run(ctx context.Context, command string, requested
 	defer cancel()
 	started := time.Now()
 	output := &limitedBuffer{limit: executor.MaxOutput}
-	process := exec.Command("/bin/sh", "-c", command)
-	process.Dir = executor.Workspace
-	_ = os.MkdirAll("/tmp/ollama-webui-agent", 0o700)
-	process.Env = minimalEnvironment(executor.Workspace)
+	workspace, err := filepath.Abs(executor.Workspace)
+	if err != nil {
+		return ShellResult{Output: fmt.Sprintf("invalid agent workspace: %v", err), ExitCode: -1, Duration: time.Since(started)}
+	}
+	if err := prepareShellWorkspace(workspace); err != nil {
+		return ShellResult{Output: fmt.Sprintf("failed to prepare agent workspace: %v", err), ExitCode: -1, Duration: time.Since(started)}
+	}
+	process, err := sandboxedShellCommand(command)
+	if err != nil {
+		return ShellResult{Output: fmt.Sprintf("shell sandbox unavailable: %v", err), ExitCode: -1, Duration: time.Since(started)}
+	}
+	process.Dir = workspace
+	process.Env = minimalEnvironment(workspace)
 	process.Stdout = output
 	process.Stderr = output
 	process.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -81,14 +90,25 @@ func (executor ShellExecutor) Run(ctx context.Context, command string, requested
 func minimalEnvironment(workspace string) []string {
 	return []string{
 		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-		"HOME=/tmp/ollama-webui-agent",
-		"TMPDIR=/tmp",
+		"HOME=" + workspace,
+		"TMPDIR=" + workspace,
 		"LANG=C.UTF-8",
 		"LC_ALL=C.UTF-8",
 		"TERM=dumb",
 		"AGENT_WORKSPACE=" + workspace,
 		"SHELL=/bin/sh",
 	}
+}
+
+func prepareShellWorkspace(workspace string) error {
+	info, err := os.Stat(workspace)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%q is not a directory", workspace)
+	}
+	return nil
 }
 
 type limitedBuffer struct {
