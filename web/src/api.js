@@ -8,7 +8,9 @@ async function request(path, options = {}) {
     } catch {
       // The status text is the best available error.
     }
-    throw new Error(message);
+    const error = new Error(message);
+    error.status = response.status;
+    throw error;
   }
   if (response.status === 204) return null;
   return response.json();
@@ -106,4 +108,16 @@ export async function streamMessage(id, content, { signal, onEvent, images = [] 
     if (done) break;
   }
   if (buffered.trim()) onEvent(JSON.parse(buffered));
+}
+
+export async function deleteTurns(id, messageId) {
+  // The server may still be saving cancellation after the stream is aborted.
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await request(`/api/conversations/${id}/messages/${messageId}`, { method: "DELETE" });
+    } catch (error) {
+      if (error.status !== 409 || attempt >= 8) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
 }

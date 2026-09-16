@@ -272,6 +272,24 @@ func (manager *ArtifactManager) Delete(ctx context.Context, conversationID int64
 	return syncDirectory(directory)
 }
 
+// RemoveFile cleans up a file after its database record has been deleted.
+func (manager *ArtifactManager) RemoveFile(conversationKey, storageKey string) error {
+	if err := validateStorageKey(storageKey); err != nil {
+		return err
+	}
+	directory, err := manager.conversationDirectory(conversationKey, false)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(filepath.Join(directory, storageKey)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return syncDirectory(directory)
+}
+
 // RemoveConversation removes only a valid, direct child directory of the root.
 func (manager *ArtifactManager) RemoveConversation(storageKey string) error {
 	directory, err := manager.conversationDirectory(storageKey, false)

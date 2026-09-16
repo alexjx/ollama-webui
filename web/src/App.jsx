@@ -9,6 +9,7 @@ import {
   clearConversations as clearAllConversations,
   createConversation,
   deleteConversation,
+  deleteTurns,
   getConversation,
   getHealth,
   getSettings,
@@ -633,6 +634,8 @@ function AssistantResponse({ message }) {
 }
 
 function ChatTranscript({
+  streaming,
+  onDeleteTurn,
   empty,
   messages,
   conversationMode,
@@ -674,6 +677,14 @@ function ChatTranscript({
           {message.status === "cancelled" && <p className="message-status">Generation stopped</p>}
           {message.status === "error" && <p className="message-status error">Generation failed</p>}
           {message.role === "assistant" && <ResponseMetrics message={message} />}
+          {message.role === "user" && (
+            <button className="select-response-button delete-turn-button" type="button"
+              disabled={streaming || message.id === "pending-user"}
+              title={streaming ? "Stop generation before deleting this turn" : "Delete this turn and all later turns"}
+              onClick={(event) => onDeleteTurn(message, event.currentTarget)}>
+              <Trash size={16} aria-hidden="true" />Delete from here
+            </button>
+          )}
         </article>
       ))}
       {error && <div className="chat-error" role="alert">{error}</div>}
@@ -976,6 +987,12 @@ export function App() {
   const [renameTitle, setRenameTitle] = useState("");
   const [renameError, setRenameError] = useState("");
   const [renaming, setRenaming] = useState(false);
+  const [turnDeleteTarget, setTurnDeleteTarget] = useState(null);
+  const [turnDeleteError, setTurnDeleteError] = useState("");
+  const [deletingTurns, setDeletingTurns] = useState(false);
+  const turnDeleteDialogRef = useRef(null);
+  const turnDeleteCancelRef = useRef(null);
+  const turnDeleteReturnRef = useRef(null);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [deleteError, setDeleteError] = useState("");
   const [deleting, setDeleting] = useState(false);
@@ -1092,6 +1109,16 @@ export function App() {
       dialog.close();
     }
   }, [renameTarget]);
+
+  useEffect(() => {
+    const dialog = turnDeleteDialogRef.current;
+    if (turnDeleteTarget && !dialog.open) {
+      dialog.showModal();
+      turnDeleteCancelRef.current?.focus();
+    } else if (!turnDeleteTarget && dialog.open) {
+      dialog.close();
+    }
+  }, [turnDeleteTarget]);
 
   useEffect(() => {
     const dialog = deleteDialogRef.current;
@@ -1432,8 +1459,39 @@ export function App() {
     }
   }
 
+  function openTurnDelete(message, trigger) {
+    if (streaming) return;
+    turnDeleteReturnRef.current = trigger;
+    setTurnDeleteError("");
+    setTurnDeleteTarget({ ...message, conversationId: activeId });
+  }
+
+  function closeTurnDelete() {
+    if (deletingTurns) return;
+    setTurnDeleteTarget(null);
+    setTurnDeleteError("");
+  }
+
+  async function confirmTurnDelete() {
+    if (!turnDeleteTarget || deletingTurns || streaming) return;
+    setDeletingTurns(true);
+    setTurnDeleteError("");
+    try {
+      const payload = await deleteTurns(turnDeleteTarget.conversationId, turnDeleteTarget.id);
+      setMessages(payload.messages || []);
+      setModelLoaded(payload.conversation.message_count > 0);
+      setChatError("");
+      setTurnDeleteTarget(null);
+      refreshConversations(query).catch((error) => setChatError(error.message));
+    } catch (error) {
+      setTurnDeleteError(error.message);
+    } finally {
+      setDeletingTurns(false);
+    }
+  }
+
   async function sendMessage(value, images = []) {
-    if (!model || streaming) return;
+    if (!model || streaming || deletingTurns || turnDeleteTarget) return;
     setChatError("");
     const controller = new AbortController();
     generationRef.current = controller;
@@ -1524,6 +1582,16 @@ export function App() {
             }
           : message));
       if (!cancelled) setChatError(error.message);
+      if (cancelled && conversationId && generationRef.current === controller) {
+        try {
+          const payload = await getConversation(conversationId);
+          if (generationRef.current === controller) {
+            setMessages(payload.messages || []);
+          }
+        } catch {
+          // Keep the visible stopped turn if the refresh is unavailable.
+        }
+      }
     } finally {
       setStreaming(false);
       generationRef.current = null;
@@ -1628,6 +1696,8 @@ export function App() {
 
         <section className="transcript" aria-label="Conversation" ref={transcriptRef}>
           <ChatTranscript
+            streaming={streaming}
+            onDeleteTurn={openTurnDelete}
             empty={!activeId}
             messages={messages}
             conversationMode={conversationMode}
@@ -1742,6 +1812,35 @@ export function App() {
             <button className="rename-save" type="submit" disabled={renaming || !renameTitle.trim()}>{renaming ? "Saving…" : "Save name"}</button>
           </footer>
         </form>
+      </dialog>
+
+      <dialog
+        className="delete-dialog"
+        ref={turnDeleteDialogRef}
+        aria-labelledby="delete-turn-title"
+        aria-describedby="delete-turn-description"
+        onCancel={(event) => { event.preventDefault(); closeTurnDelete(); }}
+        onClose={() => window.setTimeout(() => {
+          const trigger = turnDeleteReturnRef.current;
+          if (trigger?.isConnected) trigger.focus();
+          else document.querySelector(".composer textarea")?.focus();
+        }, 0)}
+      >
+        <div>
+          <header>
+            <span className="delete-dialog-icon" aria-hidden="true"><Trash size={22} /></span>
+            <div>
+              <h2 id="delete-turn-title">Delete from this turn?</h2>
+              <p id="delete-turn-description">This permanently deletes this prompt, its response, and all later turns, including saved images and agent activity. This cannot be undone.</p>
+              {turnDeleteTarget && <p className="delete-turn-preview">{turnDeleteTarget.content?.slice(0, 180) || "Image prompt"}{turnDeleteTarget.content?.length > 180 ? "…" : ""}</p>}
+            </div>
+          </header>
+          {turnDeleteError && <p className="delete-error" role="alert">{turnDeleteError}</p>}
+          <footer>
+            <button ref={turnDeleteCancelRef} className="delete-cancel" type="button" onClick={closeTurnDelete} disabled={deletingTurns}>Cancel</button>
+            <button className="delete-confirm" type="button" onClick={confirmTurnDelete} disabled={deletingTurns}>{deletingTurns ? "Deleting…" : "Delete from here"}</button>
+          </footer>
+        </div>
       </dialog>
 
       <dialog

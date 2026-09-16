@@ -20,6 +20,7 @@ var (
 	ErrNotFound          = errors.New("not found")
 	ErrInvalidStorageKey = errors.New("invalid storage key")
 	ErrInvalidAgentState = errors.New("invalid agent work state transition")
+	ErrInvalidTurn       = errors.New("select a user message to delete a turn")
 )
 
 type Conversation struct {
@@ -522,6 +523,63 @@ func (s *Store) DeleteConversation(ctx context.Context, id int64) error {
 		return fmt.Errorf("delete conversation: %w", err)
 	}
 	return requireAffected(result)
+}
+
+// DeleteMessagesFrom removes a user turn and everything after it atomically.
+// Returned artifact keys identify files whose database records were removed.
+func (s *Store) DeleteMessagesFrom(ctx context.Context, conversationID, messageID int64) ([]string, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	var role, createdAt string
+	err = tx.QueryRowContext(ctx, `SELECT role, created_at FROM messages WHERE conversation_id = ? AND id = ?`, conversationID, messageID).Scan(&role, &createdAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if role != "user" {
+		return nil, ErrInvalidTurn
+	}
+	const tail = `SELECT id FROM messages WHERE conversation_id = ? AND (created_at, id) >= (?, ?)`
+	const artifacts = `conversation_id = ? AND (source_message_id IN (` + tail + `) OR source_step_id IN (SELECT id FROM agent_steps WHERE message_id IN (` + tail + `)))`
+	args := []any{conversationID, conversationID, createdAt, messageID, conversationID, createdAt, messageID}
+	rows, err := tx.QueryContext(ctx, `SELECT storage_key FROM context_artifacts WHERE `+artifacts, args...)
+	if err != nil {
+		return nil, err
+	}
+	keys := make([]string, 0)
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		keys = append(keys, key)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM context_artifacts WHERE `+artifacts, args...); err != nil {
+		return nil, err
+	}
+	// Checkpoints referencing deleted messages, attachments, steps and agent work
+	// are removed by their foreign-key cascades.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM messages WHERE id IN (`+tail+`)`, conversationID, createdAt, messageID); err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE conversations SET updated_at = ? WHERE id = ?`, formatTime(time.Now().UTC()), conversationID); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return keys, nil
 }
 
 func (s *Store) ClearConversations(ctx context.Context) (int64, error) {

@@ -754,3 +754,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
+
+.delete-turn-button:hover:not(:disabled) { color: #a63535; }
+.delete-turn-button:disabled { opacity: 0.5; cursor: not-allowed; }
+.delete-turn-preview { overflow-wrap: anywhere; font-style: italic; }

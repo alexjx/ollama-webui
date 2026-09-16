@@ -67,6 +67,7 @@ func New(database *store.Store, ollamaClient *ollama.Client, runner agent.Runner
 	mux.HandleFunc("PATCH /api/conversations/{id}", server.updateConversation)
 	mux.HandleFunc("DELETE /api/conversations/{id}", server.deleteConversation)
 	mux.HandleFunc("POST /api/conversations/{id}/messages", server.generate)
+	mux.HandleFunc("DELETE /api/conversations/{id}/messages/{messageID}", server.deleteMessagesFrom)
 	mux.HandleFunc("GET /api/attachments/{id}", server.attachment)
 	mux.HandleFunc("/", server.frontend)
 	server.handler = requestLogger(logger, mux)
@@ -269,6 +270,54 @@ func (s *Server) deleteConversation(response http.ResponseWriter, request *http.
 		}
 	}
 	response.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) deleteMessagesFrom(response http.ResponseWriter, request *http.Request) {
+	id, ok := pathID(response, request)
+	if !ok {
+		return
+	}
+	messageID, err := strconv.ParseInt(request.PathValue("messageID"), 10, 64)
+	if err != nil || messageID <= 0 {
+		writeError(response, http.StatusBadRequest, "invalid_id", "message id must be a positive integer")
+		return
+	}
+	// Hold the generation lock through deletion and the response snapshot so a
+	// new response cannot start against history that is being removed.
+	s.activeMu.Lock()
+	defer s.activeMu.Unlock()
+	if _, active := s.active[id]; active {
+		writeError(response, http.StatusConflict, "generation_active", "stop the active response and wait for it to finish before deleting turns")
+		return
+	}
+	storageKey := ""
+	if item, err := s.store.GetConversationContext(request.Context(), id); err == nil {
+		storageKey = item.StorageKey
+	} else if !errors.Is(err, store.ErrNotFound) {
+		s.internalError(response, err)
+		return
+	}
+	keys, err := s.store.DeleteMessagesFrom(request.Context(), id, messageID)
+	if errors.Is(err, store.ErrInvalidTurn) {
+		writeError(response, http.StatusBadRequest, "invalid_turn", err.Error())
+		return
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(response, http.StatusNotFound, "not_found", "conversation or message not found")
+		return
+	}
+	if err != nil {
+		s.internalError(response, err)
+		return
+	}
+	if storageKey != "" && s.agent.Artifacts != nil {
+		for _, key := range keys {
+			if err := s.agent.Artifacts.RemoveFile(storageKey, key); err != nil {
+				s.logger.Warn("remove deleted turn artifact", "error", err, "conversation_id", id)
+			}
+		}
+	}
+	s.getConversation(response, request)
 }
 
 func (s *Server) generate(response http.ResponseWriter, request *http.Request) {
