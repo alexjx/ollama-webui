@@ -8,6 +8,8 @@ When implementing from a selected generated mock, treat that image as the source
 
 ## Selected design
 
+- When a new user turn starts, scroll the transcript to the bottom after its new messages render.
+
 - The user selected Option 1 on 2026-09-02.
 - Source visual: `../docs/design/ollama-webui-option-1.png`.
 - Preserve its light, restrained three-pane utility layout and blue/orange state palette.

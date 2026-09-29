@@ -974,6 +974,7 @@ export function App() {
   const [conversationItems, setConversationItems] = useState([]);
   const [query, setQuery] = useState("");
   const [messages, setMessages] = useState([]);
+  const [scrollRequest, setScrollRequest] = useState(0);
   const [connected, setConnected] = useState(false);
   const [chatError, setChatError] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -1033,7 +1034,7 @@ export function App() {
 
   useLayoutEffect(() => {
     if (activeId) scrollToEnd(transcriptRef.current);
-  }, [activeId]);
+  }, [activeId, scrollRequest]);
 
   async function refreshConversations(search = query, signal) {
     const items = await listConversations(search, signal);
@@ -1523,6 +1524,7 @@ export function App() {
       };
       const pendingAssistant = { id: "pending-assistant", role: "assistant", content: "", thinking: "", status: "streaming", agent_phase: "starting", agent_turn: 1 };
       setMessages((current) => [...current, pendingUser, pendingAssistant]);
+      setScrollRequest((current) => current + 1);
 
       await streamMessage(conversationId, value, {
         signal: controller.signal,
