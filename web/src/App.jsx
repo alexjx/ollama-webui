@@ -4,6 +4,7 @@ import { cancelRunningSubagents, reduceSubagentEvent } from "./agent-events";
 import { formatDuration, formatRate, responseMetrics } from "./response-metrics";
 import { scrollToEnd } from "./scroll-position";
 import { selectElementText } from "./select-text";
+import MarkdownContent from "./markdown-content";
 import { thinkingModeForRequest, thinkingModeFromConversation } from "./thinking-mode";
 import {
   clearConversations as clearAllConversations,
@@ -633,10 +634,10 @@ function AssistantResponse({ message }) {
 
   return (
     <>
-      <p className="message-content" ref={contentRef}>
-        {message.content || (message.status === "streaming" ? "" : "No response was generated.")}
+      <div className="message-content markdown-content" ref={contentRef}>
+        <MarkdownContent>{message.content || (message.status === "streaming" ? "" : "No response was generated.")}</MarkdownContent>
         {message.status === "streaming" && <span className="stream-cursor" aria-hidden="true" />}
-      </p>
+      </div>
       {message.content && message.status !== "streaming" && (
         <button className="select-response-button" type="button" onClick={selectResponse}>
           <SelectionAll size={16} aria-hidden="true" />
