@@ -620,10 +620,22 @@ function ResponseMetrics({ message }) {
 
 function AssistantResponse({ message }) {
   const contentRef = useRef(null);
+  const markdownRef = useRef(null);
+  const markdownButtonRef = useRef(null);
+  const [showMarkdown, setShowMarkdown] = useState(false);
   const [selected, setSelected] = useState(false);
   const selectedTimerRef = useRef(null);
 
   useEffect(() => () => window.clearTimeout(selectedTimerRef.current), []);
+
+  function selectMarkdown() {
+    markdownRef.current?.focus();
+    markdownRef.current?.select();
+  }
+
+  useLayoutEffect(() => {
+    if (showMarkdown) selectMarkdown();
+  }, [showMarkdown]);
 
   function selectResponse() {
     if (!selectElementText(contentRef.current)) return;
@@ -639,10 +651,31 @@ function AssistantResponse({ message }) {
         {message.status === "streaming" && <span className="stream-cursor" aria-hidden="true" />}
       </div>
       {message.content && message.status !== "streaming" && (
-        <button className="select-response-button" type="button" onClick={selectResponse}>
-          <SelectionAll size={16} aria-hidden="true" />
-          <span aria-live="polite">{selected ? "Selected" : "Select response"}</span>
-        </button>
+        <div className="response-actions">
+          <button className="select-response-button" type="button" onClick={selectResponse}>
+            <SelectionAll size={16} aria-hidden="true" />
+            <span aria-live="polite">{selected ? "Selected" : "Select response"}</span>
+          </button>
+          <button className="select-response-button" type="button" ref={markdownButtonRef} onClick={() => {
+            setShowMarkdown(true);
+            selectMarkdown();
+          }}>
+            <SelectionAll size={16} aria-hidden="true" />
+            Select Markdown
+          </button>
+        </div>
+      )}
+      {showMarkdown && (
+        <div className="markdown-source">
+          <div className="markdown-source-toolbar">
+            <span>Copy original Markdown with Ctrl+C or ⌘C.</span>
+            <button type="button" onClick={() => {
+              setShowMarkdown(false);
+              markdownButtonRef.current?.focus();
+            }}>Hide source</button>
+          </div>
+          <textarea ref={markdownRef} aria-label="Original Markdown" readOnly value={message.content} spellCheck={false} />
+        </div>
       )}
     </>
   );
