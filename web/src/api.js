@@ -59,6 +59,14 @@ export function renameConversation(id, title, signal) {
   });
 }
 
+export function changeConversationModel(id, model) {
+  return request(`/api/conversations/${id}/model`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model }),
+  });
+}
+
 export function deleteConversation(id, signal) {
   return request(`/api/conversations/${id}`, {
     method: "DELETE",

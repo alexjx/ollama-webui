@@ -517,6 +517,21 @@ func (s *Store) UpdateTitle(ctx context.Context, id int64, title string) error {
 	return requireAffected(result)
 }
 
+// UpdateModel preserves session history and resets model-specific thinking
+// overrides only when the model changes. Clear the legacy setting as well so
+// reopening the database cannot restore an override through migration.
+func (s *Store) UpdateModel(ctx context.Context, id int64, model string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE conversations SET
+thinking_mode = CASE WHEN model = ? THEN thinking_mode ELSE NULL END,
+thinking_enabled = CASE WHEN model = ? THEN thinking_enabled ELSE NULL END,
+updated_at = CASE WHEN model = ? THEN updated_at ELSE ? END,
+model = ? WHERE id = ?`, model, model, model, formatTime(time.Now().UTC()), model, id)
+	if err != nil {
+		return fmt.Errorf("update conversation model: %w", err)
+	}
+	return requireAffected(result)
+}
+
 func (s *Store) DeleteConversation(ctx context.Context, id int64) error {
 	result, err := s.db.ExecContext(ctx, `DELETE FROM conversations WHERE id = ?`, id)
 	if err != nil {

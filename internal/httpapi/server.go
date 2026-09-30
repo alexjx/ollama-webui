@@ -65,6 +65,7 @@ func New(database *store.Store, ollamaClient *ollama.Client, runner agent.Runner
 	mux.HandleFunc("DELETE /api/conversations", server.clearConversations)
 	mux.HandleFunc("GET /api/conversations/{id}", server.getConversation)
 	mux.HandleFunc("PATCH /api/conversations/{id}", server.updateConversation)
+	mux.HandleFunc("PUT /api/conversations/{id}/model", server.updateConversationModel)
 	mux.HandleFunc("DELETE /api/conversations/{id}", server.deleteConversation)
 	mux.HandleFunc("POST /api/conversations/{id}/messages", server.generate)
 	mux.HandleFunc("DELETE /api/conversations/{id}/messages/{messageID}", server.deleteMessagesFrom)
@@ -236,6 +237,79 @@ func (s *Server) updateConversation(response http.ResponseWriter, request *http.
 		return
 	}
 	conversation, _ := s.store.GetConversation(request.Context(), id)
+	writeJSON(response, http.StatusOK, conversation)
+}
+
+func (s *Server) updateConversationModel(response http.ResponseWriter, request *http.Request) {
+	id, ok := pathID(response, request)
+	if !ok {
+		return
+	}
+	var input struct {
+		Model string `json:"model"`
+	}
+	if err := decodeJSON(request, &input); err != nil || strings.TrimSpace(input.Model) == "" {
+		writeError(response, http.StatusUnprocessableEntity, "invalid_model", "model is required")
+		return
+	}
+	input.Model = strings.TrimSpace(input.Model)
+	if _, err := s.store.GetConversation(request.Context(), id); err != nil {
+		s.storeError(response, err)
+		return
+	}
+	// Fetch capabilities before taking the generation lock: Ollama may be slow.
+	models, err := s.ollama.ListModels(request.Context())
+	if err != nil {
+		writeError(response, http.StatusBadGateway, "ollama_unavailable", err.Error())
+		return
+	}
+	var selected *ollama.Model
+	for _, model := range models {
+		if model.Name == input.Model {
+			selected = &model
+			break
+		}
+	}
+	if selected == nil {
+		writeError(response, http.StatusUnprocessableEntity, "model_unavailable", "choose an installed chat model")
+		return
+	}
+	s.activeMu.Lock()
+	defer s.activeMu.Unlock()
+	if _, active := s.active[id]; active {
+		writeError(response, http.StatusConflict, "generation_active", "stop the active response and wait for it to finish before changing models")
+		return
+	}
+	conversation, err := s.store.GetConversation(request.Context(), id)
+	if err != nil {
+		s.storeError(response, err)
+		return
+	}
+	if conversation.Mode != "chat" && !containsCapability(selected.Capabilities, "tools") {
+		writeError(response, http.StatusUnprocessableEntity, "tools_unsupported", "choose a model that supports tools for this agent session")
+		return
+	}
+	history, err := s.store.Messages(request.Context(), id)
+	if err != nil {
+		s.internalError(response, err)
+		return
+	}
+	imageLimit := imageLimitForModel(*selected)
+	for _, message := range history {
+		if len(message.Attachments) > imageLimit {
+			writeError(response, http.StatusUnprocessableEntity, "vision_unsupported", "choose a vision model that supports the images already in this session")
+			return
+		}
+	}
+	if err := s.store.UpdateModel(request.Context(), id, input.Model); err != nil {
+		s.storeError(response, err)
+		return
+	}
+	conversation, err = s.store.GetConversation(request.Context(), id)
+	if err != nil {
+		s.storeError(response, err)
+		return
+	}
 	writeJSON(response, http.StatusOK, conversation)
 }
 

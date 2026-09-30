@@ -7,6 +7,7 @@ import { selectElementText } from "./select-text";
 import { thinkingModeForRequest, thinkingModeFromConversation } from "./thinking-mode";
 import {
   clearConversations as clearAllConversations,
+  changeConversationModel,
   createConversation,
   deleteConversation,
   deleteTurns,
@@ -65,6 +66,14 @@ const conversationModes = [
   { value: "agent", label: "Agent" },
   { value: "chat", label: "Chat" },
 ];
+
+function ModelOptions({ models, model }) {
+  return <>
+    {model && !models.includes(model) && <option value={model} disabled>{model} — unavailable</option>}
+    {!models.length && !model && <option value="">No local models found</option>}
+    {models.map((item) => <option key={item} value={item}>{item}</option>)}
+  </>;
+}
 
 function IconButton({ label, children, className = "", ...props }) {
   return (
@@ -222,6 +231,10 @@ function ConversationSettings({
   setThinkingMode,
   supportsThinking,
   modelLoaded,
+  modelDisabled,
+  modelFeedback,
+  modelError,
+  onRefreshModels,
   temperatureOverride,
   setTemperatureOverride,
   temperature,
@@ -249,12 +262,13 @@ function ConversationSettings({
         <section className="settings-section model-section">
           <label htmlFor="settings-model">Model</label>
           <div className="select-wrap wide">
-            <select id="settings-model" value={model} disabled={modelLoaded} onChange={(event) => setModel(event.target.value)}>
-              {models.map((item) => <option key={item}>{item}</option>)}
+            <select id="settings-model" value={model} disabled={modelDisabled} onFocus={onRefreshModels} aria-describedby="settings-model-help" onChange={(event) => setModel(event.target.value)}>
+              <ModelOptions models={models} model={model} />
             </select>
             <CaretDown size={18} aria-hidden="true" />
           </div>
-          <p>Select the model to use for this conversation.</p>
+          <p id="settings-model-help">{modelLoaded ? "Switch models between responses. History and mode stay the same; thinking resets to the new model’s default." : "Select the model to use for this conversation."}</p>
+          {modelFeedback && <p className={modelError ? "model-feedback-error" : ""} role={modelError ? "alert" : "status"}>{modelFeedback}</p>}
         </section>
 
         <section className="settings-section mode-section">
@@ -714,7 +728,7 @@ function readImage(file) {
   });
 }
 
-function Composer({ streaming, onStop, onSend, empty, model, models, setModel, conversationMode, setConversationMode, contextWindow, setContextWindow, thinkingMode, setThinkingMode, contextUsedTokens, disabled, supportsImages, supportsTools, supportsThinking, onOpenSettings }) {
+function Composer({ streaming, onStop, onSend, empty, model, models, setModel, modelDisabled, onRefreshModels, conversationMode, setConversationMode, contextWindow, setContextWindow, thinkingMode, setThinkingMode, contextUsedTokens, disabled, supportsImages, supportsTools, supportsThinking, onOpenSettings }) {
   const [message, setMessage] = useState("");
   const [attachments, setAttachments] = useState([]);
   const [attachmentError, setAttachmentError] = useState("");
@@ -850,8 +864,8 @@ function Composer({ streaming, onStop, onSend, empty, model, models, setModel, c
         {empty && (
           <div className="launch-dock-header">
             <div className="select-wrap launch-dock-model">
-              <select aria-label="Model" value={model} onChange={(event) => setModel(event.target.value)}>
-                {models.length ? models.map((item) => <option key={item}>{item}</option>) : <option value="">No local models found</option>}
+              <select aria-label="Model" value={model} disabled={modelDisabled} onFocus={onRefreshModels} onChange={(event) => setModel(event.target.value)}>
+                <ModelOptions models={models} model={model} />
               </select>
               <CaretDown size={17} aria-hidden="true" />
             </div>
@@ -966,6 +980,14 @@ export function App() {
   const [activeId, setActiveId] = useState(null);
   const [activeTitle, setActiveTitle] = useState("");
   const [model, setModel] = useState("");
+  const [changingModel, setChangingModel] = useState(false);
+  const [modelError, setModelError] = useState("");
+  const [modelNotice, setModelNotice] = useState("");
+  const [modelsLoaded, setModelsLoaded] = useState(false);
+  const [loadingConversation, setLoadingConversation] = useState(false);
+  const conversationViewRef = useRef(0);
+  const modelChangeRef = useRef(null);
+  const modelListRequestRef = useRef(0);
   const [conversationMode, setConversationMode] = useState("agent");
   const [models, setModels] = useState([]);
   const [visionModels, setVisionModels] = useState(() => new Set());
@@ -1041,19 +1063,58 @@ export function App() {
     setConversationItems(items);
   }
 
+  async function refreshModels(signal) {
+    const requestId = ++modelListRequestRef.current;
+    const items = await listModels(signal);
+    if (requestId !== modelListRequestRef.current) return;
+    const names = items.map((item) => item.name);
+    const toolNames = items.filter((item) => item.capabilities?.includes("tools")).map((item) => item.name);
+    setModels(names);
+    setVisionModels(new Set(items.filter((item) => item.capabilities?.includes("vision")).map((item) => item.name)));
+    setToolModels(new Set(toolNames));
+    setThinkingModels(new Set(items.filter((item) => item.capabilities?.includes("thinking")).map((item) => item.name)));
+    setModel((current) => current || toolNames[0] || names[0] || "");
+    setModelsLoaded(true);
+    setConnected(true);
+  }
+
+  function refreshModelChoices() {
+    refreshModels().catch((error) => setModelError(`Could not refresh models: ${error.message}`));
+  }
+
+  async function changeModel(nextModel) {
+    if (nextModel === model || streaming || modelChangeRef.current || loadingConversation || deletingTurns || turnDeleteTarget) return;
+    setModelError("");
+    setModelNotice("");
+    if (!activeId) {
+      setModel(nextModel);
+      return;
+    }
+    const view = conversationViewRef.current;
+    const pendingChange = changeConversationModel(activeId, nextModel);
+    modelChangeRef.current = pendingChange;
+    setChangingModel(true);
+    try {
+      const updated = await pendingChange;
+      setConversationItems((items) => items.map((item) => item.id === updated.id ? { ...item, model: updated.model } : item));
+      // A request may finish after the user has opened another conversation.
+      if (view !== conversationViewRef.current) return;
+      setModel(updated.model);
+      setThinkingMode(thinkingModeFromConversation(updated));
+      setChatError("");
+      setModelNotice(`Now using ${updated.model}. History kept; thinking uses the model’s default.`);
+    } catch (error) {
+      if (view === conversationViewRef.current) setModelError(error.message);
+    } finally {
+      modelChangeRef.current = null;
+      setChangingModel(false);
+    }
+  }
+
   useEffect(() => {
     const controller = new AbortController();
     Promise.allSettled([
-      listModels(controller.signal).then((items) => {
-        const names = items.map((item) => item.name);
-        const toolNames = items.filter((item) => item.capabilities?.includes("tools")).map((item) => item.name);
-        setModels(names);
-        setVisionModels(new Set(items.filter((item) => item.capabilities?.includes("vision")).map((item) => item.name)));
-        setToolModels(new Set(toolNames));
-        setThinkingModels(new Set(items.filter((item) => item.capabilities?.includes("thinking")).map((item) => item.name)));
-        setModel((current) => current || toolNames[0] || names[0] || "");
-        setConnected(true);
-      }),
+      refreshModels(controller.signal),
       refreshConversations("", controller.signal),
       getHealth(controller.signal).then((health) => setConnected(health.ollama?.status === "ok")),
     ]).then((results) => {
@@ -1067,16 +1128,16 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (!modelLoaded && model && !thinkingModels.has(model) && thinkingMode !== "default") {
+    if (!activeId && !modelLoaded && model && !thinkingModels.has(model) && thinkingMode !== "default") {
       setThinkingMode("default");
     }
-  }, [model, modelLoaded, thinkingMode, thinkingModels]);
+  }, [activeId, model, modelLoaded, thinkingMode, thinkingModels]);
 
   useEffect(() => {
-    if (!modelLoaded && model && !toolModels.has(model) && conversationMode === "agent") {
+    if (!activeId && !modelLoaded && model && !toolModels.has(model) && conversationMode === "agent") {
       setConversationMode("chat");
     }
-  }, [conversationMode, model, modelLoaded, toolModels]);
+  }, [activeId, conversationMode, model, modelLoaded, toolModels]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -1336,6 +1397,10 @@ export function App() {
   }
 
   async function chooseConversation(id) {
+    const view = ++conversationViewRef.current;
+    setLoadingConversation(true);
+    setModelError("");
+    setModelNotice("");
     generationRef.current?.abort();
     detailRequestRef.current?.abort();
     const controller = new AbortController();
@@ -1343,7 +1408,11 @@ export function App() {
     setChatError("");
     setSidebarOpen(false);
     try {
+      // Reopening a session while its model is saving must read the saved value.
+      await modelChangeRef.current?.catch(() => {});
+      if (view !== conversationViewRef.current) return;
       const payload = await getConversation(id, controller.signal);
+      if (view !== conversationViewRef.current) return;
       setActiveId(payload.conversation.id);
       setActiveTitle(payload.conversation.title);
       setModel(payload.conversation.model);
@@ -1357,10 +1426,17 @@ export function App() {
       setMessages(payload.messages);
     } catch (error) {
       if (error.name !== "AbortError") setChatError(error.message);
+    } finally {
+      if (view === conversationViewRef.current) setLoadingConversation(false);
     }
   }
 
   function resetConversation(closeNavigation = true) {
+    ++conversationViewRef.current;
+    detailRequestRef.current?.abort();
+    setLoadingConversation(false);
+    setModelError("");
+    setModelNotice("");
     generationRef.current?.abort();
     setActiveId(null);
     setActiveTitle("");
@@ -1492,8 +1568,10 @@ export function App() {
   }
 
   async function sendMessage(value, images = []) {
-    if (!model || streaming || deletingTurns || turnDeleteTarget) return;
+    if (!model || !models.includes(model) || streaming || modelChangeRef.current || loadingConversation || deletingTurns || turnDeleteTarget) return;
     setChatError("");
+    setModelError("");
+    setModelNotice("");
     const controller = new AbortController();
     generationRef.current = controller;
     setStreaming(true);
@@ -1603,6 +1681,9 @@ export function App() {
 
   const overlaySettings = settingsOpen && viewportWidth < 1200;
   const sidebarVisible = viewportWidth > 900 || sidebarOpen;
+  const modelUnavailable = modelsLoaded && model && !models.includes(model);
+  const modelDisabled = streaming || changingModel || loadingConversation || deletingTurns || !!turnDeleteTarget;
+  const modelFeedback = changingModel ? "Changing model…" : modelError || (modelUnavailable ? "This model is no longer installed. Choose another model to continue this conversation." : modelNotice);
 
   return (
     <div className={`app-shell ${settingsOpen ? "settings-is-open" : ""}`}>
@@ -1623,7 +1704,7 @@ export function App() {
         />
       </div>
 
-      <main className={`chat-workspace ${!activeId ? "is-new-chat" : ""}`}>
+      <main className={`chat-workspace ${!activeId ? "is-new-chat" : ""} ${modelFeedback ? "has-model-feedback" : ""}`}>
         <header className="topbar">
           <div className="topbar-left">
             <IconButton
@@ -1638,8 +1719,8 @@ export function App() {
               <>
                 <div className="terminal-button" aria-hidden="true"><ChatCircle size={24} /></div>
                 <div className="select-wrap model-select">
-                  <select aria-label="Active model" value={model} disabled={modelLoaded} onChange={(event) => setModel(event.target.value)}>
-                    {models.length ? models.map((item) => <option key={item}>{item}</option>) : <option value="">No models</option>}
+                  <select aria-label="Active model" value={model} disabled={modelDisabled} onFocus={refreshModelChoices} aria-describedby={modelFeedback ? "active-model-feedback" : undefined} onChange={(event) => changeModel(event.target.value)}>
+                    <ModelOptions models={models} model={model} />
                   </select>
                   <CaretDown size={17} aria-hidden="true" />
                 </div>
@@ -1696,6 +1777,8 @@ export function App() {
           </div>
         </header>
 
+        {modelFeedback && <div id="active-model-feedback" className={`model-feedback ${modelError || modelUnavailable ? "model-feedback-error" : ""}`} role={modelError ? "alert" : "status"}>{modelFeedback}</div>}
+
         <section className="transcript" aria-label="Conversation" ref={transcriptRef}>
           <ChatTranscript
             streaming={streaming}
@@ -1713,7 +1796,9 @@ export function App() {
           empty={!activeId}
           model={model}
           models={models}
-          setModel={setModel}
+          setModel={changeModel}
+          modelDisabled={modelDisabled}
+          onRefreshModels={refreshModelChoices}
           conversationMode={conversationMode}
           setConversationMode={setConversationMode}
           contextWindow={contextWindow}
@@ -1721,7 +1806,7 @@ export function App() {
           thinkingMode={thinkingMode}
           setThinkingMode={setThinkingMode}
           contextUsedTokens={currentContextUsage.usedTokens}
-          disabled={!model || conversationMode === "agent" && !toolModels.has(model)}
+          disabled={!model || !models.includes(model) || changingModel || loadingConversation || deletingTurns || !!turnDeleteTarget || conversationMode === "agent" && !toolModels.has(model)}
           supportsImages={visionModels.has(model)}
           supportsTools={toolModels.has(model)}
           supportsThinking={thinkingModels.has(model)}
@@ -1733,7 +1818,11 @@ export function App() {
         <ConversationSettings
           models={models}
           model={model}
-          setModel={setModel}
+          setModel={changeModel}
+          modelDisabled={modelDisabled}
+          modelFeedback={modelFeedback}
+          modelError={!!modelError || !!modelUnavailable}
+          onRefreshModels={refreshModelChoices}
           conversationMode={conversationMode}
           setConversationMode={setConversationMode}
           supportsTools={toolModels.has(model)}

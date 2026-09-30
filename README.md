@@ -34,6 +34,12 @@ from the final answer. Ollama does not publish each model's exact supported effo
 levels, so unsupported combinations may still be rejected by the model. Models
 without the broad capability show Thinking as unsupported.
 
+Existing sessions can switch models from the header or **Conversation settings**
+between responses, including when the previous model has been removed. History,
+Chat/Agent mode, and other settings are preserved; thinking resets to the new
+model's default. Agent sessions require a tool-capable replacement, and sessions
+with images require a model that supports those images.
+
 ## Optional shell access: safety boundary
 
 The agent can execute arbitrary shell commands. Commands may read paths visible to
@@ -122,7 +128,8 @@ so Ollama remains responsible for model lifetime. In Chat mode, choosing
 **Ollama default** for the context window omits `num_ctx`. Agent mode instead uses
 the managed context budget unless an explicit per-conversation value is selected;
 that value is saved with the conversation and sent on every turn. The Thinking setting follows
-the same inherited-default behavior and is also fixed once a chat starts. Explicit
+the same inherited-default behavior and is fixed once a chat starts, unless switching
+models resets it to the new model's default. Explicit
 effort levels are model-dependent; **Ollama default** is the safest portable choice.
 
 The sidebar **Settings** entry shows application-wide runtime and storage status,

@@ -9,6 +9,7 @@ When implementing from a selected generated mock, treat that image as the source
 ## Selected design
 
 - When a new user turn starts, scroll the transcript to the bottom after its new messages render.
+- Existing sessions can switch models between responses using the header or conversation settings selector, including recovery from removed models. Preserve history and Chat/Agent mode, validate replacement capabilities, and reset thinking to the replacement model's default.
 
 - The user selected Option 1 on 2026-09-02.
 - Source visual: `../docs/design/ollama-webui-option-1.png`.
