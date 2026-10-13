@@ -523,6 +523,21 @@ func (s *Store) UpdateTitle(ctx context.Context, id int64, title string) error {
 	return requireAffected(result)
 }
 
+// UpdateTitleIfUnchanged applies an explicit generated name only if the session
+// still matches the snapshot used for naming. Even an identical manual rename
+// changes updated_at and takes priority over a pending generated name.
+func (s *Store) UpdateTitleIfUnchanged(ctx context.Context, id int64, previousTitle string, previousUpdatedAt time.Time, title string) (bool, error) {
+	result, err := s.db.ExecContext(ctx, `UPDATE conversations
+SET title = ?, auto_title_pending = 0, updated_at = ?
+WHERE id = ? AND title = ? AND updated_at = ?`,
+		strings.TrimSpace(title), formatTime(time.Now().UTC()), id, previousTitle, formatTime(previousUpdatedAt))
+	if err != nil {
+		return false, fmt.Errorf("update generated conversation title: %w", err)
+	}
+	count, err := result.RowsAffected()
+	return count > 0, err
+}
+
 // CompleteAutoTitle applies a generated title once. Manual renames and deleted
 // conversations return false, so a late model response cannot overwrite them.
 func (s *Store) CompleteAutoTitle(ctx context.Context, id int64, title string) (bool, error) {

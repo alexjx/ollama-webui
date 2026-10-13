@@ -171,7 +171,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   top: calc(100% + 3px);
   right: 0;
   z-index: 30;
-  width: 154px;
+  width: 228px;
   padding: 5px;
   border: 1px solid var(--line-strong);
   border-radius: 9px;
@@ -183,6 +183,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .conversation-actions-menu button:disabled { cursor: not-allowed; opacity: .45; }
 .conversation-actions-menu .danger-menu-item { color: #934528; }
 .conversation-actions-menu .danger-menu-item:hover { background: #fff2ed; }
+.session-title-feedback { grid-column: 1 / -1; display: flex; align-items: center; gap: 5px; margin: 0; padding: 0 10px 8px 38px; color: #526873; font-size: 12px; overflow-wrap: anywhere; }
+.session-title-feedback.error { color: #934528; }
+.session-title-feedback svg { flex-shrink: 0; animation: agent-spin 1s linear infinite; }
 .search-empty { display: grid; justify-items: center; gap: 5px; padding: 36px 12px; color: var(--muted); text-align: center; }
 .search-empty p { margin: 0; }
 .sidebar-footer { display: grid; gap: 4px; padding-top: 8px; }

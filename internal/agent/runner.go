@@ -180,6 +180,7 @@ func (runner Runner) Run(ctx context.Context, input RunInput, emit func(Event) e
 		}
 		var assistant ollama.Message
 		var final ollama.ChatChunk
+		finalAnswerStart := visible.Len()
 		turnStartedContent := false
 		turnStartedThinking := false
 		err = runner.Chat.Chat(ctx, ollama.ChatRequest{
@@ -205,6 +206,9 @@ func (runner Runner) Run(ctx context.Context, input RunInput, emit func(Event) e
 					prefix = "\n\n"
 					visible.WriteString(prefix)
 				}
+				if !turnStartedContent {
+					finalAnswerStart = visible.Len()
+				}
 				turnStartedContent = true
 				assistant.Content += chunk.Message.Content
 				visible.WriteString(chunk.Message.Content)
@@ -225,6 +229,10 @@ func (runner Runner) Run(ctx context.Context, input RunInput, emit func(Event) e
 		messages = append(messages, assistant)
 		metrics.add(final)
 		metadata = chunkMetadata(final, turn, metrics, input.Mode)
+		metadata["response_model"] = input.Model
+		if !agentMode || len(assistant.ToolCalls) == 0 {
+			metadata["final_answer_start"] = finalAnswerStart
+		}
 		if err := emit(Event{Type: "turn.done", Turn: turn, Metadata: metadata}); err != nil {
 			return RunResult{Content: visible.String(), Thinking: thinking.String(), Metadata: metadata}, err
 		}

@@ -63,6 +63,10 @@ export function renameConversation(id, title, signal) {
   });
 }
 
+export function generateConversationTitle(id, signal) {
+  return request(`/api/conversations/${id}/title`, { method: "POST", signal });
+}
+
 export function changeConversationModel(id, model) {
   return request(`/api/conversations/${id}/model`, {
     method: "PUT",

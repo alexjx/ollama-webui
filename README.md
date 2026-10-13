@@ -13,6 +13,13 @@ in the background and updates the browser tab and session history automatically.
 Manual renames take priority; existing sessions keep their names, and a naming
 failure keeps the initial title without affecting the saved reply.
 
+Use **Generate title from latest turn** in any session's history-row menu to
+replace its name using the latest completed user question and final answer.
+This works in both modes without opening the session. New Agent replies keep an
+exact final-answer boundary so progress narration is excluded; older saved
+replies ask the title model to focus on the final answer. Failed or stopped turns
+are skipped, and naming errors keep the current name and saved conversation.
+
 To protect short local-model context windows, Agent mode automatically replaces
 an immutable prefix of long conversations with a durable checkpoint summary while
 keeping recent messages verbatim. Original messages remain unchanged in SQLite.

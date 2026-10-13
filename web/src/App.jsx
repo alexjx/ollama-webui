@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { contextUsage } from "./context-usage";
-import { mergeConversationTitles } from "./conversation-titles";
+import { mergeConversationTitles, newestConversationTitle } from "./conversation-titles";
 import { cancelRunningSubagents, reduceSubagentEvent } from "./agent-events";
 import { formatDuration, formatRate, responseMetrics } from "./response-metrics";
 import { scrollToEnd } from "./scroll-position";
@@ -18,6 +18,7 @@ import {
   getConversation,
   getHealth,
   getSettings,
+  generateConversationTitle,
   listConversations,
   listModels,
   renameConversation,
@@ -110,7 +111,7 @@ function groupConversations(items) {
   return [...groups].map(([label, groupedItems]) => ({ label, items: groupedItems }));
 }
 
-function ConversationSidebar({ activeId, conversations, query, streaming, onQuery, onSelect, onNew, onRename, onDelete, onSettings, onAbout, onClose }) {
+function ConversationSidebar({ activeId, conversations, query, streaming, titleRequests, titleNotices, onQuery, onSelect, onNew, onRename, onGenerateTitle, onDelete, onSettings, onAbout, onClose }) {
   const filteredGroups = useMemo(() => groupConversations(conversations), [conversations]);
   const [openActionsId, setOpenActionsId] = useState(null);
 
@@ -182,6 +183,7 @@ function ConversationSidebar({ activeId, conversations, query, streaming, onQuer
                       <div className="conversation-actions-menu" role="menu">
                         <button
                           role="menuitem"
+                          disabled={!!titleRequests[item.id]}
                           onClick={(event) => {
                             const trigger = event.currentTarget.closest(".conversation-entry")?.querySelector(".conversation-actions-trigger");
                             setOpenActionsId(null);
@@ -189,9 +191,19 @@ function ConversationSidebar({ activeId, conversations, query, streaming, onQuer
                           }}
                         ><NotePencil size={17} />Rename</button>
                         <button
+                          role="menuitem"
+                          disabled={!!titleRequests[item.id] || streaming && activeId === item.id || item.message_count < 2}
+                          onClick={(event) => {
+                            const trigger = event.currentTarget.closest(".conversation-entry")?.querySelector(".conversation-actions-trigger");
+                            setOpenActionsId(null);
+                            onGenerateTitle(item);
+                            trigger?.focus();
+                          }}
+                        ><ArrowCounterClockwise size={17} />Generate title from latest turn</button>
+                        <button
                           className="danger-menu-item"
                           role="menuitem"
-                          disabled={streaming && activeId === item.id}
+                          disabled={!!titleRequests[item.id] || streaming && activeId === item.id}
                           onClick={(event) => {
                             const trigger = event.currentTarget.closest(".conversation-entry")?.querySelector(".conversation-actions-trigger");
                             setOpenActionsId(null);
@@ -201,6 +213,11 @@ function ConversationSidebar({ activeId, conversations, query, streaming, onQuer
                       </div>
                     )}
                   </div>
+                  {(titleRequests[item.id] || titleNotices[item.id]) && (
+                    <p className={`session-title-feedback ${titleNotices[item.id]?.error ? "error" : ""}`} role={titleNotices[item.id]?.error ? "alert" : "status"}>
+                      {titleRequests[item.id] ? <><CircleNotch size={13} />Generating title…</> : titleNotices[item.id].message}
+                    </p>
+                  )}
                 </div>
               ))}
             </section>
@@ -464,7 +481,7 @@ function SystemSettings({ connected, modelCount, runtime, loading, error, stream
             <div><strong>Clear conversation history</strong><p>Deletes every conversation, message, image, Agent action, checkpoint, and context artifact.</p></div>
             <button type="button" onClick={onRequestClear} disabled={streaming || !storage?.conversations}><Trash size={18} />Clear all</button>
           </div>
-          {streaming && <p className="locked-setting"><span className="lock-dot" />Stop the active response before clearing data.</p>}
+          {streaming && <p className="locked-setting"><span className="lock-dot" />Wait for active operations to finish before clearing data.</p>}
         </section>
 
       </div>
@@ -688,6 +705,7 @@ function AssistantResponse({ message }) {
 function ChatTranscript({
   streaming,
   compacting,
+  generatingTitle,
   onDeleteTurn,
   empty,
   messages,
@@ -734,8 +752,8 @@ function ChatTranscript({
           {message.role === "assistant" && <ResponseMetrics message={message} />}
           {message.role === "user" && (
             <button className="select-response-button delete-turn-button" type="button"
-              disabled={streaming || compacting || message.id === "pending-user"}
-              title={compacting ? "Wait for context compaction before deleting this turn" : streaming ? "Stop generation before deleting this turn" : "Delete this turn and all later turns"}
+              disabled={streaming || compacting || generatingTitle || message.id === "pending-user"}
+              title={generatingTitle ? "Wait for title generation before deleting this turn" : compacting ? "Wait for context compaction before deleting this turn" : streaming ? "Stop generation before deleting this turn" : "Delete this turn and all later turns"}
               onClick={(event) => onDeleteTurn(message, event.currentTarget)}>
               <Trash size={16} aria-hidden="true" />Delete from here
             </button>
@@ -1005,6 +1023,12 @@ export function App() {
   const [activeTitle, setActiveTitle] = useState("");
   const [titlePollIDs, setTitlePollIDs] = useState([]);
   const titleVersionRef = useRef(0);
+  const recentTitlesRef = useRef(new Map());
+  const [titleRequests, setTitleRequests] = useState({});
+  const [titleNotices, setTitleNotices] = useState({});
+  const titleRequestRef = useRef(new Map());
+  const activeIdRef = useRef(activeId);
+  activeIdRef.current = activeId;
   const [model, setModel] = useState("");
   const [changingModel, setChangingModel] = useState(false);
   const [modelError, setModelError] = useState("");
@@ -1021,6 +1045,8 @@ export function App() {
   const [thinkingModels, setThinkingModels] = useState(() => new Set());
   const [conversationItems, setConversationItems] = useState([]);
   const [query, setQuery] = useState("");
+  const queryRef = useRef(query);
+  queryRef.current = query;
   const [messages, setMessages] = useState([]);
   const [scrollRequest, setScrollRequest] = useState(0);
   const [connected, setConnected] = useState(false);
@@ -1083,6 +1109,11 @@ export function App() {
   const actionReturnRef = useRef(null);
   const transcriptRef = useRef(null);
   const currentContextUsage = useMemo(() => contextUsage(messages, contextWindow, contextCheckpoint), [messages, contextWindow, contextCheckpoint]);
+  const activeTitleGenerating = !!titleRequests[activeId];
+
+  useEffect(() => () => {
+    for (const controller of titleRequestRef.current.values()) controller.abort();
+  }, []);
 
   useLayoutEffect(() => {
     if (activeId) scrollToEnd(transcriptRef.current);
@@ -1090,6 +1121,7 @@ export function App() {
 
   async function refreshConversations(search = query, signal) {
     const items = await listConversations(search, signal);
+    if (signal?.aborted || search !== queryRef.current) return;
     setConversationItems(items);
     const pending = items.filter((item) => item.auto_title_pending && item.message_count >= 2).map((item) => item.id);
     if (pending.length) setTitlePollIDs((current) => [...new Set([...current, ...pending])]);
@@ -1108,6 +1140,9 @@ export function App() {
       try {
         const items = await listConversations("", controller.signal);
         if (!controller.signal.aborted) {
+          for (const item of items) {
+            if (pending.includes(item.id) && !item.auto_title_pending) recentTitlesRef.current.set(item.id, newestConversationTitle(item, recentTitlesRef.current.get(item.id)));
+          }
           setConversationItems((current) => mergeConversationTitles(current, items));
           setTitlePollIDs((current) => current.filter((id) => items.some((item) => item.id === id && item.auto_title_pending)));
           const active = items.find((item) => item.id === activeId);
@@ -1151,7 +1186,7 @@ export function App() {
   }
 
   async function changeModel(nextModel) {
-    if (nextModel === model || streaming || compactionRef.current || modelChangeRef.current || loadingConversation || deletingTurns || turnDeleteTarget) return;
+    if (nextModel === model || streaming || titleRequestRef.current.has(activeId) || compactionRef.current || modelChangeRef.current || loadingConversation || deletingTurns || turnDeleteTarget) return;
     setModelError("");
     setModelNotice("");
     if (!activeId) {
@@ -1425,7 +1460,7 @@ export function App() {
   }
 
   function openClearAll(trigger) {
-    if (streaming || compactionRef.current) return;
+    if (streaming || titleRequestRef.current.size || compactionRef.current) return;
     clearAllReturnRef.current = trigger;
     setClearAllConfirmation("");
     setClearAllError("");
@@ -1484,7 +1519,8 @@ export function App() {
       const payload = await getConversation(id, controller.signal);
       if (view !== conversationViewRef.current) return;
       setActiveId(payload.conversation.id);
-      setActiveTitle(payload.conversation.title);
+      const recentTitle = recentTitlesRef.current.get(id);
+      setActiveTitle(newestConversationTitle(payload.conversation, recentTitle).title);
       if (payload.conversation.auto_title_pending && payload.conversation.message_count >= 2) {
         setTitlePollIDs((current) => [...new Set([...current, id])]);
       }
@@ -1546,6 +1582,7 @@ export function App() {
   }
 
   function openRename(conversation, trigger) {
+    if (titleRequestRef.current.has(conversation.id)) return;
     actionReturnRef.current = trigger;
     setRenameTitle(conversation.title);
     setRenameError("");
@@ -1571,6 +1608,7 @@ export function App() {
     setRenameError("");
     try {
       const updated = await renameConversation(renameTarget.id, title);
+      recentTitlesRef.current.set(updated.id, updated);
       if (renameTarget.id === activeId) {
         titleVersionRef.current++;
         setActiveTitle(updated.title);
@@ -1586,8 +1624,32 @@ export function App() {
     }
   }
 
+  async function generateLatestSessionTitle(conversation) {
+    if (titleRequestRef.current.has(conversation.id) || (conversation.id === activeId && (streaming || compactionRef.current || modelChangeRef.current || deletingTurns))) return;
+    const controller = new AbortController();
+    titleRequestRef.current.set(conversation.id, controller);
+    setTitleRequests((current) => ({ ...current, [conversation.id]: true }));
+    setTitleNotices((current) => ({ ...current, [conversation.id]: null }));
+    // An explicit naming request supersedes automatic first-turn naming.
+    if (activeIdRef.current === conversation.id) titleVersionRef.current++;
+    setTitlePollIDs((current) => current.filter((id) => id !== conversation.id));
+    try {
+      const updated = await generateConversationTitle(conversation.id, controller.signal);
+      recentTitlesRef.current.set(updated.id, updated);
+      if (activeIdRef.current === conversation.id) setActiveTitle(updated.title);
+      setConversationItems((items) => items.map((item) => item.id === updated.id ? { ...item, title: updated.title, auto_title_pending: false, updated_at: updated.updated_at } : item));
+      setTitleNotices((current) => ({ ...current, [conversation.id]: { message: "Title updated.", error: false } }));
+      refreshConversations(queryRef.current).catch(() => {});
+    } catch (error) {
+      if (error.name !== "AbortError") setTitleNotices((current) => ({ ...current, [conversation.id]: { message: error.message, error: true } }));
+    } finally {
+      titleRequestRef.current.delete(conversation.id);
+      setTitleRequests((current) => { const next = { ...current }; delete next[conversation.id]; return next; });
+    }
+  }
+
   function openDelete(conversation, trigger) {
-    if (streaming && activeId === conversation.id) return;
+    if (titleRequestRef.current.has(conversation.id) || streaming && activeId === conversation.id) return;
     actionReturnRef.current = trigger;
     setDeleteError("");
     setDeleteTarget(conversation);
@@ -1618,6 +1680,7 @@ export function App() {
   }
 
   function openTurnDelete(message, trigger) {
+    if (titleRequestRef.current.has(activeId)) return;
     if (streaming || compactionRef.current) return;
     turnDeleteReturnRef.current = trigger;
     setTurnDeleteError("");
@@ -1650,7 +1713,7 @@ export function App() {
   }
 
   async function manuallyCompactContext() {
-    if (!activeId || streaming || compactionRef.current || modelChangeRef.current || loadingConversation || deletingTurns || turnDeleteTarget) return;
+    if (!activeId || streaming || titleRequestRef.current.has(activeId) || compactionRef.current || modelChangeRef.current || loadingConversation || deletingTurns || turnDeleteTarget) return;
     const view = conversationViewRef.current;
     const controller = new AbortController();
     compactionRef.current = controller;
@@ -1678,7 +1741,7 @@ export function App() {
   }
 
   async function sendMessage(value, attachments = [], onAccepted = () => {}) {
-    if (!model || !models.includes(model) || streaming || compactionRef.current || modelChangeRef.current || loadingConversation || deletingTurns || turnDeleteTarget) return;
+    if (!model || !models.includes(model) || streaming || titleRequestRef.current.has(activeId) || compactionRef.current || modelChangeRef.current || loadingConversation || deletingTurns || turnDeleteTarget) return;
     setChatError("");
     setModelError("");
     setModelNotice("");
@@ -1805,7 +1868,7 @@ export function App() {
   const overlaySettings = settingsOpen && viewportWidth < 1200;
   const sidebarVisible = viewportWidth > 900 || sidebarOpen;
   const modelUnavailable = modelsLoaded && model && !models.includes(model);
-  const modelDisabled = streaming || compacting || changingModel || loadingConversation || deletingTurns || !!turnDeleteTarget;
+  const modelDisabled = streaming || activeTitleGenerating || compacting || changingModel || loadingConversation || deletingTurns || !!turnDeleteTarget;
   const modelFeedback = changingModel ? "Changing model…" : modelError || (modelUnavailable ? "This model is no longer installed. Choose another model to continue this conversation." : modelNotice);
 
   return (
@@ -1816,10 +1879,13 @@ export function App() {
           conversations={conversationItems}
           query={query}
           streaming={streaming || compacting}
+          titleRequests={titleRequests}
+          titleNotices={titleNotices}
           onQuery={setQuery}
           onSelect={chooseConversation}
           onNew={newChat}
           onRename={openRename}
+          onGenerateTitle={generateLatestSessionTitle}
           onDelete={openDelete}
           onSettings={openSystemSettings}
           onAbout={openAbout}
@@ -1879,7 +1945,7 @@ export function App() {
                   ><SlidersHorizontal size={19} />Conversation settings</button>
                   <button
                     role="menuitem"
-                    disabled={!activeId}
+                    disabled={!activeId || activeTitleGenerating}
                     onClick={() => {
                       setMenuOpen(false);
                       openRename({ id: activeId, title: activeTitle }, settingsTriggerRef.current);
@@ -1888,7 +1954,7 @@ export function App() {
                   <button
                     className="danger-menu-item"
                     role="menuitem"
-                    disabled={!activeId || streaming || compacting}
+                    disabled={!activeId || streaming || compacting || activeTitleGenerating}
                     onClick={() => {
                       setMenuOpen(false);
                       openDelete({ id: activeId, title: activeTitle }, settingsTriggerRef.current);
@@ -1906,6 +1972,7 @@ export function App() {
           <ChatTranscript
             streaming={streaming}
             compacting={compacting}
+            generatingTitle={activeTitleGenerating}
             onDeleteTurn={openTurnDelete}
             empty={!activeId}
             messages={messages}
@@ -1935,7 +2002,7 @@ export function App() {
           compactDisabled={!activeId || modelDisabled || modelUnavailable || !messages.length}
           compactionNotice={compactionNotice}
           onCompact={manuallyCompactContext}
-          disabled={!model || !models.includes(model) || compacting || changingModel || loadingConversation || deletingTurns || !!turnDeleteTarget || conversationMode === "agent" && !toolModels.has(model)}
+          disabled={!model || !models.includes(model) || compacting || activeTitleGenerating || changingModel || loadingConversation || deletingTurns || !!turnDeleteTarget || conversationMode === "agent" && !toolModels.has(model)}
           supportsImages={visionModels.has(model)}
           supportsTools={toolModels.has(model)}
           supportsThinking={thinkingModels.has(model)}
@@ -1992,7 +2059,7 @@ export function App() {
           runtime={runtimeSettings}
           loading={runtimeSettingsLoading}
           error={runtimeSettingsError}
-          streaming={streaming || compacting}
+          streaming={streaming || compacting || Object.keys(titleRequests).length > 0}
           onRefresh={refreshRuntimeSettings}
           onClose={closeSystemSettings}
           onRequestClear={(event) => openClearAll(event.currentTarget)}

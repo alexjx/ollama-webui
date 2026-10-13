@@ -79,6 +79,7 @@ func New(database *store.Store, ollamaClient *ollama.Client, runner agent.Runner
 	mux.HandleFunc("DELETE /api/conversations/{id}", server.deleteConversation)
 	mux.HandleFunc("POST /api/conversations/{id}/messages", server.generate)
 	mux.HandleFunc("POST /api/conversations/{id}/compact", server.compactConversation)
+	mux.HandleFunc("POST /api/conversations/{id}/title", server.generateLatestTitle)
 	mux.HandleFunc("DELETE /api/conversations/{id}/messages/{messageID}", server.deleteMessagesFrom)
 	mux.HandleFunc("GET /api/attachments/{id}", server.attachment)
 	mux.HandleFunc("/", server.frontend)
@@ -595,7 +596,7 @@ func (s *Server) generate(response http.ResponseWriter, request *http.Request) {
 	titlePending := false
 	if s.persistStreamResult(assistantMessage.ID, result.Content, result.Thinking, "complete", result.Metadata) &&
 		conversation.AutoTitlePending && len(history) == 2 {
-		s.startConversationTitle(conversation, history[0], result.Content)
+		s.startConversationTitle(conversation, history[0], finalTitleReply(store.Message{Content: result.Content, Metadata: result.Metadata}))
 		titlePending = true
 	}
 	_ = writeEvent(response, flusher, map[string]any{"type": "done", "metadata": result.Metadata, "title_pending": titlePending})

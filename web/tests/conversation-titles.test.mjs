@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mergeConversationTitles } from "../src/conversation-titles.js";
+import { mergeConversationTitles, newestConversationTitle } from "../src/conversation-titles.js";
 
 test("generated names update without replacing newer turn data", () => {
   const current = { id: 1, title: "Prompt", auto_title_pending: true, updated_at: "2026-10-13T12:00:00Z", message_count: 4, model: "new-model" };
@@ -24,4 +24,13 @@ test("pending, filtered, and deleted conversations are not recreated by polling"
   assert.equal(mergeConversationTitles([item], [{ ...item, title: "Pending" }])[0], item);
   assert.equal(mergeConversationTitles([item], [])[0], item);
   assert.deepEqual(mergeConversationTitles([], [{ ...item, auto_title_pending: false }]), []);
+});
+
+test("delayed details cannot replace newer generated or manual names", () => {
+  const old = { title: "Old", updated_at: "2026-10-13T12:00:00.1Z" };
+  const generated = { title: "Generated", updated_at: "2026-10-13T12:00:00.1000001Z" };
+  const manual = { title: "Manual", updated_at: "2026-10-13T12:00:00.1000002Z" };
+  assert.equal(newestConversationTitle(old, generated), generated);
+  assert.equal(newestConversationTitle(manual, generated), manual);
+  assert.equal(newestConversationTitle(old), old);
 });
