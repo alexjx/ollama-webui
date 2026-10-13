@@ -18,7 +18,6 @@ type Config struct {
 	AgentContextDir       string
 	AgentMaxTurns         int
 	ContextTokens         int
-	InlineInputMax        int
 	ShellTimeout          time.Duration
 	ShellMaxOutput        int
 	ToolFeedbackMax       int
@@ -46,9 +45,6 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	if cfg.ContextTokens, err = positiveInt("AGENT_CONTEXT_BUDGET_TOKENS", 32768); err != nil {
-		return Config{}, err
-	}
-	if cfg.InlineInputMax, err = positiveInt("AGENT_INLINE_INPUT_BYTES", 16<<10); err != nil {
 		return Config{}, err
 	}
 	timeoutSeconds, err := positiveInt("SHELL_TIMEOUT_SECONDS", 600)

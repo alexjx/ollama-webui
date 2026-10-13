@@ -4,11 +4,13 @@ import { cancelRunningSubagents, reduceSubagentEvent } from "./agent-events";
 import { formatDuration, formatRate, responseMetrics } from "./response-metrics";
 import { scrollToEnd } from "./scroll-position";
 import { selectElementText } from "./select-text";
+import { fileFromLargePaste, isImageAttachment, readAttachment, splitAttachments, validateAttachmentFiles } from "./text-attachments";
 import MarkdownContent from "./markdown-content";
 import { thinkingModeForRequest, thinkingModeFromConversation } from "./thinking-mode";
 import {
   clearConversations as clearAllConversations,
   changeConversationModel,
+  compactConversationContext,
   createConversation,
   deleteConversation,
   deleteTurns,
@@ -23,12 +25,14 @@ import {
 import {
   ArrowCounterClockwise,
   ArrowUp,
+  ArrowsIn,
   Brain,
   CaretDown,
   ChatCircle,
   CheckCircle,
   CircleNotch,
   DotsThreeVertical,
+  FileText,
   Gear,
   Info,
   MagnifyingGlass,
@@ -435,7 +439,6 @@ function SystemSettings({ connected, modelCount, runtime, loading, error, stream
             <div><dt>Child agents</dt><dd>{agent ? agent.subagents_enabled ? `Enabled · ${agent.subagent_concurrency} concurrent` : "Disabled" : "—"}</dd></div>
             <div><dt>Child context</dt><dd>{agent?.subagents_enabled ? `${agent.subagent_context_tokens?.toLocaleString()} tokens · ${agent.subagent_max_turns} turns` : "—"}</dd></div>
             <div><dt>Shell output limit</dt><dd>{agent ? formatBytes(agent.shell_max_output_bytes) : "—"}</dd></div>
-            <div><dt>Inline input limit</dt><dd>{agent ? formatBytes(agent.inline_input_bytes) : "—"}</dd></div>
             <div><dt>Tool feedback limit</dt><dd>{agent ? formatBytes(agent.tool_feedback_bytes) : "—"}</dd></div>
             <div><dt>Child result limit</dt><dd>{agent ? formatBytes(agent.subagent_result_bytes) : "—"}</dd></div>
           </dl>
@@ -443,11 +446,11 @@ function SystemSettings({ connected, modelCount, runtime, loading, error, stream
         </section>
 
         <section className="settings-section data-settings-section">
-          <div className="system-section-heading"><div><h3>Local data</h3><p>Conversations, images, and managed context stored locally.</p></div><span className="storage-size">{storage ? formatBytes(storage.database_bytes) : "—"}</span></div>
+          <div className="system-section-heading"><div><h3>Local data</h3><p>Conversations, attachments, and managed context stored locally.</p></div><span className="storage-size">{storage ? formatBytes(storage.database_bytes) : "—"}</span></div>
           <dl className="data-counts">
             <div><dt>Conversations</dt><dd>{storage?.conversations ?? "—"}</dd></div>
             <div><dt>Messages</dt><dd>{storage?.messages ?? "—"}</dd></div>
-            <div><dt>Images</dt><dd>{storage?.attachments ?? "—"}</dd></div>
+            <div><dt>Attachments</dt><dd>{storage?.attachments ?? "—"}</dd></div>
             <div><dt>Agent actions</dt><dd>{storage?.agent_steps ?? "—"}</dd></div>
             <div><dt>Child jobs</dt><dd>{storage?.agent_jobs ?? "—"}</dd></div>
             <div><dt>Child runs</dt><dd>{storage?.agent_runs ?? "—"}</dd></div>
@@ -683,6 +686,7 @@ function AssistantResponse({ message }) {
 
 function ChatTranscript({
   streaming,
+  compacting,
   onDeleteTurn,
   empty,
   messages,
@@ -709,11 +713,13 @@ function ChatTranscript({
             <time>{message.created_at ? new Date(message.created_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "Now"}</time>
           </header>
           {message.attachments?.length > 0 && (
-            <div className="message-images" aria-label="Attached images">
+            <div className="message-images" aria-label="Attachments">
               {message.attachments.map((attachment) => (
-                <a href={attachment.url} target="_blank" rel="noreferrer" key={attachment.id || attachment.url}>
-                  <img src={attachment.url} alt={`Attached image: ${attachment.file_name}`} loading="lazy" />
-                  <span>{attachment.file_name}</span>
+                <a className={isImageAttachment(attachment) ? undefined : "message-text-file"} href={attachment.url} target="_blank" rel="noreferrer" download={isImageAttachment(attachment) ? undefined : attachment.file_name} key={attachment.id || attachment.url}>
+                  {isImageAttachment(attachment)
+                    ? <img src={attachment.url} alt={`Attached image: ${attachment.file_name}`} loading="lazy" />
+                    : <FileText size={28} aria-hidden="true" />}
+                  <span>{attachment.file_name}{!isImageAttachment(attachment) && <small>Text file · {formatBytes(attachment.size)}</small>}</span>
                 </a>
               ))}
             </div>
@@ -727,8 +733,8 @@ function ChatTranscript({
           {message.role === "assistant" && <ResponseMetrics message={message} />}
           {message.role === "user" && (
             <button className="select-response-button delete-turn-button" type="button"
-              disabled={streaming || message.id === "pending-user"}
-              title={streaming ? "Stop generation before deleting this turn" : "Delete this turn and all later turns"}
+              disabled={streaming || compacting || message.id === "pending-user"}
+              title={compacting ? "Wait for context compaction before deleting this turn" : streaming ? "Stop generation before deleting this turn" : "Delete this turn and all later turns"}
               onClick={(event) => onDeleteTurn(message, event.currentTarget)}>
               <Trash size={16} aria-hidden="true" />Delete from here
             </button>
@@ -740,88 +746,58 @@ function ChatTranscript({
   );
 }
 
-const acceptedImageTypes = new Set(["image/jpeg", "image/png", "image/webp"]);
-
-function readImage(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () => reject(new Error(`Could not read ${file.name}`));
-    reader.onload = () => {
-      const dataURL = String(reader.result);
-      resolve({
-        id: `${file.name}-${file.lastModified}-${file.size}`,
-        name: file.name,
-        media_type: file.type,
-        size: file.size,
-        data: dataURL.slice(dataURL.indexOf(",") + 1),
-        url: dataURL,
-        file_name: file.name,
-      });
-    };
-    reader.readAsDataURL(file);
-  });
-}
-
-function Composer({ streaming, onStop, onSend, empty, model, models, setModel, modelDisabled, onRefreshModels, conversationMode, setConversationMode, contextWindow, setContextWindow, thinkingMode, setThinkingMode, contextUsedTokens, disabled, supportsImages, supportsTools, supportsThinking, onOpenSettings }) {
+function Composer({ streaming, onStop, onSend, empty, model, models, setModel, modelDisabled, onRefreshModels, conversationMode, setConversationMode, contextWindow, setContextWindow, thinkingMode, setThinkingMode, contextUsedTokens, contextEstimated, compacting, compactDisabled, compactionNotice, onCompact, disabled, supportsImages, supportsTools, supportsThinking, onOpenSettings }) {
   const [message, setMessage] = useState("");
   const [attachments, setAttachments] = useState([]);
   const [attachmentError, setAttachmentError] = useState("");
   const [draggingImages, setDraggingImages] = useState(false);
   const inputRef = useRef(null);
   const fileInputRef = useRef(null);
+  const attachmentsRef = useRef([]);
+  const attachmentQueueRef = useRef(Promise.resolve());
+  const pasteNumberRef = useRef(0);
+  const [preparingAttachments, setPreparingAttachments] = useState(0);
+  const hasImageAttachments = attachments.some(isImageAttachment);
+
+  function updateAttachments(next) {
+    attachmentsRef.current = next;
+    setAttachments(next);
+  }
 
   useEffect(() => {
     if (empty) inputRef.current?.focus();
   }, [empty]);
 
   useEffect(() => {
-    if (!supportsImages && attachments.length > 0) {
+    if (!supportsImages && hasImageAttachments) {
       setAttachmentError("Choose a vision-capable model before sending these images.");
     } else if (supportsImages) {
       setAttachmentError("");
     }
-  }, [supportsImages, attachments.length]);
+  }, [supportsImages, hasImageAttachments]);
 
   function submit() {
     const value = message.trim();
-    if (disabled || (!value && attachments.length === 0) || !supportsImages && attachments.length > 0) return;
-    onSend(value, attachments);
-    setMessage("");
-    setAttachments([]);
-    setAttachmentError("");
+    if (streaming || disabled || preparingAttachments || (!value && attachments.length === 0) || !supportsImages && hasImageAttachments) return;
+    const submittedIDs = new Set(attachments.map((attachment) => attachment.id));
+    onSend(value, attachments, () => {
+      setMessage((current) => current === message ? "" : current);
+      updateAttachments(attachmentsRef.current.filter((attachment) => !submittedIDs.has(attachment.id)));
+      setAttachmentError("");
+    });
   }
 
-  async function addImages(files) {
-    setAttachmentError("");
-    if (!supportsImages) {
-      setAttachmentError("Choose a vision-capable model to attach images.");
-      return;
-    }
+  function addFiles(files) {
     const candidates = [...files];
-    if (attachments.length + candidates.length > 4) {
-      setAttachmentError("Attach at most 4 images per message.");
-      return;
-    }
-    if (candidates.some((file) => !acceptedImageTypes.has(file.type))) {
-      setAttachmentError("Images must be JPEG, PNG, or WebP files.");
-      return;
-    }
-    if (candidates.some((file) => file.size === 0 || file.size > 10 * 1024 * 1024)) {
-      setAttachmentError("Each image must be between 1 byte and 10 MiB.");
-      return;
-    }
-    const total = attachments.reduce((sum, item) => sum + item.size, 0)
-      + candidates.reduce((sum, file) => sum + file.size, 0);
-    if (total > 20 * 1024 * 1024) {
-      setAttachmentError("Images may total at most 20 MiB per message.");
-      return;
-    }
-    try {
-      const prepared = await Promise.all(candidates.map(readImage));
-      setAttachments((current) => [...current, ...prepared]);
-    } catch (error) {
-      setAttachmentError(error.message);
-    }
+    if (!candidates.length) return;
+    setPreparingAttachments((current) => current + 1);
+    attachmentQueueRef.current = attachmentQueueRef.current.then(async () => {
+      validateAttachmentFiles(candidates, attachmentsRef.current, supportsImages);
+      const prepared = await Promise.all(candidates.map(readAttachment));
+      updateAttachments([...attachmentsRef.current, ...prepared]);
+      setAttachmentError("");
+    }).catch((error) => setAttachmentError(error.message))
+      .finally(() => setPreparingAttachments((current) => current - 1));
   }
 
   function onKeyDown(event) {
@@ -850,7 +826,14 @@ function Composer({ streaming, onStop, onSend, empty, model, models, setModel, m
         const images = [...event.clipboardData.files].filter((file) => file.type.startsWith("image/"));
         if (images.length) {
           event.preventDefault();
-          addImages(images);
+          addFiles(images);
+          return;
+        }
+        const file = fileFromLargePaste(event.clipboardData.getData("text/plain"), pasteNumberRef.current + 1);
+        if (file) {
+          event.preventDefault();
+          pasteNumberRef.current += 1;
+          addFiles([file]);
         }
       }}
       onKeyDown={onKeyDown}
@@ -861,10 +844,9 @@ function Composer({ streaming, onStop, onSend, empty, model, models, setModel, m
 
   const attachButton = (
     <IconButton
-      label={supportsImages ? "Attach images" : "Image input requires a vision model"}
+      label="Attach files"
       className="attach-button"
-      aria-disabled={!supportsImages}
-      onClick={() => supportsImages ? fileInputRef.current?.click() : setAttachmentError("Choose a vision-capable model to attach images.")}
+      onClick={() => fileInputRef.current?.click()}
     >
       <Paperclip size={22} />
     </IconButton>
@@ -875,7 +857,7 @@ function Composer({ streaming, onStop, onSend, empty, model, models, setModel, m
       <Stop size={16} weight="fill" /><span>Stop</span>
     </button>
   ) : (
-    <button className="send-button" aria-label="Send message" onClick={submit} disabled={(!message.trim() && attachments.length === 0) || disabled || (!supportsImages && attachments.length > 0)}>
+    <button className="send-button" aria-label="Send message" onClick={submit} disabled={preparingAttachments > 0 || (!message.trim() && attachments.length === 0) || disabled || (!supportsImages && hasImageAttachments)}>
       <ArrowUp size={19} weight="bold" /><span>Send</span>
     </button>
   );
@@ -892,7 +874,7 @@ function Composer({ streaming, onStop, onSend, empty, model, models, setModel, m
         onDrop={(event) => {
           event.preventDefault();
           setDraggingImages(false);
-          addImages([...event.dataTransfer.files].filter((file) => file.type.startsWith("image/")));
+          addFiles(event.dataTransfer.files);
         }}
       >
         {empty && (
@@ -929,14 +911,16 @@ function Composer({ streaming, onStop, onSend, empty, model, models, setModel, m
           </div>
         )}
         {attachments.length > 0 && (
-          <div className="attachment-previews" aria-label="Images ready to send">
+          <div className="attachment-previews" aria-label="Attachments ready to send">
             {attachments.map((attachment) => (
-              <div className="attachment-preview" key={attachment.id}>
-                <img src={attachment.url} alt={`Preview of ${attachment.name}`} />
+              <div className={`attachment-preview ${isImageAttachment(attachment) ? "" : "text-file-preview"}`} key={attachment.id}>
+                {isImageAttachment(attachment)
+                  ? <img src={attachment.url} alt={`Preview of ${attachment.name}`} />
+                  : <a className="text-file-tile" href={attachment.url} download={attachment.name} aria-label={`Download ${attachment.name}`}><FileText size={26} aria-hidden="true" /><span>TXT · {formatBytes(attachment.size)}</span></a>}
                 <button
                   type="button"
                   aria-label={`Remove ${attachment.name}`}
-                  onClick={() => setAttachments((current) => current.filter((item) => item.id !== attachment.id))}
+                  onClick={() => updateAttachments(attachmentsRef.current.filter((item) => item.id !== attachment.id))}
                 ><X size={16} /></button>
                 <span>{attachment.name}</span>
               </div>
@@ -948,12 +932,12 @@ function Composer({ streaming, onStop, onSend, empty, model, models, setModel, m
           ref={fileInputRef}
           className="sr-only"
           type="file"
-          accept="image/jpeg,image/png,image/webp"
+          accept={supportsImages ? ".txt,text/plain,image/jpeg,image/png,image/webp" : ".txt,text/plain"}
           multiple
           aria-hidden="true"
           tabIndex="-1"
           onChange={(event) => {
-            addImages(event.target.files);
+            addFiles(event.target.files);
             event.target.value = "";
           }}
         />
@@ -991,10 +975,10 @@ function Composer({ streaming, onStop, onSend, empty, model, models, setModel, m
           <>
             <div className="composer-row">{attachButton}{messageField}{sendButton}</div>
             <div className="context-row">
-              <span>Context&nbsp;&nbsp;{contextLabel}</span>
+              <span>{contextEstimated ? "Estimated context" : "Context"}&nbsp;&nbsp;{contextLabel}</span>
               <div
                 className={`context-track ${usedPercent == null ? "unknown-limit" : ""}`}
-                aria-label={contextLimit ? `${contextUsedTokens} of ${contextLimit} context tokens used` : `${contextUsedTokens} context tokens used; limit inherited from Ollama`}
+                aria-label={`${contextEstimated ? "Estimated " : ""}${contextLimit ? `${contextUsedTokens} of ${contextLimit} context tokens used` : `${contextUsedTokens} context tokens used; limit inherited from Ollama`}`}
                 role={contextLimit ? "progressbar" : undefined}
                 aria-valuenow={usedPercent ?? undefined}
                 aria-valuemin={contextLimit ? "0" : undefined}
@@ -1002,9 +986,14 @@ function Composer({ streaming, onStop, onSend, empty, model, models, setModel, m
               >
                 {usedPercent != null && <span style={{ width: `${usedPercent}%` }} />}
               </div>
+              <button className={`compact-context-button ${compacting ? "working" : ""}`} type="button" onClick={onCompact} disabled={compactDisabled} aria-label="Compact context" title="Summarize older messages for future replies; recent messages and full saved history are kept.">
+                {compacting ? <CircleNotch size={16} aria-hidden="true" /> : <ArrowsIn size={16} aria-hidden="true" />}
+                {compacting ? "Compacting…" : "Compact"}
+              </button>
             </div>
           </>
         )}
+        {compactionNotice && <p className={`context-feedback ${compactionNotice.error ? "error" : ""}`} role={compactionNotice.error ? "alert" : "status"}>{compactionNotice.message}</p>}
       </div>
     </div>
   );
@@ -1060,6 +1049,10 @@ export function App() {
   const [clearingAll, setClearingAll] = useState(false);
   const [systemPrompt, setSystemPrompt] = useState("");
   const [contextWindow, setContextWindow] = useState("default");
+  const [contextCheckpoint, setContextCheckpoint] = useState(null);
+  const [compacting, setCompacting] = useState(false);
+  const [compactionNotice, setCompactionNotice] = useState(null);
+  const compactionRef = useRef(null);
   const [thinkingMode, setThinkingMode] = useState("default");
   const [temperatureOverride, setTemperatureOverride] = useState(false);
   const [temperature, setTemperature] = useState(0.7);
@@ -1086,7 +1079,7 @@ export function App() {
   const clearAllReturnRef = useRef(null);
   const actionReturnRef = useRef(null);
   const transcriptRef = useRef(null);
-  const currentContextUsage = useMemo(() => contextUsage(messages, contextWindow), [messages, contextWindow]);
+  const currentContextUsage = useMemo(() => contextUsage(messages, contextWindow, contextCheckpoint), [messages, contextWindow, contextCheckpoint]);
 
   useLayoutEffect(() => {
     if (activeId) scrollToEnd(transcriptRef.current);
@@ -1117,7 +1110,7 @@ export function App() {
   }
 
   async function changeModel(nextModel) {
-    if (nextModel === model || streaming || modelChangeRef.current || loadingConversation || deletingTurns || turnDeleteTarget) return;
+    if (nextModel === model || streaming || compactionRef.current || modelChangeRef.current || loadingConversation || deletingTurns || turnDeleteTarget) return;
     setModelError("");
     setModelNotice("");
     if (!activeId) {
@@ -1391,7 +1384,7 @@ export function App() {
   }
 
   function openClearAll(trigger) {
-    if (streaming) return;
+    if (streaming || compactionRef.current) return;
     clearAllReturnRef.current = trigger;
     setClearAllConfirmation("");
     setClearAllError("");
@@ -1436,6 +1429,8 @@ export function App() {
     setModelError("");
     setModelNotice("");
     generationRef.current?.abort();
+    compactionRef.current?.abort();
+    setCompactionNotice(null);
     detailRequestRef.current?.abort();
     const controller = new AbortController();
     detailRequestRef.current = controller;
@@ -1458,6 +1453,7 @@ export function App() {
       setTemperature(payload.conversation.temperature ?? 0.7);
       setModelLoaded(payload.conversation.message_count > 0);
       setMessages(payload.messages);
+      setContextCheckpoint(payload.context_checkpoint || null);
     } catch (error) {
       if (error.name !== "AbortError") setChatError(error.message);
     } finally {
@@ -1472,6 +1468,9 @@ export function App() {
     setModelError("");
     setModelNotice("");
     generationRef.current?.abort();
+    compactionRef.current?.abort();
+    setContextCheckpoint(null);
+    setCompactionNotice(null);
     setActiveId(null);
     setActiveTitle("");
     setMessages([]);
@@ -1571,7 +1570,7 @@ export function App() {
   }
 
   function openTurnDelete(message, trigger) {
-    if (streaming) return;
+    if (streaming || compactionRef.current) return;
     turnDeleteReturnRef.current = trigger;
     setTurnDeleteError("");
     setTurnDeleteTarget({ ...message, conversationId: activeId });
@@ -1590,6 +1589,7 @@ export function App() {
     try {
       const payload = await deleteTurns(turnDeleteTarget.conversationId, turnDeleteTarget.id);
       setMessages(payload.messages || []);
+      setContextCheckpoint(payload.context_checkpoint || null);
       setModelLoaded(payload.conversation.message_count > 0);
       setChatError("");
       setTurnDeleteTarget(null);
@@ -1601,8 +1601,36 @@ export function App() {
     }
   }
 
-  async function sendMessage(value, images = []) {
-    if (!model || !models.includes(model) || streaming || modelChangeRef.current || loadingConversation || deletingTurns || turnDeleteTarget) return;
+  async function manuallyCompactContext() {
+    if (!activeId || streaming || compactionRef.current || modelChangeRef.current || loadingConversation || deletingTurns || turnDeleteTarget) return;
+    const view = conversationViewRef.current;
+    const controller = new AbortController();
+    compactionRef.current = controller;
+    setCompacting(true);
+    setCompactionNotice(null);
+    try {
+      const result = await compactConversationContext(activeId, controller.signal);
+      if (view !== conversationViewRef.current) return;
+      setContextCheckpoint(result.context_checkpoint || null);
+      setCompactionNotice({ message: result.compacted
+        ? `Context compacted. Estimated prompt reduced from ${result.before_tokens.toLocaleString()} to ${result.estimated_tokens.toLocaleString()} tokens.`
+        : result.reason === "not_reduced"
+          ? "The summary did not reduce context. Current context kept."
+          : "No older messages to compact. Recent messages are kept." });
+    } catch (error) {
+      if (error.name !== "AbortError" && view === conversationViewRef.current) {
+        setCompactionNotice({ message: error.message, error: true });
+      }
+    } finally {
+      if (compactionRef.current === controller) {
+        compactionRef.current = null;
+        setCompacting(false);
+      }
+    }
+  }
+
+  async function sendMessage(value, attachments = [], onAccepted = () => {}) {
+    if (!model || !models.includes(model) || streaming || compactionRef.current || modelChangeRef.current || loadingConversation || deletingTurns || turnDeleteTarget) return;
     setChatError("");
     setModelError("");
     setModelNotice("");
@@ -1611,10 +1639,11 @@ export function App() {
     setStreaming(true);
     setModelLoaded(true);
     let conversationId = activeId;
+    let accepted = false;
     try {
       if (!conversationId) {
         const conversation = await createConversation({
-          title: value.trim().replace(/\s+/g, " ").slice(0, 60) || `Image: ${images[0]?.name || "conversation"}`,
+          title: value.trim().replace(/\s+/g, " ").slice(0, 60) || `File: ${attachments[0]?.name || "conversation"}`,
           model,
           mode: conversationMode,
           system_prompt: systemPrompt,
@@ -1632,7 +1661,7 @@ export function App() {
         role: "user",
         content: value,
         status: "complete",
-        attachments: images.map((image) => ({ id: image.id, file_name: image.name, url: image.url, media_type: image.media_type, size: image.size })),
+        attachments: attachments.map((attachment) => ({ id: attachment.id, file_name: attachment.name, url: attachment.url, media_type: attachment.media_type, size: attachment.size })),
       };
       const pendingAssistant = { id: "pending-assistant", role: "assistant", content: "", thinking: "", status: "streaming", agent_phase: "starting", agent_turn: 1 };
       setMessages((current) => [...current, pendingUser, pendingAssistant]);
@@ -1640,9 +1669,12 @@ export function App() {
 
       await streamMessage(conversationId, value, {
         signal: controller.signal,
-        images: images.map(({ name, media_type, data }) => ({ name, media_type, data })),
+        ...splitAttachments(attachments),
         onEvent(event) {
           if (event.type === "started") {
+            accepted = true;
+            onAccepted();
+            setCompactionNotice(null);
             setMessages((current) => current.map((message) => {
               if (message.id === "pending-user") return event.user_message;
               if (message.id === "pending-assistant") return { ...event.assistant_message, agent_phase: "thinking", agent_turn: 1 };
@@ -1687,7 +1719,9 @@ export function App() {
       });
     } catch (error) {
       const cancelled = error.name === "AbortError";
-      setMessages((current) => current.map((message, index) =>
+      setMessages((current) => !accepted
+        ? current.filter((message) => message.id !== "pending-user" && message.id !== "pending-assistant")
+        : current.map((message, index) =>
         index === current.length - 1 && message.role === "assistant"
           ? {
               ...message,
@@ -1698,6 +1732,7 @@ export function App() {
               subagent_runs: cancelled ? cancelRunningSubagents(message.subagent_runs) : message.subagent_runs,
             }
           : message));
+      if (!accepted) setModelLoaded(modelLoaded);
       if (!cancelled) setChatError(error.message);
       if (cancelled && conversationId && generationRef.current === controller) {
         try {
@@ -1721,7 +1756,7 @@ export function App() {
   const overlaySettings = settingsOpen && viewportWidth < 1200;
   const sidebarVisible = viewportWidth > 900 || sidebarOpen;
   const modelUnavailable = modelsLoaded && model && !models.includes(model);
-  const modelDisabled = streaming || changingModel || loadingConversation || deletingTurns || !!turnDeleteTarget;
+  const modelDisabled = streaming || compacting || changingModel || loadingConversation || deletingTurns || !!turnDeleteTarget;
   const modelFeedback = changingModel ? "Changing model…" : modelError || (modelUnavailable ? "This model is no longer installed. Choose another model to continue this conversation." : modelNotice);
 
   return (
@@ -1731,7 +1766,7 @@ export function App() {
           activeId={activeId}
           conversations={conversationItems}
           query={query}
-          streaming={streaming}
+          streaming={streaming || compacting}
           onQuery={setQuery}
           onSelect={chooseConversation}
           onNew={newChat}
@@ -1767,9 +1802,9 @@ export function App() {
             )}
           </div>
           <div className="topbar-right">
-            <div className={`agent-status ${streaming ? "working" : ""}`} role="status" aria-live="polite">
-              {streaming ? <CircleNotch size={16} /> : <ChatCircle size={16} />}
-              <span>{conversationMode === "agent" ? (streaming ? "Agent working" : "Agent ready") : (streaming ? "Chat responding" : "Chat ready")}</span>
+            <div className={`agent-status ${streaming || compacting ? "working" : ""}`} role="status" aria-live="polite">
+              {streaming || compacting ? <CircleNotch size={16} /> : <ChatCircle size={16} />}
+              <span>{compacting ? "Compacting context" : conversationMode === "agent" ? (streaming ? "Agent working" : "Agent ready") : (streaming ? "Chat responding" : "Chat ready")}</span>
             </div>
             <div className={`connected-status ${connected ? "" : "disconnected"}`}><span /> <span className="connected-text">{connected ? "Connected" : "Ollama unavailable"}</span></div>
             <div
@@ -1804,7 +1839,7 @@ export function App() {
                   <button
                     className="danger-menu-item"
                     role="menuitem"
-                    disabled={!activeId || streaming}
+                    disabled={!activeId || streaming || compacting}
                     onClick={() => {
                       setMenuOpen(false);
                       openDelete({ id: activeId, title: activeTitle }, settingsTriggerRef.current);
@@ -1821,6 +1856,7 @@ export function App() {
         <section className="transcript" aria-label="Conversation" ref={transcriptRef}>
           <ChatTranscript
             streaming={streaming}
+            compacting={compacting}
             onDeleteTurn={openTurnDelete}
             empty={!activeId}
             messages={messages}
@@ -1845,7 +1881,12 @@ export function App() {
           thinkingMode={thinkingMode}
           setThinkingMode={setThinkingMode}
           contextUsedTokens={currentContextUsage.usedTokens}
-          disabled={!model || !models.includes(model) || changingModel || loadingConversation || deletingTurns || !!turnDeleteTarget || conversationMode === "agent" && !toolModels.has(model)}
+          contextEstimated={!!currentContextUsage.estimated}
+          compacting={compacting}
+          compactDisabled={!activeId || modelDisabled || modelUnavailable || !messages.length}
+          compactionNotice={compactionNotice}
+          onCompact={manuallyCompactContext}
+          disabled={!model || !models.includes(model) || compacting || changingModel || loadingConversation || deletingTurns || !!turnDeleteTarget || conversationMode === "agent" && !toolModels.has(model)}
           supportsImages={visionModels.has(model)}
           supportsTools={toolModels.has(model)}
           supportsThinking={thinkingModels.has(model)}
@@ -1902,7 +1943,7 @@ export function App() {
           runtime={runtimeSettings}
           loading={runtimeSettingsLoading}
           error={runtimeSettingsError}
-          streaming={streaming}
+          streaming={streaming || compacting}
           onRefresh={refreshRuntimeSettings}
           onClose={closeSystemSettings}
           onRequestClear={(event) => openClearAll(event.currentTarget)}

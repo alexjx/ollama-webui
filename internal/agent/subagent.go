@@ -159,10 +159,12 @@ func (orchestrator *SubagentOrchestrator) Execute(ctx context.Context, request S
 	childPrompt := delegatedPrompt(request.Task, imageNames, request.OutputPaths)
 	numCtx := orchestrator.ContextTokens
 	childSteps := &transientStepStore{}
+	attachments, _ := orchestrator.Store.(AttachmentStore)
 	childRunner := Runner{
 		Chat: orchestrator.Chat, Steps: childSteps, Shell: orchestrator.Shell,
 		MaxTurns: orchestrator.MaxTurns, ToolFeedbackLimit: orchestrator.ToolFeedbackLimit,
-		Artifacts: orchestrator.Artifacts,
+		Artifacts:   orchestrator.Artifacts,
+		Attachments: attachments,
 	}
 	childResult, runErr := childRunner.Run(ctx, RunInput{
 		ConversationID: request.ConversationID, Model: model, Mode: "agent",
@@ -213,7 +215,7 @@ func (orchestrator *SubagentOrchestrator) Execute(ctx context.Context, request S
 	return SubagentResult{Feedback: string(payload), ExitCode: 0, Duration: time.Since(started)}, nil
 }
 
-const delegatedSystemPrompt = `You are a focused child agent. Work only on the delegated task. You have a private context, so do not assume access to the parent conversation. Read any referenced paths directly. You may read system paths, but the shell enforces that writes are only possible under AGENT_WORKSPACE. Put requested deliverables at the declared workspace paths. Keep your final response concise: state what was completed, verified output paths, failures, and items needing review. Do not include raw logs or per-item reasoning.`
+const delegatedSystemPrompt = `You are a focused child agent. Work only on the delegated task. You have a private context, so do not assume access to the parent conversation. Read any referenced paths directly. For user-attached text files named by attachment ID, use attachment_read with bounded byte ranges. You may read system paths, but the shell enforces that writes are only possible under AGENT_WORKSPACE. Put requested deliverables at the declared workspace paths. Keep your final response concise: state what was completed, verified output paths, failures, and items needing review. Do not include raw logs or per-item reasoning.`
 
 func delegatedPrompt(task string, imagePaths, outputPaths []string) string {
 	var prompt strings.Builder

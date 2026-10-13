@@ -41,6 +41,10 @@ export function getConversation(id, signal) {
   return request(`/api/conversations/${id}`, { signal });
 }
 
+export function compactConversationContext(id, signal) {
+  return request(`/api/conversations/${id}/compact`, { method: "POST", signal });
+}
+
 export function createConversation(input, signal) {
   return request("/api/conversations", {
     method: "POST",
@@ -83,11 +87,11 @@ export function clearConversations(signal) {
   });
 }
 
-export async function streamMessage(id, content, { signal, onEvent, images = [] }) {
+export async function streamMessage(id, content, { signal, onEvent, images = [], files = [] }) {
   const response = await fetch(`/api/conversations/${id}/messages`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ content, images }),
+    body: JSON.stringify({ content, images, files }),
     signal,
   });
   if (!response.ok) {

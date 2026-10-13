@@ -173,7 +173,7 @@ func TestContextPreparerCancellationDoesNotPersist(t *testing.T) {
 
 func TestContextPreparerSummarizesAttachmentsWithoutDroppingImageInput(t *testing.T) {
 	history := compactTestHistory(strings.Repeat("a", 2400), strings.Repeat("b", 2400))
-	history[1].Attachments = []store.Attachment{{ID: 1, Data: []byte{1, 2, 3}}}
+	history[1].Attachments = []store.Attachment{{ID: 1, MediaType: "image/png", Data: []byte{1, 2, 3}}}
 	chat := &summaryChat{summary: "image facts preserved"}
 	result, err := (ContextPreparer{Chat: chat, Store: &checkpointMemory{}}).Prepare(context.Background(), ContextPrepareInput{
 		ConversationID: 7, Model: "model", History: history, ContextWindow: 1000,
@@ -221,5 +221,29 @@ func compactTestHistory(first, second string) []store.Message {
 		{ID: 5, Role: "user", Content: "follow-up two", Status: "complete"},
 		{ID: 6, Role: "assistant", Content: "answer two", Status: "complete"},
 		{ID: 7, Role: "user", Content: "current request", Status: "complete"},
+	}
+}
+
+func TestCompactionPreservesTextFileReferencesWithoutLoadingContents(t *testing.T) {
+	history := compactTestHistory(strings.Repeat("a", 2400), strings.Repeat("b", 2400))
+	history[0].Attachments = []store.Attachment{{ID: 41, FileName: "pasted.txt", MediaType: "text/plain", Size: 10, Data: []byte("FILE_SECRET")}}
+	chat := &summaryChat{summary: "File reference attachment_id=41"}
+	result, err := (ContextPreparer{Chat: chat}).Prepare(context.Background(), ContextPrepareInput{ConversationID: 7, Model: "tools", History: history, ContextWindow: 1000})
+	if err != nil || !result.Compacted || len(chat.requests) != 1 {
+		t.Fatalf("compaction failed: %#v, %v", result, err)
+	}
+	var prompt strings.Builder
+	for _, message := range chat.requests[0].Messages {
+		prompt.WriteString(message.Content)
+		if len(message.Images) != 0 {
+			t.Fatal("text file was sent as an image to the summarizer")
+		}
+	}
+	if !strings.Contains(prompt.String(), "attachment_id=41") || strings.Contains(prompt.String(), "FILE_SECRET") {
+		t.Fatalf("summary lost the file reference or loaded contents: %s", prompt.String())
+	}
+	fallback := deterministicSummary("", history[:2], 128)
+	if !strings.Contains(fallback, "attachment_id=41") || !strings.Contains(fallback, "pasted.txt") || strings.Contains(fallback, "FILE_SECRET") {
+		t.Fatalf("bounded fallback lost the reference: %s", fallback)
 	}
 }

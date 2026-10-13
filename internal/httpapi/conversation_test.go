@@ -179,13 +179,13 @@ func TestSystemSettingsAndBulkClear(t *testing.T) {
 	}
 	conversationContext, _ := database.GetConversationContext(ctx, conversation.ID)
 	runner := agent.Runner{
-		Shell:  agent.ShellExecutor{Workspace: "/workspace", Timeout: 10 * time.Minute, MaxOutput: 65536},
-		Stager: agent.InputStager{MaxInlineBytes: 16384}, MaxTurns: 200, ToolFeedbackLimit: 8192,
+		Shell:    agent.ShellExecutor{Workspace: "/workspace", Timeout: 10 * time.Minute, MaxOutput: 65536},
+		MaxTurns: 200, ToolFeedbackLimit: 8192,
 		Artifacts: artifacts,
 	}
 	api := New(database, nil, runner, RuntimeSettings{
 		Workspace: "/workspace", MaxTurns: 200, ShellTimeout: 10 * time.Minute,
-		ShellMaxOutput: 65536, InlineInputMax: 16384, ToolFeedbackLimit: 8192,
+		ShellMaxOutput: 65536, ToolFeedbackLimit: 8192,
 		ContextDirectory: contextRoot, ContextTokens: 32768,
 	}, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 

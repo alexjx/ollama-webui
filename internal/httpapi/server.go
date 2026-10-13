@@ -19,6 +19,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	_ "golang.org/x/image/webp"
 	"ollama-webui/internal/agent"
@@ -43,7 +45,6 @@ type RuntimeSettings struct {
 	MaxTurns              int
 	ShellTimeout          time.Duration
 	ShellMaxOutput        int
-	InlineInputMax        int
 	ToolFeedbackLimit     int
 	ContextDirectory      string
 	ContextTokens         int
@@ -55,6 +56,9 @@ type RuntimeSettings struct {
 }
 
 func New(database *store.Store, ollamaClient *ollama.Client, runner agent.Runner, runtime RuntimeSettings, webDir string, logger *slog.Logger) *Server {
+	if runner.Attachments == nil {
+		runner.Attachments = database
+	}
 	server := &Server{store: database, ollama: ollamaClient, agent: runner, runtime: runtime, webDir: webDir, logger: logger, active: make(map[int64]struct{})}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", server.health)
@@ -68,6 +72,7 @@ func New(database *store.Store, ollamaClient *ollama.Client, runner agent.Runner
 	mux.HandleFunc("PUT /api/conversations/{id}/model", server.updateConversationModel)
 	mux.HandleFunc("DELETE /api/conversations/{id}", server.deleteConversation)
 	mux.HandleFunc("POST /api/conversations/{id}/messages", server.generate)
+	mux.HandleFunc("POST /api/conversations/{id}/compact", server.compactConversation)
 	mux.HandleFunc("DELETE /api/conversations/{id}/messages/{messageID}", server.deleteMessagesFrom)
 	mux.HandleFunc("GET /api/attachments/{id}", server.attachment)
 	mux.HandleFunc("/", server.frontend)
@@ -110,7 +115,6 @@ func (s *Server) settings(response http.ResponseWriter, request *http.Request) {
 			"max_turns":               s.runtime.MaxTurns,
 			"shell_timeout_seconds":   int(s.runtime.ShellTimeout.Seconds()),
 			"shell_max_output_bytes":  s.runtime.ShellMaxOutput,
-			"inline_input_bytes":      s.runtime.InlineInputMax,
 			"tool_feedback_bytes":     s.runtime.ToolFeedbackLimit,
 			"context_path":            s.runtime.ContextDirectory,
 			"context_budget_tokens":   s.runtime.ContextTokens,
@@ -217,7 +221,12 @@ func (s *Server) getConversation(response http.ResponseWriter, request *http.Req
 		s.internalError(response, err)
 		return
 	}
-	writeJSON(response, http.StatusOK, map[string]any{"conversation": conversation, "messages": messages})
+	checkpoint, err := s.contextCheckpoint(request.Context(), id)
+	if err != nil {
+		s.internalError(response, err)
+		return
+	}
+	writeJSON(response, http.StatusOK, map[string]any{"conversation": conversation, "messages": messages, "context_checkpoint": checkpoint})
 }
 
 func (s *Server) updateConversation(response http.ResponseWriter, request *http.Request) {
@@ -296,7 +305,7 @@ func (s *Server) updateConversationModel(response http.ResponseWriter, request *
 	}
 	imageLimit := imageLimitForModel(*selected)
 	for _, message := range history {
-		if len(message.Attachments) > imageLimit {
+		if agent.MessageImageCount(message) > imageLimit {
 			writeError(response, http.StatusUnprocessableEntity, "vision_unsupported", "choose a vision model that supports the images already in this session")
 			return
 		}
@@ -415,6 +424,7 @@ func (s *Server) generate(response http.ResponseWriter, request *http.Request) {
 	var input struct {
 		Content string       `json:"content"`
 		Images  []imageInput `json:"images"`
+		Files   []imageInput `json:"files"`
 	}
 	if err := decodeJSON(request, &input); err != nil {
 		writeError(response, http.StatusBadRequest, "invalid_request", err.Error())
@@ -425,8 +435,18 @@ func (s *Server) generate(response http.ResponseWriter, request *http.Request) {
 		writeError(response, http.StatusUnprocessableEntity, "invalid_image", err.Error())
 		return
 	}
+	files, err := decodeTextFiles(input.Files)
+	if err != nil {
+		writeError(response, http.StatusUnprocessableEntity, "invalid_file", err.Error())
+		return
+	}
+	attachments = append(attachments, files...)
+	if err := validateAttachmentBudget(attachments); err != nil {
+		writeError(response, http.StatusUnprocessableEntity, "invalid_attachments", err.Error())
+		return
+	}
 	if strings.TrimSpace(input.Content) == "" && len(attachments) == 0 {
-		writeError(response, http.StatusBadRequest, "invalid_request", "message content or an image is required")
+		writeError(response, http.StatusBadRequest, "invalid_request", "message content or an attachment is required")
 		return
 	}
 	conversation, err := s.store.GetConversation(request.Context(), id)
@@ -452,13 +472,13 @@ func (s *Server) generate(response http.ResponseWriter, request *http.Request) {
 		writeError(response, http.StatusUnprocessableEntity, "thinking_unsupported", "the selected model does not support thinking overrides")
 		return
 	}
-	if len(attachments) > 0 {
+	if len(input.Images) > 0 {
 		imageLimit := imageLimitForModel(modelInfo)
 		if imageLimit == 0 {
 			writeError(response, http.StatusUnprocessableEntity, "vision_unsupported", "the selected model does not support image input")
 			return
 		}
-		if len(attachments) > imageLimit {
+		if len(input.Images) > imageLimit {
 			writeError(response, http.StatusUnprocessableEntity, "too_many_images",
 				fmt.Sprintf("the selected model accepts at most %d image per message", imageLimit))
 			return
@@ -498,49 +518,38 @@ func (s *Server) generate(response http.ResponseWriter, request *http.Request) {
 			systemPrompt += "\n\nAdditional instructions from the user:\n" + conversation.SystemPrompt
 		}
 	}
-	upstreamMessages := make([]ollama.Message, 0, len(history)+1)
-	var preparedContext agent.PreparedContext
-	if agentMode && s.agent.Context != nil {
-		contextWindow := s.runtime.ContextTokens
-		if conversation.ContextWindow != nil {
-			contextWindow = *conversation.ContextWindow
-		}
-		prepared, prepareErr := s.agent.Context.Prepare(request.Context(), agent.ContextPrepareInput{
-			ConversationID: conversation.ID, Model: conversation.Model, SystemPrompt: systemPrompt,
-			History: history, ContextWindow: contextWindow,
-		})
-		if prepareErr != nil {
-			status := "error"
-			if errors.Is(prepareErr, context.Canceled) || errors.Is(request.Context().Err(), context.Canceled) {
-				status = "cancelled"
-			}
-			s.persistStreamResult(assistantMessage.ID, "", "", status, map[string]any{"context_compaction_failed": true})
-			if status == "error" {
-				_ = writeEvent(response, flusher, map[string]any{"type": "error", "message": prepareErr.Error()})
-			}
-			return
-		}
-		preparedContext = prepared
-		if prepared.CompactionError != "" || prepared.Fallback || prepared.Oversized {
-			s.logger.Warn("agent context compaction degraded", "conversation_id", conversation.ID,
-				"fallback", prepared.Fallback, "oversized", prepared.Oversized, "error", prepared.CompactionError)
-		}
-		upstreamMessages = prepared.Messages
-	} else {
-		if systemPrompt != "" {
-			upstreamMessages = append(upstreamMessages, ollama.Message{Role: "system", Content: systemPrompt})
-		}
-		for _, message := range history {
-			if message.ID == assistantMessage.ID || message.Status == "error" || message.Status == "cancelled" {
-				continue
-			}
-			images := make([][]byte, 0, len(message.Attachments))
-			for _, attachment := range message.Attachments {
-				images = append(images, attachment.Data)
-			}
-			upstreamMessages = append(upstreamMessages, ollama.Message{Role: message.Role, Content: message.Content, Images: images})
-		}
+	contextWindow := 0
+	if agentMode {
+		contextWindow = s.runtime.ContextTokens
 	}
+	if conversation.ContextWindow != nil {
+		contextWindow = *conversation.ContextWindow
+	}
+	preparer := s.agent.Context
+	if preparer == nil {
+		preparer = &agent.ContextPreparer{Chat: s.ollama, Store: s.store}
+	}
+	preparedContext, prepareErr := preparer.Prepare(request.Context(), agent.ContextPrepareInput{
+		ConversationID: conversation.ID, Model: conversation.Model, SystemPrompt: systemPrompt,
+		History: history, ContextWindow: contextWindow,
+		SkipAutomaticCompaction: !agentMode || s.agent.Context == nil, IncludeTextAttachments: !agentMode,
+	})
+	if prepareErr != nil {
+		status := "error"
+		if errors.Is(prepareErr, context.Canceled) || errors.Is(request.Context().Err(), context.Canceled) {
+			status = "cancelled"
+		}
+		s.persistStreamResult(assistantMessage.ID, "", "", status, map[string]any{"context_compaction_failed": true})
+		if status == "error" {
+			_ = writeEvent(response, flusher, map[string]any{"type": "error", "message": prepareErr.Error()})
+		}
+		return
+	}
+	if preparedContext.CompactionError != "" || preparedContext.Fallback || preparedContext.Oversized {
+		s.logger.Warn("context compaction degraded", "conversation_id", conversation.ID,
+			"fallback", preparedContext.Fallback, "oversized", preparedContext.Oversized, "error", preparedContext.CompactionError)
+	}
+	upstreamMessages := preparedContext.Messages
 	var options *ollama.ChatOptions
 	effectiveContextWindow := conversation.ContextWindow
 	if effectiveContextWindow == nil && agentMode && s.runtime.ContextTokens > 0 {
@@ -591,6 +600,9 @@ func (s *Server) attachment(response http.ResponseWriter, request *http.Request)
 		return
 	}
 	response.Header().Set("Content-Type", attachment.MediaType)
+	if attachment.MediaType == "text/plain" {
+		response.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	}
 	response.Header().Set("Content-Length", strconv.Itoa(len(attachment.Data)))
 	response.Header().Set("Content-Disposition", fmt.Sprintf(`inline; filename=%q`, attachment.FileName))
 	response.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
@@ -610,6 +622,52 @@ const (
 	maxImageBytes       = 10 << 20
 	maxTotalImageBytes  = 20 << 20
 )
+
+func decodeTextFiles(inputs []imageInput) ([]store.NewAttachment, error) {
+	if len(inputs) > maxImagesPerMessage {
+		return nil, fmt.Errorf("attach at most %d files per message", maxImagesPerMessage)
+	}
+	attachments := make([]store.NewAttachment, 0, len(inputs))
+	for _, input := range inputs {
+		if input.MediaType != "text/plain" {
+			return nil, fmt.Errorf("%q must have the text/plain media type", input.Name)
+		}
+		// The browser owns file creation. Preserve its file name and bytes;
+		// reject unsafe names instead of silently rewriting them.
+		if strings.TrimSpace(input.Name) == "" || len(input.Name) > 180 || !utf8.ValidString(input.Name) || strings.ContainsAny(input.Name, "/\\") || strings.IndexFunc(input.Name, unicode.IsControl) >= 0 || input.Name == "." || input.Name == ".." {
+			return nil, errors.New("text file names must be non-empty, at most 180 bytes, and contain no path separators or control characters")
+		}
+		data, err := base64.StdEncoding.DecodeString(input.Data)
+		if err != nil {
+			return nil, fmt.Errorf("%q is not valid base64 text data", input.Name)
+		}
+		if len(data) == 0 || len(data) > maxImageBytes {
+			return nil, fmt.Errorf("%q must be between 1 byte and 10 MiB", input.Name)
+		}
+		if !utf8.Valid(data) || bytes.Contains(data, []byte{0}) {
+			return nil, fmt.Errorf("%q must contain UTF-8 plain text without NUL bytes", input.Name)
+		}
+		attachments = append(attachments, store.NewAttachment{FileName: input.Name, MediaType: "text/plain", Data: data})
+	}
+	if err := validateAttachmentBudget(attachments); err != nil {
+		return nil, err
+	}
+	return attachments, nil
+}
+
+func validateAttachmentBudget(attachments []store.NewAttachment) error {
+	if len(attachments) > maxImagesPerMessage {
+		return fmt.Errorf("attach at most %d images and files combined per message", maxImagesPerMessage)
+	}
+	total := 0
+	for _, attachment := range attachments {
+		total += len(attachment.Data)
+	}
+	if total > maxTotalImageBytes {
+		return errors.New("images and files may total at most 20 MiB per message")
+	}
+	return nil
+}
 
 func decodeImages(inputs []imageInput) ([]store.NewAttachment, error) {
 	if len(inputs) > maxImagesPerMessage {

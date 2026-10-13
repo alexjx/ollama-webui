@@ -395,6 +395,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .message-images a { overflow: hidden; border: 1px solid var(--line); border-radius: 9px; color: var(--ink); background: #fff; text-decoration: none; }
 .message-images img { display: block; width: 100%; max-height: 220px; aspect-ratio: 4 / 3; object-fit: contain; background: #f1f3f2; }
 .message-images span { display: block; overflow: hidden; padding: 6px 8px; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.message-images .message-text-file { display: flex; align-items: center; gap: 8px; min-height: 64px; padding: 8px 10px; }
+.message-text-file svg { flex-shrink: 0; color: var(--blue); }
+.message-text-file span { min-width: 0; padding: 0; }
+.message-text-file small { display: block; margin-top: 3px; color: var(--muted); font-size: 11px; }
 .user-message { padding: 17px 18px; border-radius: 12px; background: var(--surface); }
 .user-message > p { max-width: 500px; }
 .assistant-message > p:first-of-type { max-width: 500px; margin-bottom: 0; }
@@ -580,6 +584,11 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .attachment-preview img { display: block; width: 64px; height: 64px; border: 1px solid var(--line); border-radius: 8px; object-fit: cover; background: #f1f3f2; }
 .attachment-preview button { position: absolute; top: -8px; right: -3px; display: grid; place-items: center; width: 44px; height: 44px; border: 1px solid var(--line-strong); border-radius: 50%; color: var(--ink); background: #fff; box-shadow: 0 1px 3px rgb(0 0 0 / 15%); }
 .attachment-preview span { display: block; overflow: hidden; margin-top: 4px; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.attachment-preview.text-file-preview { flex-basis: 144px; }
+.text-file-tile { display: flex; align-items: center; gap: 8px; min-height: 64px; padding: 10px; border: 1px solid var(--line); border-radius: 8px; color: var(--blue); background: #f5f8fa; text-decoration: none; }
+.text-file-tile svg { flex-shrink: 0; }
+.text-file-tile span { margin: 0; }
+.text-file-tile:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 .attachment-error { padding: 7px 12px 0; color: #8b442a; font-size: 12px; }
 .mode-notice { padding: 8px 12px; border-bottom: 1px solid #d9e2e6; color: #526873; background: #f4f8fa; font-size: 12.5px; }
 .composer-row { display: flex; align-items: center; gap: 10px; min-height: 64px; padding: 8px 10px; }
@@ -594,6 +603,17 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .send-button:disabled { cursor: not-allowed; opacity: .45; }
 .context-row { display: flex; align-items: center; gap: 14px; min-height: 41px; padding: 0 15px; border-top: 1px solid var(--line); color: #66717a; font-size: 13px; }
 .context-row > span { white-space: nowrap; }
+.compact-context-button { display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; min-height: 44px; padding: 0 8px; border-radius: 6px; color: var(--blue); background: transparent; font-size: 12px; font-weight: 620; }
+.compact-context-button:hover:not(:disabled) { background: #eef1f2; }
+.compact-context-button:disabled { opacity: .45; cursor: not-allowed; }
+.compact-context-button.working svg { animation: agent-spin 1s linear infinite; }
+.context-feedback { margin: 0; padding: 8px 15px; border-top: 1px solid var(--line); color: #526873; background: #f4f8fa; font-size: 12px; line-height: 1.5; }
+.context-feedback.error { color: #8b442a; }
+@media (max-width: 760px) {
+  .composer .context-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 0 10px; padding-top: 7px; }
+  .context-row > span { grid-column: 1 / -1; white-space: normal; }
+  .context-track { width: 100%; }
+}
 .context-track { flex: 1; height: 4px; overflow: hidden; border-radius: 4px; background: #e1e4e5; }
 .context-track span { display: block; width: 25%; height: 100%; border-radius: inherit; background: var(--blue); }
 .context-track.unknown-limit { background: repeating-linear-gradient(90deg, #d8dddf 0 5px, #edf0f0 5px 9px); }

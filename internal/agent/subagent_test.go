@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -207,5 +208,40 @@ func TestRunnerDelegateToolPassesOnlyExplicitTaskInputs(t *testing.T) {
 	}
 	if len(chat.requests[0].Tools) != 2 || chat.requests[0].Tools[1].Function.Name != "delegate_task" {
 		t.Fatalf("delegate tool was not advertised: %#v", chat.requests[0].Tools)
+	}
+}
+
+func TestSubagentReadsReferencedTextAttachmentWithoutInheritingHistory(t *testing.T) {
+	ctx := context.Background()
+	database, conversationID := artifactTestStore(t, ctx)
+	user, err := database.AddMessageWithAttachments(ctx, conversationID, "user", "PRIVATE_PARENT_PROMPT", "complete", []store.NewAttachment{{FileName: "pasted.txt", MediaType: "text/plain", Data: []byte("TEXT_FILE_CONTENTS_42")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assistant, err := database.AddMessage(ctx, conversationID, "assistant", "", "streaming")
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := ollama.ToolCall{ID: "child-read", Function: ollama.ToolCallFunction{Name: "attachment_read", Arguments: json.RawMessage(fmt.Sprintf(`{"attachment_id":%d}`, user.Attachments[0].ID))}}
+	chat := &scriptedChat{turns: [][]ollama.ChatChunk{
+		{{Message: ollama.Message{ToolCalls: []ollama.ToolCall{call}}, Done: true}},
+		{{Message: ollama.Message{Content: "File inspected"}, Done: true}},
+	}}
+	orchestrator, err := NewSubagentOrchestrator(database, chat, &recordingShell{}, nil, t.TempDir(), "", 2048, 2, 1, 1024, 8192)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = orchestrator.Execute(ctx, SubagentRequest{ConversationID: conversationID, RequestingMessageID: assistant.ID, Model: "tools", Task: fmt.Sprintf("Inspect attachment_id=%d", user.Attachments[0].ID)}, func(Event) error { return nil })
+	if err != nil || len(chat.requests) != 2 || len(chat.requests[0].Messages) != 2 {
+		t.Fatalf("child attachment read failed: %#v, %v", chat.requests, err)
+	}
+	for _, message := range chat.requests[0].Messages {
+		if strings.Contains(message.Content, "PRIVATE_PARENT_PROMPT") || strings.Contains(message.Content, "TEXT_FILE_CONTENTS_42") {
+			t.Fatal("child inherited parent history or inline attachment contents")
+		}
+	}
+	toolMessage := chat.requests[1].Messages[len(chat.requests[1].Messages)-1]
+	if !strings.Contains(toolMessage.Content, "TEXT_FILE_CONTENTS_42") || !strings.Contains(toolMessage.Content, "next_offset") {
+		t.Fatalf("child could not page the attachment: %#v", toolMessage)
 	}
 }

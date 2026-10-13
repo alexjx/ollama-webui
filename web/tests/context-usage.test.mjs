@@ -47,3 +47,39 @@ test("does not invent a percentage for an inherited limit", () => {
   assert.deepEqual(contextUsage(messages, "default"), { usedTokens: 400, limit: null, percent: null });
   assert.deepEqual(contextUsage(messages, "invalid"), { usedTokens: 400, limit: null, percent: null });
 });
+
+const checkpointMessages = () => [
+  { id: 1, role: "user", status: "complete", content: "Older question" },
+  { id: 2, role: "assistant", status: "complete", content: "Older answer" },
+  { id: 3, role: "user", status: "complete", content: "Recent question" },
+  { id: 4, role: "assistant", status: "complete", metadata: { prompt_eval_count: 800, eval_count: 224 } },
+];
+const manualCheckpoint = {
+  through_message_id: 2, summary: "Older context summarized", estimated_tokens: 512,
+  state: { compacted_after_message_id: 4 },
+};
+
+test("shows a saved manual compaction estimate separately from response metrics", () => {
+  const messages = checkpointMessages();
+  assert.deepEqual(contextUsage(messages, "4096", manualCheckpoint), { usedTokens: 512, limit: 4096, percent: 12.5, estimated: true });
+  assert.deepEqual(contextUsage(messages, "default", manualCheckpoint), { usedTokens: 512, limit: null, percent: null, estimated: true });
+  assert.equal(latestContextTokens(messages), 1024);
+  assert.equal(messages.at(-1).metadata.prompt_eval_count, 800);
+});
+
+test("keeps the compaction estimate until a newer assistant has measured counts", () => {
+  const messages = [...checkpointMessages(), { id: 5, role: "user", status: "complete" }, { id: 6, role: "assistant", status: "streaming" }];
+  assert.equal(contextUsage(messages, "4096", manualCheckpoint).estimated, true);
+  messages.at(-1).metadata = { prompt_eval_count: 600, eval_count: 40, agent_prompt_eval_count: 2000 };
+  assert.deepEqual(contextUsage(messages, "4096", manualCheckpoint), { usedTokens: 640, limit: 4096, percent: 15.625 });
+});
+
+test("ignores automatic, missing, and stale checkpoint estimates after history deletion", () => {
+  const messages = checkpointMessages();
+  for (const checkpoint of [null, { ...manualCheckpoint, state: {} }, { ...manualCheckpoint, estimated_tokens: "invalid" }]) {
+    assert.equal(contextUsage(messages, "4096", checkpoint).usedTokens, 1024);
+    assert.equal(contextUsage(messages, "4096", checkpoint).estimated, undefined);
+  }
+  assert.equal(contextUsage(messages.slice(2), "4096", manualCheckpoint).estimated, undefined);
+  assert.equal(contextUsage(messages.slice(0, 2), "4096", manualCheckpoint).estimated, undefined);
+});

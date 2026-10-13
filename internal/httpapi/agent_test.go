@@ -65,12 +65,15 @@ func TestGenerateRunsShellAgentAndPersistsTrace(t *testing.T) {
 	workspace := t.TempDir()
 	runner := agent.Runner{
 		Chat: client, Steps: database, MaxTurns: 200,
-		Shell:  agent.ShellExecutor{Workspace: workspace, Timeout: 2 * time.Second, MaxOutput: 4096},
-		Stager: agent.InputStager{Workspace: workspace, MaxInlineBytes: 8},
+		Shell: agent.ShellExecutor{Workspace: workspace, Timeout: 2 * time.Second, MaxOutput: 4096},
 	}
 	api := New(database, client, runner, RuntimeSettings{}, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
-	requestBody := `{"content":"  verify long input  ","images":[{"name":"pixel.png","media_type":"image/png","data":"` + base64.StdEncoding.EncodeToString(onePixelPNG) + `"}]}`
-	request := httptest.NewRequest(http.MethodPost, "/api/conversations/1/messages", strings.NewReader(requestBody))
+	inlineInput := "  verify long input\n" + strings.Repeat("inline 世界\n", 2000) + "  "
+	requestBody, err := json.Marshal(map[string]any{"content": inlineInput, "images": []imageInput{{Name: "pixel.png", MediaType: "image/png", Data: base64.StdEncoding.EncodeToString(onePixelPNG)}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/conversations/1/messages", strings.NewReader(string(requestBody)))
 	request.SetPathValue("id", "1")
 	response := httptest.NewRecorder()
 	api.ServeHTTP(response, request)
@@ -118,7 +121,7 @@ func TestGenerateRunsShellAgentAndPersistsTrace(t *testing.T) {
 	if messages[1].Metadata["prompt_eval_count"] != float64(20) || messages[1].Metadata["eval_count"] != float64(10) {
 		t.Fatalf("latest context metadata was not persisted: %#v", messages[1].Metadata)
 	}
-	if messages[0].Content != "  verify long input  " {
+	if messages[0].Content != inlineInput {
 		t.Fatalf("stored user input lost whitespace: %q", messages[0].Content)
 	}
 	if len(chatRequests) != 2 || chatRequests[0]["tools"] == nil || chatRequests[0]["think"] != "high" || chatRequests[0]["keep_alive"] != nil {
@@ -126,8 +129,8 @@ func TestGenerateRunsShellAgentAndPersistsTrace(t *testing.T) {
 	}
 	firstMessages := chatRequests[0]["messages"].([]any)
 	userInput := firstMessages[len(firstMessages)-1].(map[string]any)
-	if content, _ := userInput["content"].(string); !strings.Contains(content, "staged to") || strings.Contains(content, "verify long input") {
-		t.Fatalf("large input was not staged for the model: %#v", userInput)
+	if content, _ := userInput["content"].(string); content != inlineInput {
+		t.Fatalf("inline input changed for the model: %#v", userInput)
 	}
 	images, ok := userInput["images"].([]any)
 	if !ok || len(images) != 1 || images[0] != base64.StdEncoding.EncodeToString(onePixelPNG) {
@@ -140,7 +143,7 @@ func TestGenerateRunsShellAgentAndPersistsTrace(t *testing.T) {
 	}
 	entries, err := os.ReadDir(workspace)
 	if err != nil || len(entries) != 0 {
-		t.Fatalf("agent run left staged input behind: %#v, %v", entries, err)
+		t.Fatalf("agent run unexpectedly wrote input files: %#v, %v", entries, err)
 	}
 }
 
@@ -342,8 +345,8 @@ func TestGenerateCompactsLongAgentHistoryBeforeRunning(t *testing.T) {
 	client := ollama.NewClient(ollamaServer.URL)
 	runner := agent.Runner{
 		Chat: client, Steps: database, Shell: agent.ShellExecutor{Workspace: t.TempDir(), Timeout: time.Second, MaxOutput: 4096},
-		Stager: agent.InputStager{Workspace: t.TempDir(), MaxInlineBytes: 16384}, MaxTurns: 4,
-		Context: &agent.ContextPreparer{Chat: client, Store: database},
+		MaxTurns: 4,
+		Context:  &agent.ContextPreparer{Chat: client, Store: database},
 	}
 	api := New(database, client, runner, RuntimeSettings{ContextTokens: 32768}, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	request := httptest.NewRequest(http.MethodPost, "/api/conversations/1/messages", strings.NewReader(`{"content":"current request"}`))

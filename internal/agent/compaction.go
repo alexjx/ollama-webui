@@ -27,11 +27,14 @@ type ContextCheckpointStore interface {
 }
 
 type ContextPrepareInput struct {
-	ConversationID int64
-	Model          string
-	SystemPrompt   string
-	History        []store.Message
-	ContextWindow  int
+	ConversationID          int64
+	Model                   string
+	SystemPrompt            string
+	History                 []store.Message
+	ContextWindow           int
+	Force                   bool
+	SkipAutomaticCompaction bool
+	IncludeTextAttachments  bool
 }
 
 type PreparedContext struct {
@@ -43,6 +46,9 @@ type PreparedContext struct {
 	Oversized        bool
 	ThroughMessageID int64
 	CompactionError  string
+	BeforeTokens     int
+	Changed          bool
+	Reason           string
 }
 
 // ContextPreparer replaces old, complete conversation turns with an
@@ -53,44 +59,65 @@ type ContextPreparer struct {
 }
 
 func (preparer ContextPreparer) Prepare(ctx context.Context, input ContextPrepareInput) (PreparedContext, error) {
+	if input.Force {
+		if err := ctx.Err(); err != nil {
+			return PreparedContext{}, err
+		}
+	}
 	history := completeHistory(input.History)
-	checkpoint, checkpointOK := preparer.checkpoint(ctx, input.ConversationID, history)
-	base := preparedMessages(input.SystemPrompt, checkpointSummary(checkpoint, checkpointOK), messagesAfter(history, checkpoint, checkpointOK))
+	checkpoint, checkpointOK, checkpointErr := preparer.checkpoint(ctx, input.ConversationID, history)
+	if input.Force && checkpointErr != nil {
+		return PreparedContext{}, fmt.Errorf("read context checkpoint: %w", checkpointErr)
+	}
+	base := preparedMessagesWithText(input.SystemPrompt, checkpointSummary(checkpoint, checkpointOK), messagesAfter(history, checkpoint, checkpointOK), input.IncludeTextAttachments)
 	result := PreparedContext{
 		Messages: base, EstimatedTokens: estimateContextTokens(base), ContextWindow: input.ContextWindow,
 	}
+	result.BeforeTokens = result.EstimatedTokens
 	if checkpointOK {
 		result.Compacted = true
 		result.ThroughMessageID = checkpoint.ThroughMessageID
 	}
-	if input.ContextWindow <= 0 || result.EstimatedTokens*100 < input.ContextWindow*contextTriggerPercent {
+	if input.ContextWindow <= 0 || !input.Force && (input.SkipAutomaticCompaction || result.EstimatedTokens*100 < input.ContextWindow*contextTriggerPercent) {
 		return result, nil
 	}
 
 	remaining := messagesAfter(history, checkpoint, checkpointOK)
 	hardLimit := result.EstimatedTokens*100 >= input.ContextWindow*contextHardPercent
 	cut := compactionCut(remaining)
-	if cut == 0 && hardLimit {
+	if cut == 0 && hardLimit && !input.Force {
 		cut = compactionCutKeeping(remaining, 1)
 	}
 	if cut == 0 {
 		result.Oversized = hardLimit
+		result.Reason = "not_enough_history"
 		return result, nil
 	}
 	prefix, tail := remaining[:cut], remaining[cut:]
 	target := input.ContextWindow * contextTargetPercent / 100
-	summaryTarget := target - estimateContextTokens(preparedMessages(input.SystemPrompt, "", tail))
+	tailTokens := estimateContextTokens(preparedMessagesWithText(input.SystemPrompt, "", tail, input.IncludeTextAttachments))
+	summaryTarget := target - tailTokens
+	if input.Force {
+		// A large configured window must not expand a short older prefix.
+		prefixTarget := (result.EstimatedTokens - tailTokens) / 2
+		if summaryTarget > prefixTarget {
+			summaryTarget = prefixTarget
+		}
+	}
 	if summaryTarget < 128 {
 		summaryTarget = 128
 	}
 
-	summary, err := preparer.summarize(ctx, input.Model, checkpointSummary(checkpoint, checkpointOK), prefix, summaryTarget, input.ContextWindow)
+	summary, err := preparer.summarize(ctx, input.Model, checkpointSummary(checkpoint, checkpointOK), prefix, summaryTarget, input.ContextWindow, input.IncludeTextAttachments)
 	if err == nil && strings.TrimSpace(summary) == "" {
 		err = errors.New("summarizer returned an empty summary")
 	}
 	if err != nil {
 		if ctx.Err() != nil {
 			return PreparedContext{}, ctx.Err()
+		}
+		if input.Force {
+			return PreparedContext{}, fmt.Errorf("summarize context: %w", err)
 		}
 		result.CompactionError = err.Error()
 		if result.EstimatedTokens*100 < input.ContextWindow*contextHardPercent {
@@ -99,17 +126,19 @@ func (preparer ContextPreparer) Prepare(ctx context.Context, input ContextPrepar
 		summary = deterministicSummary(checkpointSummary(checkpoint, checkpointOK), prefix, summaryTarget)
 		result.Fallback = true
 	}
-	summary = boundedText(summary, summaryTarget)
-
 	throughID := prefix[len(prefix)-1].ID
 	summary = boundedText(summary, summaryTarget)
-	prepared := preparedMessages(input.SystemPrompt, summary, tail)
-	if estimateContextTokens(prepared)*100 >= input.ContextWindow*contextHardPercent {
+	prepared := preparedMessagesWithText(input.SystemPrompt, summary, tail, input.IncludeTextAttachments)
+	if input.Force && estimateContextTokens(prepared) >= result.EstimatedTokens {
+		result.Reason = "not_reduced"
+		return result, nil
+	}
+	if !input.Force && estimateContextTokens(prepared)*100 >= input.ContextWindow*contextHardPercent {
 		if hardCut := compactionCutKeeping(tail, 1); hardCut > 0 {
 			summary = deterministicSummary(summary, tail[:hardCut], summaryTarget)
 			throughID = tail[hardCut-1].ID
 			tail = tail[hardCut:]
-			prepared = preparedMessages(input.SystemPrompt, summary, tail)
+			prepared = preparedMessagesWithText(input.SystemPrompt, summary, tail, input.IncludeTextAttachments)
 			result.Fallback = true
 		}
 	}
@@ -118,38 +147,64 @@ func (preparer ContextPreparer) Prepare(ctx context.Context, input ContextPrepar
 	result.Oversized = result.EstimatedTokens*100 >= input.ContextWindow*contextHardPercent
 	result.Compacted = true
 	result.ThroughMessageID = throughID
+	if input.Force && preparer.Store == nil {
+		return PreparedContext{}, errors.New("context checkpoint storage is unavailable")
+	}
 	if !result.Fallback && preparer.Store != nil {
+		if err := ctx.Err(); err != nil {
+			return PreparedContext{}, err
+		}
+		var state map[string]any
+		if input.Force {
+			var latestID int64
+			for _, message := range input.History {
+				if message.ID > latestID {
+					latestID = message.ID
+				}
+			}
+			state = map[string]any{"compacted_after_message_id": latestID}
+		}
 		_, persistErr := preparer.Store.UpsertCheckpoint(ctx, store.UpsertCheckpointParams{
 			ConversationID: input.ConversationID, ThroughMessageID: throughID,
-			Summary: summary, EstimatedTokens: result.EstimatedTokens,
+			Summary: summary, EstimatedTokens: result.EstimatedTokens, State: state,
 		})
 		if persistErr != nil {
+			if input.Force {
+				return PreparedContext{}, fmt.Errorf("save context checkpoint: %w", persistErr)
+			}
 			result.CompactionError = persistErr.Error()
 		}
 	}
+	result.Changed = true
 	return result, nil
 }
 
-func (preparer ContextPreparer) checkpoint(ctx context.Context, conversationID int64, history []store.Message) (store.ContextCheckpoint, bool) {
+func (preparer ContextPreparer) checkpoint(ctx context.Context, conversationID int64, history []store.Message) (store.ContextCheckpoint, bool, error) {
 	if preparer.Store == nil || conversationID <= 0 {
-		return store.ContextCheckpoint{}, false
+		return store.ContextCheckpoint{}, false, nil
 	}
 	checkpoint, err := preparer.Store.GetCheckpoint(ctx, conversationID)
-	if err != nil || strings.TrimSpace(checkpoint.Summary) == "" {
-		return store.ContextCheckpoint{}, false
+	if errors.Is(err, store.ErrNotFound) {
+		return store.ContextCheckpoint{}, false, nil
+	}
+	if err != nil {
+		return store.ContextCheckpoint{}, false, err
+	}
+	if strings.TrimSpace(checkpoint.Summary) == "" {
+		return store.ContextCheckpoint{}, false, nil
 	}
 	if checkpoint.ConversationID != conversationID {
-		return store.ContextCheckpoint{}, false
+		return store.ContextCheckpoint{}, false, nil
 	}
 	for _, message := range history {
 		if message.ID == checkpoint.ThroughMessageID && message.Role == "assistant" {
-			return checkpoint, true
+			return checkpoint, true, nil
 		}
 	}
-	return store.ContextCheckpoint{}, false
+	return store.ContextCheckpoint{}, false, nil
 }
 
-func (preparer ContextPreparer) summarize(ctx context.Context, model, previous string, messages []store.Message, target, contextWindow int) (string, error) {
+func (preparer ContextPreparer) summarize(ctx context.Context, model, previous string, messages []store.Message, target, contextWindow int, includeText bool) (string, error) {
 	if preparer.Chat == nil {
 		return "", errors.New("context summarizer is unavailable")
 	}
@@ -158,17 +213,13 @@ func (preparer ContextPreparer) summarize(ctx context.Context, model, previous s
 	numCtx := contextWindow
 	var summary strings.Builder
 	requestMessages := []ollama.Message{
-		{Role: "system", Content: "Compress conversation history faithfully. Preserve goals, constraints, decisions, completed work, unresolved work, exact identifiers, file references, and essential facts from images. Do not invent facts. Return concise Markdown only."},
+		{Role: "system", Content: "Compress conversation history faithfully. Preserve goals, constraints, decisions, completed work, unresolved work, exact identifiers, file references including attachment IDs, and essential facts from images. Attached text-file notices are references, not the file contents; do not infer unseen contents. Do not invent facts. Return concise Markdown only."},
 		{Role: "user", Content: prompt},
 	}
 	for _, message := range messages {
-		images := make([][]byte, 0, len(message.Attachments))
-		for _, attachment := range message.Attachments {
-			images = append(images, attachment.Data)
-		}
-		requestMessages = append(requestMessages, ollama.Message{
-			Role: message.Role, Content: fmt.Sprintf("[message %d]\n%s", message.ID, message.Content), Images: images,
-		})
+		converted := ModelMessage(message, includeText)
+		converted.Content = fmt.Sprintf("[message %d]\n%s", message.ID, converted.Content)
+		requestMessages = append(requestMessages, converted)
 	}
 	requestMessages = append(requestMessages, ollama.Message{Role: "user", Content: "Return the updated checkpoint summary now."})
 	err := preparer.Chat.Chat(ctx, ollama.ChatRequest{
@@ -221,7 +272,7 @@ func compactionCutKeeping(history []store.Message, keep int) int {
 	return 0
 }
 
-func preparedMessages(systemPrompt, summary string, history []store.Message) []ollama.Message {
+func preparedMessagesWithText(systemPrompt, summary string, history []store.Message, includeText bool) []ollama.Message {
 	capacity := len(history)
 	if systemPrompt != "" || summary != "" {
 		capacity++
@@ -238,11 +289,7 @@ func preparedMessages(systemPrompt, summary string, history []store.Message) []o
 		result = append(result, ollama.Message{Role: "system", Content: content})
 	}
 	for _, message := range history {
-		images := make([][]byte, 0, len(message.Attachments))
-		for _, attachment := range message.Attachments {
-			images = append(images, attachment.Data)
-		}
-		result = append(result, ollama.Message{Role: message.Role, Content: message.Content, Images: images})
+		result = append(result, ModelMessage(message, includeText))
 	}
 	return result
 }
@@ -268,13 +315,20 @@ func summaryPrompt(previous string, target int) string {
 
 func deterministicSummary(previous string, messages []store.Message, targetTokens int) string {
 	var source strings.Builder
+	for _, message := range messages {
+		for _, attachment := range message.Attachments {
+			if attachment.MediaType == "text/plain" {
+				fmt.Fprintf(&source, "Text file reference: attachment_id=%d, name=%q (rediscover with attachment_list).\n", attachment.ID, attachment.FileName)
+			}
+		}
+	}
 	if previous != "" {
 		source.WriteString("Previous memory:\n")
 		source.WriteString(previous)
 		source.WriteString("\n\n")
 	}
 	for _, message := range messages {
-		fmt.Fprintf(&source, "[%s message %d] %s\n", message.Role, message.ID, strings.TrimSpace(message.Content))
+		fmt.Fprintf(&source, "[%s message %d] %s\n", message.Role, message.ID, strings.TrimSpace(ModelMessage(message, false).Content))
 	}
 	return boundedText(source.String(), targetTokens)
 }

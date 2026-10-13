@@ -4,7 +4,7 @@ A lightweight Chat and Agent interface for Ollama. Chat mode works with any
 completion-capable model and never sends tools. Agent mode can use a shell for
 calculation, search, inspection, execution, or verification when useful and
 continues until the task is complete. The Go service streams both modes to a
-responsive React interface and stores chats, model thinking, image attachments,
+responsive React interface and stores chats, model thinking, image and text attachments,
 and tool traces in SQLite.
 
 To protect short local-model context windows, Agent mode automatically replaces
@@ -13,10 +13,20 @@ keeping recent messages verbatim. Original messages remain unchanged in SQLite.
 Large captured shell outputs are stored under the managed context directory and
 represented in later model turns by a bounded excerpt plus a conversation-scoped
 artifact ID; the Agent can list and page through those artifacts when needed.
-User messages above 16 KiB are still temporarily staged as private workspace files,
-and prior thinking is never sent back to the model. Artifacts preserve the output
+Pasted text above 16 KiB becomes a UTF-8 text attachment in the browser before
+sending. Existing composer text stays inline. Chat mode sends labelled file text
+to the model; Agent mode receives file references and reads relevant ranges with
+conversation-scoped attachment tools. Raw inline messages are never staged to
+workspace files. Prior thinking is never sent back to the model. Artifacts preserve the output
 captured by the shell executor; output beyond `SHELL_MAX_OUTPUT_BYTES` is still
 discarded at capture time and is marked as source-truncated.
+
+Use **Compact** next to context usage in Chat or Agent mode to summarize older
+completed exchanges before the automatic threshold is reached. It keeps the
+four most recent completed messages and the original saved transcript and files. The next reply
+uses the saved summary; context usage shows an estimate until the next model call
+reports measured tokens. Short histories need no compaction, and summarization
+errors keep the previous context available.
 
 Agent mode can delegate focused work to child agents. Each child starts with a
 private system-and-task context instead of inheriting the full conversation, and
@@ -85,7 +95,7 @@ docker compose exec ollama ollama pull qwen3:8b
 The default image is multi-stage: Node and Go toolchains exist only in build
 stages. The final Alpine image keeps the small shell toolkit used by Agent mode,
 but contains neither compiler nor frontend source. If `./workspace` is bind-mounted,
-it must be writable by container UID 1000 so large-input staging and shell tasks work.
+it must be writable by container UID 1000 so shell tasks work.
 
 ## Container releases
 
@@ -167,7 +177,6 @@ Configuration is provided with environment variables:
 | `AGENT_CONTEXT_PATH` | Next to `DATABASE_PATH` under `agent-context` | Private managed checkpoint artifact directory; the container image sets `/data/agent-context` |
 | `AGENT_MAX_TURNS` | `200` | Emergency ceiling on model turns per task |
 | `AGENT_CONTEXT_BUDGET_TOKENS` | `32768` | Conservative prompt budget when a conversation does not set an explicit context window; compaction starts near 70% |
-| `AGENT_INLINE_INPUT_BYTES` | `16384` | Largest user message kept inline; small context selections lower this to a 4 KiB floor |
 | `AGENT_TOOL_FEEDBACK_BYTES` | `8192` | Maximum shell-output excerpt returned to later model turns |
 | `AGENT_SUBAGENTS_ENABLED` | `true` | Expose isolated child-agent and image-batch tools |
 | `AGENT_SUBAGENT_CONCURRENCY` | `1` | Maximum child jobs running across conversations; increase only when Ollama and available memory can sustain it |
@@ -191,7 +200,9 @@ tasks with optional shell use, isolated child delegation, directory image labeli
 conversations, context and temperature overrides before first load, streamed
 responses with Stop, durable history and shell traces, title/message search, and
 persisted image input for vision-capable models. Images may be pasted, dropped,
-or selected; JPEG, PNG, and WebP are accepted with limits of four images, 10 MiB
+or selected; JPEG, PNG, and WebP are accepted. UTF-8 plain text files can also be
+selected or dropped, and large pasted text becomes a file in the browser. Images
+and text files share limits of four attachments, 10 MiB
 each, and 20 MiB total per message. Completed responses include expandable token,
 timing, and generation-rate details.
 Conversation rename and deletion are available from each row in the history list.

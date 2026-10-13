@@ -73,7 +73,7 @@ var labelImageDirectoryTool = ollama.Tool{
 	},
 }
 
-const SystemPrompt = `You are a general-purpose autonomous assistant. Continue until the user's task is actually complete, but answer directly when no tool is needed. A shell tool is available as an optional capability for calculation, search, inspection, execution, and verification; do not inspect or edit files unless that helps the user's request. The shell may read system paths allowed by normal OS permissions, while writes are restricted to AGENT_WORKSPACE. Delegate substantial independent work when its intermediate details would crowd the main context. For a directory of images, use the dedicated image-labeling tool so each image is processed in an isolated request and results go to a workspace JSONL file. Context tools can persist important notes or large outputs outside the prompt and retrieve them later within this conversation. When a user message says its full input was staged to a file, use bounded line ranges to inspect only the relevant portions, keep concise intermediate notes, and avoid printing the whole file into the conversation. Prefer narrow commands and small outputs so local model context remains focused. Do not stop after merely describing a plan. When the task is complete, reply with a concise final answer and do not call a tool. The user can interrupt you at any time.`
+const SystemPrompt = `You are a general-purpose autonomous assistant. Continue until the user's task is actually complete, but answer directly when no tool is needed. A shell tool is available as an optional capability for calculation, search, inspection, execution, and verification; do not inspect or edit files unless that helps the user's request. The shell may read system paths allowed by normal OS permissions, while writes are restricted to AGENT_WORKSPACE. Delegate substantial independent work when its intermediate details would crowd the main context. For a directory of images, use the dedicated image-labeling tool so each image is processed in an isolated request and results go to a workspace JSONL file. Context tools can persist important notes or large outputs outside the prompt and retrieve them later within this conversation. When a user attaches a text file, use attachment_read with its attachment ID to inspect only relevant bounded byte ranges, keep concise intermediate notes, and avoid printing the whole file into the conversation. Use attachment_list to rediscover older attached files after compaction. Prefer narrow commands and small outputs so local model context remains focused. Do not stop after merely describing a plan. When the task is complete, reply with a concise final answer and do not call a tool. The user can interrupt you at any time.`
 
 type ChatClient interface {
 	Chat(context.Context, ollama.ChatRequest, func(ollama.ChatChunk) error) error
@@ -92,7 +92,7 @@ type Runner struct {
 	Chat              ChatClient
 	Steps             StepStore
 	Shell             CommandExecutor
-	Stager            InputStager
+	Attachments       AttachmentStore
 	MaxTurns          int
 	ToolFeedbackLimit int
 	Context           *ContextPreparer
@@ -151,14 +151,6 @@ func (runner Runner) Run(ctx context.Context, input RunInput, emit func(Event) e
 	}
 	var err error
 	messages := input.Messages
-	cleanup := func() {}
-	if agentMode {
-		messages, cleanup, err = runner.Stager.Stage(input.Messages, input.OptionsNumCtx())
-		if err != nil {
-			return RunResult{}, err
-		}
-	}
-	defer cleanup()
 	var visible strings.Builder
 	var thinking strings.Builder
 	var metadata map[string]any
@@ -169,6 +161,9 @@ func (runner Runner) Run(ctx context.Context, input RunInput, emit func(Event) e
 	if agentMode {
 		maxTurns = runner.MaxTurns
 		tools = []ollama.Tool{shellTool}
+		if runner.Attachments != nil && input.ConversationID > 0 {
+			tools = append(tools, attachmentListTool, attachmentReadTool)
+		}
 		if runner.Artifacts != nil && input.ConversationID > 0 {
 			tools = append(tools, contextListTool, contextReadTool, contextWriteTool)
 		}
@@ -451,6 +446,13 @@ func (runner Runner) executeTool(ctx context.Context, conversationID, messageID 
 				status = "cancelled"
 			}
 		}
+	case "attachment_list", "attachment_read":
+		if runner.Attachments == nil || conversationID <= 0 {
+			result = ShellResult{ExitCode: -1, Output: "attachment storage is unavailable"}
+			status = "error"
+		} else {
+			result, status = runner.executeAttachmentTool(ctx, conversationID, call.Function.Name, raw)
+		}
 	case "context_list", "context_read", "context_write":
 		if runner.Artifacts == nil || conversationID <= 0 {
 			result = ShellResult{ExitCode: -1, Output: "context storage is unavailable"}
@@ -555,13 +557,6 @@ func (runner Runner) executeTool(ctx context.Context, conversationID, messageID 
 		return string(payload), context.Canceled
 	}
 	return string(payload), nil
-}
-
-func (input RunInput) OptionsNumCtx() *int {
-	if input.Options == nil {
-		return nil
-	}
-	return input.Options.NumCtx
 }
 
 func boundedToolFeedback(output string, limit int) (string, bool) {

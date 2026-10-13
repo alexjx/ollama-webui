@@ -361,18 +361,18 @@ func TestRunnerContextListPaginates(t *testing.T) {
 	}
 }
 
-func TestRunnerCleansStagedInputAfterFailureOrCancellation(t *testing.T) {
+func TestRunnerNeverWritesInlineInputAfterFailureOrCancellation(t *testing.T) {
 	for name, runErr := range map[string]error{"failure": errors.New("chat failed"), "cancellation": context.Canceled} {
 		t.Run(name, func(t *testing.T) {
 			workspace := t.TempDir()
-			runner := Runner{Chat: errorChat{err: runErr}, Steps: &memorySteps{}, Shell: &recordingShell{}, Stager: InputStager{Workspace: workspace, MaxInlineBytes: 4}, MaxTurns: 1}
+			runner := Runner{Chat: errorChat{err: runErr}, Steps: &memorySteps{}, Shell: &recordingShell{}, MaxTurns: 1}
 			_, err := runner.Run(context.Background(), RunInput{Model: "tools", Messages: []ollama.Message{{Role: "user", Content: "oversized"}}}, func(Event) error { return nil })
 			if !errors.Is(err, runErr) {
 				t.Fatalf("unexpected run error: %v", err)
 			}
 			entries, readErr := os.ReadDir(workspace)
 			if readErr != nil || len(entries) != 0 {
-				t.Fatalf("ended run left staged input behind: %#v, %v", entries, readErr)
+				t.Fatalf("ended run unexpectedly wrote input files: %#v, %v", entries, readErr)
 			}
 		})
 	}

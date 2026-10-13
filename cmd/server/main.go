@@ -66,7 +66,7 @@ func main() {
 	runner := agent.Runner{
 		Chat: ollamaClient, Steps: database,
 		Shell:             shellExecutor,
-		Stager:            agent.InputStager{Workspace: workspace, MaxInlineBytes: cfg.InlineInputMax},
+		Attachments:       database,
 		MaxTurns:          cfg.AgentMaxTurns,
 		ToolFeedbackLimit: cfg.ToolFeedbackMax,
 		Context:           &agent.ContextPreparer{Chat: ollamaClient, Store: database},
@@ -84,7 +84,7 @@ func main() {
 	}
 	handler := httpapi.New(database, ollamaClient, runner, httpapi.RuntimeSettings{
 		Workspace: workspace, MaxTurns: cfg.AgentMaxTurns, ShellTimeout: cfg.ShellTimeout,
-		ShellMaxOutput: cfg.ShellMaxOutput, InlineInputMax: cfg.InlineInputMax, ToolFeedbackLimit: cfg.ToolFeedbackMax,
+		ShellMaxOutput: cfg.ShellMaxOutput, ToolFeedbackLimit: cfg.ToolFeedbackMax,
 		ContextDirectory: contextDirectory, ContextTokens: cfg.ContextTokens,
 		SubagentsEnabled:    cfg.SubagentsEnabled,
 		SubagentConcurrency: cfg.SubagentConcurrency, SubagentContextTokens: cfg.SubagentContextTokens,
