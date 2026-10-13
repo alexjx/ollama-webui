@@ -785,6 +785,11 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .markdown-content :is(a, pre, .markdown-table-scroll):focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
 .markdown-content code { padding: .12em .32em; border-radius: 4px; background: #f1f2f2; font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: .87em; }
 .markdown-content pre { max-width: 100%; margin: 1em 0; padding: 14px 16px; overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: #f6f7f7; line-height: 1.55; white-space: pre; overflow-wrap: normal; tab-size: 4; }
+.markdown-code-block { position: relative; min-width: 0; margin: 1em 0; }
+.markdown-code-block pre { margin: 0; padding-top: 52px; }
+.select-code-button { position: absolute; top: 6px; right: 6px; min-height: 36px; padding: 0 12px; border: 1px solid var(--line); border-radius: 6px; color: #65717a; background: #fff; font-size: 12px; font-weight: 620; box-shadow: 0 1px 3px #0000000a; user-select: none; }
+.select-code-button:hover { color: var(--blue-dark); background: #eef1f2; }
+.select-code-button:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 .markdown-content pre code { padding: 0; border: 0; border-radius: 0; background: transparent; }
 .markdown-table-scroll { max-width: 100%; overflow-x: auto; margin: 1em 0; border: 1px solid var(--line); border-radius: 8px; }
 .markdown-content table { width: 100%; border-collapse: collapse; font-size: .92em; }

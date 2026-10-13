@@ -10,6 +10,7 @@ When implementing from a selected generated mock, treat that image as the source
 
 - Assistant answers render Markdown with readable headings, emphasis, quotes, lists, code, and tables, including while streaming. Keep wide code and tables scrollable within the response.
 - Preserve a native Select Markdown copy path for HTTP deployments using hosts-file names: select the original source for Ctrl+C/Cmd+C without depending on the Clipboard API.
+- Rendered code blocks have a floating Select button in the upper-right corner that selects only the code for native Ctrl+C/Cmd+C copying on HTTP deployments. Keep the button clear of code text and outside its horizontal scrolling region.
 
 - When a new user turn starts, scroll the transcript to the bottom after its new messages render.
 - Existing sessions can switch models between responses using the header or conversation settings selector, including recovery from removed models. Preserve history and Chat/Agent mode, validate replacement capabilities, and reset thinking to the replacement model's default.
