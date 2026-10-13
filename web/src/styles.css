@@ -553,8 +553,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .empty-chat .chat-error { margin-top: 18px; text-align: left; }
 
 .is-new-chat .transcript { padding: 0; }
-.is-new-chat .composer-wrap { padding: 0 28px 72px; background: transparent; }
-.is-new-chat .composer { width: min(100%, 900px); margin: 0 auto; border: 1px solid var(--line-strong); border-radius: 14px; box-shadow: 0 12px 32px rgb(38 54 63 / 7%); }
+.is-new-chat .composer-wrap { max-height: calc(100dvh - var(--topbar-height)); overflow-y: auto; padding: 0 28px 72px; background: transparent; }
+.is-new-chat .composer { --message-input-height: 188px; width: min(100%, 900px); margin: 0 auto; border: 1px solid var(--line-strong); border-radius: 14px; box-shadow: 0 12px 32px rgb(38 54 63 / 7%); }
 .is-new-chat .composer:focus-within { border-color: #a8bbc6; box-shadow: 0 12px 32px rgb(38 54 63 / 7%), 0 0 0 3px rgb(50 101 135 / 8%); }
 .launch-dock-header { display: grid; grid-template-columns: minmax(190px, 1fr) auto minmax(190px, 1fr) 44px; align-items: center; gap: 14px; min-height: 72px; padding: 10px 14px; border-bottom: 1px solid var(--line); }
 .launch-dock-model { min-width: 0; width: 100%; }
@@ -569,8 +569,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .launch-capabilities { display: flex; justify-content: flex-end; gap: 0; min-width: 0; color: #59656e; font-size: 13px; white-space: nowrap; }
 .launch-capabilities span + span::before { margin: 0 8px; color: #9ca4aa; content: "·"; }
 .launch-settings-button { justify-self: end; }
-.launch-prompt-row { min-height: 220px; padding: 16px 18px; }
-.launch-prompt-row textarea { width: 100%; min-height: 188px; max-height: 260px; font-size: 16px; line-height: 1.55; }
+.launch-prompt-row { padding: 16px 18px; }
+.launch-prompt-row textarea { width: 100%; font-size: 16px; line-height: 1.55; }
 .launch-dock-footer { display: grid; grid-template-columns: 44px minmax(170px, 1fr) minmax(170px, 1fr) minmax(150px, .8fr) auto; align-items: center; gap: 10px; min-height: 76px; padding: 11px 14px; border-top: 1px solid var(--line); background: #fbfcfb; }
 .launch-runtime-control { position: relative; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; min-width: 0; min-height: 48px; padding: 0 11px; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
 .launch-runtime-control > span { color: #59656e; font-size: 12px; font-weight: 620; }
@@ -597,7 +597,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .composer-row { display: flex; align-items: center; gap: 10px; min-height: 64px; padding: 8px 10px; }
 .attach-button { flex: 0 0 44px; border: 1px solid var(--line); background: #f7f8f8; }
 .attach-button[aria-disabled="true"] { color: #8b9297; background: #f1f2f2; }
-.composer textarea { flex: 1; min-width: 0; max-height: 112px; resize: none; overflow-y: auto; border: 0; outline: 0; background: transparent; font-size: 15px; line-height: 1.4; }
+.composer textarea { display: block; flex: 1; min-width: 0; height: var(--message-input-height, 48px); min-height: min(48px, 50vh); min-height: min(48px, 50dvh); max-height: 50vh; max-height: 50dvh; resize: vertical; overflow-y: auto; border: 0; outline: 0; background: transparent; font-size: 15px; line-height: 1.4; }
 .composer textarea::placeholder { color: #7b8590; }
 .stop-button, .send-button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-width: 82px; min-height: 42px; padding: 0 16px; border-radius: 6px; color: white; font-weight: 650; }
 .stop-button { border: 1px solid var(--stop-dark); background: var(--stop); }
@@ -736,8 +736,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   .launch-dock-modes { grid-column: 1 / -1; justify-self: stretch; }
   .launch-dock-modes label { flex: 1; justify-content: center; }
   .launch-capabilities { grid-column: 1 / -1; justify-content: center; min-height: 22px; }
-  .launch-prompt-row { min-height: 126px; padding: 12px; }
-  .is-new-chat .launch-prompt-row textarea { min-height: 102px; max-height: 150px; }
+  .launch-prompt-row { padding: 12px; }
+  .is-new-chat .composer { --message-input-height: 102px; }
   .launch-dock-footer { grid-template-columns: 44px minmax(0, 1fr); padding: 10px; }
   .launch-runtime-control { grid-column: 2; }
   .launch-context-summary { grid-column: 1 / -1; min-height: 26px; padding: 6px 0 0; border-top: 1px solid var(--line); border-left: 0; }
