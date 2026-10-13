@@ -21,6 +21,21 @@ test("falls back past messages without usable metadata", () => {
   assert.equal(latestContextTokens([]), 0);
 });
 
+test("uses current-turn context counts while an agent response is still streaming", () => {
+  const messages = [
+    { role: "assistant", metadata: { prompt_eval_count: 90, eval_count: 10 } },
+    { role: "user", content: "Continue the task" },
+    { role: "assistant", status: "streaming", metadata: {
+      prompt_eval_count: 1800, eval_count: 248,
+      agent_prompt_eval_count: 4200, agent_eval_count: 600, agent_turns: 3,
+    } },
+  ];
+  assert.deepEqual(contextUsage(messages, "4096"), { usedTokens: 2048, limit: 4096, percent: 50 });
+  assert.deepEqual(contextUsage(messages, "default"), { usedTokens: 2048, limit: null, percent: null });
+  messages.at(-1).status = "cancelled";
+  assert.equal(latestContextTokens(messages), 2048);
+});
+
 test("calculates and bounds explicit context usage", () => {
   const messages = [{ role: "assistant", metadata: { prompt_eval_count: 3072, eval_count: 1024 } }];
   assert.deepEqual(contextUsage(messages, "8192"), { usedTokens: 4096, limit: 8192, percent: 50 });

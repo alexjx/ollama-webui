@@ -16,8 +16,9 @@ import (
 )
 
 type scriptedChat struct {
-	turns    [][]ollama.ChatChunk
-	requests []ollama.ChatRequest
+	turns     [][]ollama.ChatChunk
+	requests  []ollama.ChatRequest
+	turnError error
 }
 
 type errorChat struct{ err error }
@@ -30,6 +31,9 @@ func (chat *scriptedChat) Chat(ctx context.Context, request ollama.ChatRequest, 
 	chat.requests = append(chat.requests, request)
 	turn := len(chat.requests) - 1
 	if turn >= len(chat.turns) {
+		if chat.turnError != nil {
+			return chat.turnError
+		}
 		return errors.New("unexpected chat turn")
 	}
 	for _, chunk := range chat.turns[turn] {
@@ -107,8 +111,23 @@ func TestRunnerExecutesToolAndContinuesUntilFinalAnswer(t *testing.T) {
 	if history[1].Thinking != "" {
 		t.Fatalf("thinking leaked into the next model turn: %#v", history[1])
 	}
-	if len(events) != 8 || events[0].Type != "turn.started" || events[1].Type != "thinking.delta" || events[3].Type != "tool.started" || events[4].Type != "tool.done" || events[5].Type != "turn.started" || events[6].Type != "thinking.delta" {
+	wantEvents := []string{"turn.started", "thinking.delta", "delta", "turn.done", "tool.started", "tool.done", "turn.started", "thinking.delta", "delta", "turn.done"}
+	if len(events) != len(wantEvents) {
 		t.Fatalf("unexpected events: %#v", events)
+	}
+	for index, want := range wantEvents {
+		if events[index].Type != want {
+			t.Fatalf("event %d: got %q, want %q", index, events[index].Type, want)
+		}
+	}
+	for index, event := range []Event{events[3], events[9]} {
+		turn := index + 1
+		if event.Turn != turn || event.Metadata["prompt_eval_count"] != turn*10 || event.Metadata["eval_count"] != turn*5 {
+			t.Fatalf("turn %d did not stream current context counts: %#v", turn, event)
+		}
+	}
+	if events[3].Metadata["agent_prompt_eval_count"] != 10 || events[9].Metadata["agent_prompt_eval_count"] != 30 {
+		t.Fatalf("turn snapshots lost independent aggregate metrics: %#v", events)
 	}
 	if result.Metadata["prompt_eval_count"] != 20 || result.Metadata["eval_count"] != 10 {
 		t.Fatalf("final-turn context metrics changed: %#v", result.Metadata)
@@ -129,6 +148,53 @@ func TestRunnerAnswersDirectlyWithoutUsingShell(t *testing.T) {
 	}
 	if len(shell.commands) != 0 || len(chat.requests) != 1 {
 		t.Fatalf("simple response unexpectedly used a tool: commands=%#v requests=%d", shell.commands, len(chat.requests))
+	}
+}
+
+func TestRunnerPreservesCompletedTurnMetricsWhenNextTurnIsInterrupted(t *testing.T) {
+	for _, interruption := range []error{context.Canceled, errors.New("model unavailable")} {
+		t.Run(interruption.Error(), func(t *testing.T) {
+			call := ollama.ToolCall{ID: "inspect", Function: ollama.ToolCallFunction{Name: "shell", Arguments: json.RawMessage(`{"command":"pwd"}`)}}
+			chat := &scriptedChat{turns: [][]ollama.ChatChunk{{{
+				Message: ollama.Message{ToolCalls: []ollama.ToolCall{call}}, Done: true, PromptEvalCount: 80, EvalCount: 20,
+			}}}, turnError: interruption}
+			completed := 0
+			result, err := (Runner{Chat: chat, Steps: &memorySteps{}, Shell: &recordingShell{}, MaxTurns: 2}).Run(
+				context.Background(), RunInput{Model: "agent", AssistantMessageID: 1}, func(event Event) error {
+					if event.Type == "turn.done" {
+						completed++
+					}
+					return nil
+				})
+			if !errors.Is(err, interruption) || completed != 1 || len(chat.requests) != 2 {
+				t.Fatalf("unexpected interrupted run: result=%#v error=%v completed=%d requests=%d", result, err, completed, len(chat.requests))
+			}
+			if result.Metadata["prompt_eval_count"] != 80 || result.Metadata["eval_count"] != 20 || result.Metadata["agent_turns"] != 1 {
+				t.Fatalf("lost the latest completed turn counts: %#v", result.Metadata)
+			}
+		})
+	}
+}
+
+func TestRunnerStopsBeforeToolsWhenTurnMetricsCannotBeDelivered(t *testing.T) {
+	call := ollama.ToolCall{ID: "inspect", Function: ollama.ToolCallFunction{Name: "shell", Arguments: json.RawMessage(`{"command":"pwd"}`)}}
+	chat := &scriptedChat{turns: [][]ollama.ChatChunk{{{
+		Message: ollama.Message{Content: "Checking", ToolCalls: []ollama.ToolCall{call}}, Done: true, PromptEvalCount: 80, EvalCount: 20,
+	}}}}
+	shell := &recordingShell{}
+	disconnected := errors.New("stream disconnected")
+	result, err := (Runner{Chat: chat, Steps: &memorySteps{}, Shell: shell, MaxTurns: 2}).Run(
+		context.Background(), RunInput{Model: "agent", AssistantMessageID: 1}, func(event Event) error {
+			if event.Type == "turn.done" {
+				return disconnected
+			}
+			return nil
+		})
+	if !errors.Is(err, disconnected) || len(shell.commands) != 0 || len(chat.requests) != 1 {
+		t.Fatalf("continued after delivery failed: error=%v commands=%#v requests=%d", err, shell.commands, len(chat.requests))
+	}
+	if result.Content != "Checking" || result.Metadata["prompt_eval_count"] != 80 || result.Metadata["eval_count"] != 20 {
+		t.Fatalf("lost completed content or counts on delivery failure: %#v", result)
 	}
 }
 

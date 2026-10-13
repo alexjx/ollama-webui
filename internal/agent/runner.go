@@ -112,11 +112,12 @@ type RunInput struct {
 }
 
 type Event struct {
-	Type    string           `json:"type"`
-	Content string           `json:"content,omitempty"`
-	Turn    int              `json:"turn,omitempty"`
-	Step    *store.AgentStep `json:"step,omitempty"`
-	Run     *store.AgentRun  `json:"run,omitempty"`
+	Type     string           `json:"type"`
+	Content  string           `json:"content,omitempty"`
+	Turn     int              `json:"turn,omitempty"`
+	Step     *store.AgentStep `json:"step,omitempty"`
+	Run      *store.AgentRun  `json:"run,omitempty"`
+	Metadata map[string]any   `json:"metadata,omitempty"`
 }
 
 type RunResult struct {
@@ -229,6 +230,9 @@ func (runner Runner) Run(ctx context.Context, input RunInput, emit func(Event) e
 		messages = append(messages, assistant)
 		metrics.add(final)
 		metadata = chunkMetadata(final, turn, metrics, input.Mode)
+		if err := emit(Event{Type: "turn.done", Turn: turn, Metadata: metadata}); err != nil {
+			return RunResult{Content: visible.String(), Thinking: thinking.String(), Metadata: metadata}, err
+		}
 		if !agentMode || len(assistant.ToolCalls) == 0 {
 			return RunResult{Content: visible.String(), Thinking: thinking.String(), Metadata: metadata}, nil
 		}

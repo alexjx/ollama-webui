@@ -39,9 +39,9 @@ func TestGenerateRunsShellAgentAndPersistsTrace(t *testing.T) {
 			mu.Unlock()
 			response.Header().Set("Content-Type", "application/x-ndjson")
 			if turn == 1 {
-				_, _ = response.Write([]byte(`{"message":{"role":"assistant","thinking":"I need the shell.","content":"I will verify it.","tool_calls":[{"id":"call_test","function":{"index":0,"name":"shell","arguments":{"command":"printf AGENT_OK"}}}]},"done":false}` + "\n" + `{"done":true,"done_reason":"stop"}` + "\n"))
+				_, _ = response.Write([]byte(`{"message":{"role":"assistant","thinking":"I need the shell.","content":"I will verify it.","tool_calls":[{"id":"call_test","function":{"index":0,"name":"shell","arguments":{"command":"printf AGENT_OK"}}}]},"done":false}` + "\n" + `{"done":true,"done_reason":"stop","prompt_eval_count":10,"eval_count":5}` + "\n"))
 			} else {
-				_, _ = response.Write([]byte(`{"message":{"role":"assistant","thinking":"The marker is present.","content":"Verified AGENT_OK."},"done":false}` + "\n" + `{"done":true,"done_reason":"stop"}` + "\n"))
+				_, _ = response.Write([]byte(`{"message":{"role":"assistant","thinking":"The marker is present.","content":"Verified AGENT_OK."},"done":false}` + "\n" + `{"done":true,"done_reason":"stop","prompt_eval_count":20,"eval_count":10}` + "\n"))
 			}
 		default:
 			http.NotFound(response, request)
@@ -79,19 +79,27 @@ func TestGenerateRunsShellAgentAndPersistsTrace(t *testing.T) {
 	}
 
 	eventTypes := make([]string, 0)
+	turnMetadata := make([]map[string]any, 0)
 	scanner := bufio.NewScanner(strings.NewReader(response.Body.String()))
 	for scanner.Scan() {
 		var event struct {
-			Type string `json:"type"`
+			Type     string         `json:"type"`
+			Metadata map[string]any `json:"metadata"`
 		}
 		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
 			t.Fatal(err)
 		}
 		eventTypes = append(eventTypes, event.Type)
+		if event.Type == "turn.done" {
+			turnMetadata = append(turnMetadata, event.Metadata)
+		}
 	}
 	joined := strings.Join(eventTypes, ",")
-	if joined != "started,turn.started,thinking.delta,delta,tool.started,tool.done,turn.started,thinking.delta,delta,done" {
+	if joined != "started,turn.started,thinking.delta,delta,turn.done,tool.started,tool.done,turn.started,thinking.delta,delta,turn.done,done" {
 		t.Fatalf("unexpected event flow: %s\n%s", joined, response.Body.String())
+	}
+	if len(turnMetadata) != 2 || turnMetadata[0]["prompt_eval_count"] != float64(10) || turnMetadata[0]["eval_count"] != float64(5) || turnMetadata[1]["prompt_eval_count"] != float64(20) || turnMetadata[1]["eval_count"] != float64(10) || turnMetadata[1]["agent_prompt_eval_count"] != float64(30) {
+		t.Fatalf("per-turn context metadata was not streamed: %#v", turnMetadata)
 	}
 	messages, err := database.Messages(context.Background(), conversation.ID)
 	if err != nil || len(messages) != 2 || messages[1].Status != "complete" || len(messages[1].AgentSteps) != 1 {
@@ -106,6 +114,9 @@ func TestGenerateRunsShellAgentAndPersistsTrace(t *testing.T) {
 	}
 	if messages[1].Thinking != "I need the shell.\n\nThe marker is present." {
 		t.Fatalf("unexpected persisted thinking: %q", messages[1].Thinking)
+	}
+	if messages[1].Metadata["prompt_eval_count"] != float64(20) || messages[1].Metadata["eval_count"] != float64(10) {
+		t.Fatalf("latest context metadata was not persisted: %#v", messages[1].Metadata)
 	}
 	if messages[0].Content != "  verify long input  " {
 		t.Fatalf("stored user input lost whitespace: %q", messages[0].Content)
@@ -213,7 +224,7 @@ func TestGenerateStreamsAndPersistsSuccessfulSubagentRun(t *testing.T) {
 	if err := scanner.Err(); err != nil {
 		t.Fatal(err)
 	}
-	wantEvents := "started,turn.started,tool.started,subagent.started,subagent.done,tool.done,turn.started,delta,done"
+	wantEvents := "started,turn.started,turn.done,tool.started,subagent.started,subagent.done,tool.done,turn.started,delta,turn.done,done"
 	if joined := strings.Join(eventTypes, ","); joined != wantEvents {
 		t.Fatalf("unexpected subagent event flow: %s\n%s", joined, response.Body.String())
 	}

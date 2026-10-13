@@ -838,7 +838,7 @@ function Composer({ streaming, onStop, onSend, empty, model, models, setModel, m
     ? `${contextUsedTokens.toLocaleString()} / ${contextLimit.toLocaleString()} tokens (${displayPercent}%)`
     : contextUsedTokens > 0
       ? `${contextUsedTokens.toLocaleString()} tokens · ${conversationMode === "agent" ? "managed limit" : "Ollama limit"}`
-      : `${conversationMode === "agent" ? "Managed" : "Ollama"} default · usage available after response`;
+      : `${conversationMode === "agent" ? "Managed" : "Ollama"} default · usage available after model turn`;
 
   const messageField = (
     <textarea
@@ -1651,6 +1651,9 @@ export function App() {
           } else if (event.type === "turn.started") {
             setMessages((current) => current.map((message, index) =>
               index === current.length - 1 ? { ...message, agent_phase: "thinking", agent_turn: event.turn } : message));
+          } else if (event.type === "turn.done") {
+            setMessages((current) => current.map((message, index) =>
+              index === current.length - 1 ? { ...message, metadata: event.metadata } : message));
           } else if (event.type === "thinking.delta") {
             setMessages((current) => current.map((message, index) =>
               index === current.length - 1
@@ -1699,8 +1702,10 @@ export function App() {
       if (cancelled && conversationId && generationRef.current === controller) {
         try {
           const payload = await getConversation(conversationId);
-          if (generationRef.current === controller) {
-            setMessages(payload.messages || []);
+          const refreshedMessages = payload.messages || [];
+          // Cancellation may still be saving; keep the local stopped response and its measured usage.
+          if (generationRef.current === controller && refreshedMessages.at(-1)?.status !== "streaming") {
+            setMessages(refreshedMessages);
           }
         } catch {
           // Keep the visible stopped turn if the refresh is unavailable.
