@@ -29,15 +29,20 @@ import (
 )
 
 type Server struct {
-	store    *store.Store
-	ollama   *ollama.Client
-	agent    agent.Runner
-	runtime  RuntimeSettings
-	webDir   string
-	logger   *slog.Logger
-	handler  http.Handler
-	activeMu sync.Mutex
-	active   map[int64]struct{}
+	store        *store.Store
+	ollama       *ollama.Client
+	agent        agent.Runner
+	runtime      RuntimeSettings
+	webDir       string
+	logger       *slog.Logger
+	handler      http.Handler
+	activeMu     sync.Mutex
+	active       map[int64]struct{}
+	titleMu      sync.Mutex
+	titleJobs    sync.WaitGroup
+	titleContext context.Context
+	titleCancel  context.CancelFunc
+	titlesClosed bool
 }
 
 type RuntimeSettings struct {
@@ -60,6 +65,7 @@ func New(database *store.Store, ollamaClient *ollama.Client, runner agent.Runner
 		runner.Attachments = database
 	}
 	server := &Server{store: database, ollama: ollamaClient, agent: runner, runtime: runtime, webDir: webDir, logger: logger, active: make(map[int64]struct{})}
+	server.titleContext, server.titleCancel = context.WithCancel(context.Background())
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", server.health)
 	mux.HandleFunc("GET /api/settings", server.settings)
@@ -196,7 +202,7 @@ func (s *Server) createConversation(response http.ResponseWriter, request *http.
 	}
 	thinkingMode := normalizedThinkingMode(input)
 	conversation, err := s.store.CreateConversation(request.Context(), store.CreateConversationParams{
-		Title: input.Title, Model: input.Model, Mode: input.Mode, SystemPrompt: input.SystemPrompt,
+		Title: input.Title, AutoTitle: true, Model: input.Model, Mode: input.Mode, SystemPrompt: input.SystemPrompt,
 		ContextWindow: input.ContextWindow, ThinkingMode: thinkingMode, Temperature: input.Temperature,
 	})
 	if err != nil {
@@ -540,6 +546,7 @@ func (s *Server) generate(response http.ResponseWriter, request *http.Request) {
 			status = "cancelled"
 		}
 		s.persistStreamResult(assistantMessage.ID, "", "", status, map[string]any{"context_compaction_failed": true})
+		s.disableFailedFirstTitle(conversation, history)
 		if status == "error" {
 			_ = writeEvent(response, flusher, map[string]any{"type": "error", "message": prepareErr.Error()})
 		}
@@ -579,13 +586,19 @@ func (s *Server) generate(response http.ResponseWriter, request *http.Request) {
 			status = "cancelled"
 		}
 		s.persistStreamResult(assistantMessage.ID, result.Content, result.Thinking, status, result.Metadata)
+		s.disableFailedFirstTitle(conversation, history)
 		if status == "error" {
 			_ = writeEvent(response, flusher, map[string]any{"type": "error", "message": err.Error()})
 		}
 		return
 	}
-	s.persistStreamResult(assistantMessage.ID, result.Content, result.Thinking, "complete", result.Metadata)
-	_ = writeEvent(response, flusher, map[string]any{"type": "done", "metadata": result.Metadata})
+	titlePending := false
+	if s.persistStreamResult(assistantMessage.ID, result.Content, result.Thinking, "complete", result.Metadata) &&
+		conversation.AutoTitlePending && len(history) == 2 {
+		s.startConversationTitle(conversation, history[0], result.Content)
+		titlePending = true
+	}
+	_ = writeEvent(response, flusher, map[string]any{"type": "done", "metadata": result.Metadata, "title_pending": titlePending})
 }
 
 func (s *Server) attachment(response http.ResponseWriter, request *http.Request) {
@@ -795,12 +808,14 @@ func withContextMetadata(metadata map[string]any, prepared agent.PreparedContext
 	return metadata
 }
 
-func (s *Server) persistStreamResult(messageID int64, content, thinking, status string, metadata map[string]any) {
+func (s *Server) persistStreamResult(messageID int64, content, thinking, status string, metadata map[string]any) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	if err := s.store.UpdateMessage(ctx, messageID, content, thinking, status, metadata); err != nil {
 		s.logger.Error("persist stream result", "error", err, "message_id", messageID)
+		return false
 	}
+	return true
 }
 
 func (s *Server) frontend(response http.ResponseWriter, request *http.Request) {

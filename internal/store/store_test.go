@@ -103,6 +103,12 @@ VALUES ('Existing agent', 'tools', 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:
 	if err != nil || conversation.Mode != "agent" || conversation.ThinkingMode == nil || *conversation.ThinkingMode != "on" {
 		t.Fatalf("legacy conversation did not migrate to agent mode: %#v, %v", conversation, err)
 	}
+	if conversation.AutoTitlePending {
+		t.Fatal("migration should preserve the existing conversation title")
+	}
+	if renamed, err := database.CompleteAutoTitle(ctx, conversation.ID, "Unexpected rename"); err != nil || renamed {
+		t.Fatalf("legacy conversation accepted automatic title: %v, %v", renamed, err)
+	}
 }
 
 func TestSearchTreatsWildcardsLiterally(t *testing.T) {

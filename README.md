@@ -7,6 +7,12 @@ continues until the task is complete. The Go service streams both modes to a
 responsive React interface and stores chats, model thinking, image and text attachments,
 and tool traces in SQLite.
 
+After the first turn finishes successfully in a new Chat or Agent conversation, the same
+model creates a short title from the first user input and its reply. Naming runs
+in the background and updates the browser tab and session history automatically.
+Manual renames take priority; existing sessions keep their names, and a naming
+failure keeps the initial title without affecting the saved reply.
+
 To protect short local-model context windows, Agent mode automatically replaces
 an immutable prefix of long conversations with a durable checkpoint summary while
 keeping recent messages verbatim. Original messages remain unchanged in SQLite.

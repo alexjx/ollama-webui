@@ -24,19 +24,20 @@ var (
 )
 
 type Conversation struct {
-	ID              int64      `json:"id"`
-	Title           string     `json:"title"`
-	Model           string     `json:"model"`
-	Mode            string     `json:"mode"`
-	SystemPrompt    string     `json:"system_prompt"`
-	ContextWindow   *int       `json:"context_window"`
-	ThinkingMode    *string    `json:"thinking_mode"`
-	ThinkingEnabled *bool      `json:"thinking_enabled"`
-	Temperature     *float64   `json:"temperature"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
-	LastMessageAt   *time.Time `json:"last_message_at"`
-	MessageCount    int        `json:"message_count"`
+	ID               int64      `json:"id"`
+	Title            string     `json:"title"`
+	AutoTitlePending bool       `json:"auto_title_pending"`
+	Model            string     `json:"model"`
+	Mode             string     `json:"mode"`
+	SystemPrompt     string     `json:"system_prompt"`
+	ContextWindow    *int       `json:"context_window"`
+	ThinkingMode     *string    `json:"thinking_mode"`
+	ThinkingEnabled  *bool      `json:"thinking_enabled"`
+	Temperature      *float64   `json:"temperature"`
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
+	LastMessageAt    *time.Time `json:"last_message_at"`
+	MessageCount     int        `json:"message_count"`
 }
 
 type Message struct {
@@ -250,6 +251,7 @@ PRAGMA busy_timeout = 5000;
 CREATE TABLE IF NOT EXISTS conversations (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   title TEXT NOT NULL DEFAULT 'New chat',
+  auto_title_pending INTEGER NOT NULL DEFAULT 0 CHECK (auto_title_pending IN (0, 1)),
   model TEXT NOT NULL,
   mode TEXT NOT NULL DEFAULT 'agent' CHECK (mode IN ('agent', 'chat')),
   system_prompt TEXT NOT NULL DEFAULT '',
@@ -386,6 +388,9 @@ WHERE thinking_mode IS NULL AND thinking_enabled IS NOT NULL`); err != nil {
 	if err := s.ensureColumn(ctx, "conversations", "mode", "TEXT NOT NULL DEFAULT 'agent' CHECK (mode IN ('agent', 'chat'))"); err != nil {
 		return err
 	}
+	if err := s.ensureColumn(ctx, "conversations", "auto_title_pending", "INTEGER NOT NULL DEFAULT 0 CHECK (auto_title_pending IN (0, 1))"); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -421,6 +426,7 @@ func (s *Store) ensureColumn(ctx context.Context, table, column, definition stri
 
 type CreateConversationParams struct {
 	Title           string
+	AutoTitle       bool
 	Model           string
 	Mode            string
 	SystemPrompt    string
@@ -451,9 +457,9 @@ func (s *Store) CreateConversation(ctx context.Context, params CreateConversatio
 	}
 	now := time.Now().UTC()
 	result, err := s.db.ExecContext(ctx, `
-INSERT INTO conversations (title, model, mode, system_prompt, context_window, thinking_enabled, thinking_mode, temperature, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, params.Title, params.Model, params.Mode, params.SystemPrompt,
-		params.ContextWindow, legacyThinkingEnabled, params.ThinkingMode, params.Temperature, formatTime(now), formatTime(now))
+INSERT INTO conversations (title, model, mode, system_prompt, context_window, thinking_enabled, thinking_mode, temperature, created_at, updated_at, auto_title_pending)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, params.Title, params.Model, params.Mode, params.SystemPrompt,
+		params.ContextWindow, legacyThinkingEnabled, params.ThinkingMode, params.Temperature, formatTime(now), formatTime(now), params.AutoTitle)
 	if err != nil {
 		return Conversation{}, fmt.Errorf("create conversation: %w", err)
 	}
@@ -467,7 +473,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, params.Title, params.Model, params.Mode,
 func (s *Store) GetConversation(ctx context.Context, id int64) (Conversation, error) {
 	row := s.db.QueryRowContext(ctx, `
 SELECT c.id, c.title, c.model, c.mode, c.system_prompt, c.context_window, c.thinking_enabled, c.thinking_mode, c.temperature,
-       c.created_at, c.updated_at, MAX(m.created_at), COUNT(m.id)
+       c.created_at, c.updated_at, MAX(m.created_at), COUNT(m.id), c.auto_title_pending
 FROM conversations c
 LEFT JOIN messages m ON m.conversation_id = c.id
 WHERE c.id = ?
@@ -483,7 +489,7 @@ func (s *Store) ListConversations(ctx context.Context, query string) ([]Conversa
 	pattern := "%" + escapeLike(strings.TrimSpace(query)) + "%"
 	rows, err := s.db.QueryContext(ctx, `
 SELECT c.id, c.title, c.model, c.mode, c.system_prompt, c.context_window, c.thinking_enabled, c.thinking_mode, c.temperature,
-       c.created_at, c.updated_at, MAX(m.created_at), COUNT(m.id)
+       c.created_at, c.updated_at, MAX(m.created_at), COUNT(m.id), c.auto_title_pending
 FROM conversations c
 LEFT JOIN messages m ON m.conversation_id = c.id
 WHERE ? = '%%' OR c.title LIKE ? ESCAPE '\' OR EXISTS (
@@ -509,12 +515,38 @@ LIMIT 200`, pattern, pattern, pattern)
 }
 
 func (s *Store) UpdateTitle(ctx context.Context, id int64, title string) error {
-	result, err := s.db.ExecContext(ctx, `UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?`,
+	result, err := s.db.ExecContext(ctx, `UPDATE conversations SET title = ?, auto_title_pending = 0, updated_at = ? WHERE id = ?`,
 		strings.TrimSpace(title), formatTime(time.Now().UTC()), id)
 	if err != nil {
 		return fmt.Errorf("update conversation: %w", err)
 	}
 	return requireAffected(result)
+}
+
+// CompleteAutoTitle applies a generated title once. Manual renames and deleted
+// conversations return false, so a late model response cannot overwrite them.
+func (s *Store) CompleteAutoTitle(ctx context.Context, id int64, title string) (bool, error) {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return false, errors.New("generated conversation title is empty")
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE conversations
+SET title = ?, auto_title_pending = 0, updated_at = ? WHERE id = ? AND auto_title_pending = 1`,
+		title, formatTime(time.Now().UTC()), id)
+	if err != nil {
+		return false, fmt.Errorf("complete automatic conversation title: %w", err)
+	}
+	count, err := result.RowsAffected()
+	return count > 0, err
+}
+
+// DisableAutoTitle ends an unsuccessful attempt without renaming the session.
+func (s *Store) DisableAutoTitle(ctx context.Context, id int64) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE conversations SET auto_title_pending = 0 WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("disable automatic conversation title: %w", err)
+	}
+	return nil
 }
 
 // UpdateModel preserves session history and resets model-specific thinking
@@ -588,7 +620,11 @@ func (s *Store) DeleteMessagesFrom(ctx context.Context, conversationID, messageI
 	if _, err := tx.ExecContext(ctx, `DELETE FROM messages WHERE id IN (`+tail+`)`, conversationID, createdAt, messageID); err != nil {
 		return nil, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE conversations SET updated_at = ? WHERE id = ?`, formatTime(time.Now().UTC()), conversationID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE conversations
+SET updated_at = ?, auto_title_pending = CASE
+  WHEN NOT EXISTS (SELECT 1 FROM messages WHERE conversation_id = ?) THEN 0
+  ELSE auto_title_pending END
+WHERE id = ?`, formatTime(time.Now().UTC()), conversationID, conversationID); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -1626,7 +1662,7 @@ func scanConversation(row rowScanner) (Conversation, error) {
 	var createdAt, updatedAt string
 	var lastMessageAt sql.NullString
 	if err := row.Scan(&conversation.ID, &conversation.Title, &conversation.Model, &conversation.Mode, &conversation.SystemPrompt,
-		&contextWindow, &thinkingEnabled, &thinkingMode, &temperature, &createdAt, &updatedAt, &lastMessageAt, &conversation.MessageCount); err != nil {
+		&contextWindow, &thinkingEnabled, &thinkingMode, &temperature, &createdAt, &updatedAt, &lastMessageAt, &conversation.MessageCount, &conversation.AutoTitlePending); err != nil {
 		return Conversation{}, err
 	}
 	var err error

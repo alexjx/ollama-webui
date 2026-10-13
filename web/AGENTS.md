@@ -27,6 +27,7 @@ When implementing from a selected generated mock, treat that image as the source
 - Present the product as a general-purpose agent. Shell and workspace access are optional capabilities, not the default task or the primary visual identity.
 - Agent progress uses observable phases rather than an invented percentage. Stream thinking in an expandable, visually secondary activity area above the final answer; retain chronological tool steps and clear finished/stopped states.
 - Conversation rename uses a focused modal with preselected current text, Save/Cancel/Escape behavior, inline errors, and focus restoration to the conversation menu.
+- After the first successful reply in a new Chat or Agent conversation, the same model summarizes the first user input and reply into a short title in the user's language. Generate it in the background, update the browser tab and session history automatically, preserve manual names and existing sessions, and keep naming failures independent of reply success.
 - Conversation deletion requires a focused confirmation modal with the affected title, initial focus on Cancel, explicit irreversible wording, inline errors, and one restrained danger-colored action.
 - Conversation rename and deletion belong to each history row and must work without opening that conversation first; inactive-row actions must not disturb the active chat.
 - Keep the active conversation's header menu as a shortcut for model settings, rename, and delete in addition to the row-level history menus.

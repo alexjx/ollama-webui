@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { contextUsage } from "./context-usage";
+import { mergeConversationTitles } from "./conversation-titles";
 import { cancelRunningSubagents, reduceSubagentEvent } from "./agent-events";
 import { formatDuration, formatRate, responseMetrics } from "./response-metrics";
 import { scrollToEnd } from "./scroll-position";
@@ -1002,6 +1003,8 @@ function Composer({ streaming, onStop, onSend, empty, model, models, setModel, m
 export function App() {
   const [activeId, setActiveId] = useState(null);
   const [activeTitle, setActiveTitle] = useState("");
+  const [titlePollIDs, setTitlePollIDs] = useState([]);
+  const titleVersionRef = useRef(0);
   const [model, setModel] = useState("");
   const [changingModel, setChangingModel] = useState(false);
   const [modelError, setModelError] = useState("");
@@ -1088,7 +1091,45 @@ export function App() {
   async function refreshConversations(search = query, signal) {
     const items = await listConversations(search, signal);
     setConversationItems(items);
+    const pending = items.filter((item) => item.auto_title_pending && item.message_count >= 2).map((item) => item.id);
+    if (pending.length) setTitlePollIDs((current) => [...new Set([...current, ...pending])]);
   }
+
+  const pendingTitleIDs = [...titlePollIDs].sort().join(",");
+
+  useEffect(() => {
+    if (!pendingTitleIDs) return;
+    const controller = new AbortController();
+    const pending = pendingTitleIDs.split(",").map(Number);
+    const titleVersion = titleVersionRef.current;
+    let timer;
+    let attempts = 0;
+    async function refreshTitles() {
+      try {
+        const items = await listConversations("", controller.signal);
+        if (!controller.signal.aborted) {
+          setConversationItems((current) => mergeConversationTitles(current, items));
+          setTitlePollIDs((current) => current.filter((id) => items.some((item) => item.id === id && item.auto_title_pending)));
+          const active = items.find((item) => item.id === activeId);
+          if (titleVersion === titleVersionRef.current && pending.includes(activeId) && active && !active.auto_title_pending) setActiveTitle(active.title);
+        }
+      } catch {
+        // A title refresh failure must not interrupt the conversation.
+      }
+      if (!controller.signal.aborted && ++attempts < 45) timer = window.setTimeout(refreshTitles, 1000);
+    }
+    timer = window.setTimeout(refreshTitles, 1000);
+    return () => { controller.abort(); window.clearTimeout(timer); };
+  }, [pendingTitleIDs, activeId]);
+
+  useEffect(() => {
+    const active = conversationItems.find((item) => item.id === activeId);
+    if (active) setActiveTitle(active.title);
+  }, [activeId, conversationItems]);
+
+  useEffect(() => {
+    document.title = activeId && activeTitle ? `${activeTitle} · Ollama WebUI` : "Ollama WebUI";
+  }, [activeId, activeTitle]);
 
   async function refreshModels(signal) {
     const requestId = ++modelListRequestRef.current;
@@ -1444,6 +1485,9 @@ export function App() {
       if (view !== conversationViewRef.current) return;
       setActiveId(payload.conversation.id);
       setActiveTitle(payload.conversation.title);
+      if (payload.conversation.auto_title_pending && payload.conversation.message_count >= 2) {
+        setTitlePollIDs((current) => [...new Set([...current, id])]);
+      }
       setModel(payload.conversation.model);
       setConversationMode(payload.conversation.mode || "agent");
       setSystemPrompt(payload.conversation.system_prompt || "");
@@ -1527,8 +1571,12 @@ export function App() {
     setRenameError("");
     try {
       const updated = await renameConversation(renameTarget.id, title);
-      if (renameTarget.id === activeId) setActiveTitle(updated.title);
-      setConversationItems((items) => items.map((item) => item.id === renameTarget.id ? { ...item, title: updated.title } : item));
+      if (renameTarget.id === activeId) {
+        titleVersionRef.current++;
+        setActiveTitle(updated.title);
+      }
+      setTitlePollIDs((current) => current.filter((id) => id !== renameTarget.id));
+      setConversationItems((items) => items.map((item) => item.id === renameTarget.id ? { ...item, title: updated.title, auto_title_pending: false, updated_at: updated.updated_at } : item));
       setRenameTarget(null);
       await refreshConversations(query);
     } catch (error) {
@@ -1710,6 +1758,7 @@ export function App() {
                 ? { ...message, subagent_runs: reduceSubagentEvent(message.subagent_runs, event) }
                 : message));
           } else if (event.type === "done") {
+            if (event.title_pending) setTitlePollIDs((current) => [...new Set([...current, conversationId])]);
             setMessages((current) => current.map((message, index) =>
               index === current.length - 1 ? { ...message, status: "complete", metadata: event.metadata, agent_phase: "finished", agent_turn: event.metadata?.agent_turns || message.agent_turn } : message));
           } else if (event.type === "error") {

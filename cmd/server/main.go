@@ -90,6 +90,7 @@ func main() {
 		SubagentConcurrency: cfg.SubagentConcurrency, SubagentContextTokens: cfg.SubagentContextTokens,
 		SubagentMaxTurns: cfg.SubagentMaxTurns, SubagentResultBytes: cfg.SubagentResultBytes,
 	}, cfg.WebDistDir, logger)
+	defer handler.Close()
 	server := &http.Server{
 		Addr:              cfg.ListenAddr,
 		Handler:           handler,
