@@ -4,6 +4,7 @@ import { mergeConversationTitles, newestConversationTitle } from "./conversation
 import { cancelRunningSubagents, reduceSubagentEvent } from "./agent-events";
 import { formatDuration, formatRate, responseMetrics } from "./response-metrics";
 import { scrollToEnd } from "./scroll-position";
+import { clampInputHeight } from "./input-resize";
 import { selectElementText } from "./select-text";
 import { fileFromLargePaste, isImageAttachment, readAttachment, splitAttachments, validateAttachmentFiles } from "./text-attachments";
 import MarkdownContent from "./markdown-content";
@@ -771,6 +772,8 @@ function Composer({ streaming, onStop, onSend, empty, model, models, setModel, m
   const [attachmentError, setAttachmentError] = useState("");
   const [draggingImages, setDraggingImages] = useState(false);
   const inputRef = useRef(null);
+  const resizeDragRef = useRef(null);
+  const [inputHeight, setInputHeight] = useState(null);
   const fileInputRef = useRef(null);
   const attachmentsRef = useRef([]);
   const attachmentQueueRef = useRef(Promise.resolve());
@@ -826,6 +829,34 @@ function Composer({ streaming, onStop, onSend, empty, model, models, setModel, m
     }
   }
 
+  function startInputResize(event) {
+    if (!event.isPrimary || event.button !== 0) return;
+    event.preventDefault();
+    event.currentTarget.focus({ preventScroll: true });
+    event.currentTarget.setPointerCapture(event.pointerId);
+    resizeDragRef.current = { pointerId: event.pointerId, y: event.clientY, height: inputRef.current.getBoundingClientRect().height };
+  }
+
+  function moveInputResize(event) {
+    const drag = resizeDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    setInputHeight(clampInputHeight(drag.height + drag.y - event.clientY, window.innerHeight));
+  }
+
+  function finishInputResize(event) {
+    if (resizeDragRef.current?.pointerId !== event.pointerId) return;
+    resizeDragRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+  }
+
+  function resizeInputWithKeyboard(event) {
+    const directions = { ArrowUp: 24, ArrowDown: -24 };
+    if (!(event.key in directions) && event.key !== "Home" && event.key !== "End") return;
+    event.preventDefault();
+    const height = event.key === "Home" ? 48 : event.key === "End" ? window.innerHeight / 2 : inputRef.current.getBoundingClientRect().height + directions[event.key];
+    setInputHeight(clampInputHeight(height, window.innerHeight));
+  }
+
   const contextLimit = contextWindow === "default" ? null : Number(contextWindow);
   const usedPercent = contextLimit ? Math.min(100, contextUsedTokens / contextLimit * 100) : null;
   const displayPercent = usedPercent == null ? null : usedPercent > 0 && usedPercent < 1 ? "<1" : Math.round(usedPercent).toString();
@@ -838,6 +869,8 @@ function Composer({ streaming, onStop, onSend, empty, model, models, setModel, m
   const messageField = (
     <textarea
       ref={inputRef}
+      id="message-input"
+      style={inputHeight == null ? undefined : { height: `${inputHeight}px` }}
       value={message}
       rows={empty ? "6" : "1"}
       onChange={(event) => setMessage(event.target.value)}
@@ -960,6 +993,19 @@ function Composer({ streaming, onStop, onSend, empty, model, models, setModel, m
             event.target.value = "";
           }}
         />
+        <button
+          type="button"
+          className="input-resize-handle"
+          aria-label="Resize message input"
+          aria-controls="message-input"
+          title="Drag up to enlarge or down to shrink. Use Up/Down arrows, Home, or End when focused."
+          onPointerDown={startInputResize}
+          onPointerMove={moveInputResize}
+          onPointerUp={finishInputResize}
+          onPointerCancel={finishInputResize}
+          onLostPointerCapture={() => { resizeDragRef.current = null; }}
+          onKeyDown={resizeInputWithKeyboard}
+        ><span className="input-resize-grip" aria-hidden="true" />Drag to resize input</button>
         {empty ? (
           <>
             <div className="launch-prompt-row">{messageField}</div>

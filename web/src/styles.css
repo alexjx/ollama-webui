@@ -599,6 +599,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .attach-button[aria-disabled="true"] { color: #8b9297; background: #f1f2f2; }
 .composer textarea { display: block; flex: 1; min-width: 0; height: var(--message-input-height, 48px); min-height: min(48px, 50vh); min-height: min(48px, 50dvh); max-height: 50vh; max-height: 50dvh; resize: vertical; overflow-y: auto; border: 0; outline: 0; background: transparent; font-size: 15px; line-height: 1.4; }
 .composer textarea::placeholder { color: #7b8590; }
+.input-resize-handle { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; min-height: 36px; padding: 6px 12px; border-block: 1px solid var(--line); color: #4d6576; background: #f1f5f7; font-size: 12px; font-weight: 600; cursor: ns-resize; touch-action: none; user-select: none; }
+.input-resize-handle:hover, .input-resize-handle:active { color: #285c7d; background: #e5eef3; }
+.input-resize-handle:focus-visible { outline-offset: -3px; }
+.input-resize-grip { width: 24px; height: 5px; border-block: 1px solid currentColor; }
 .stop-button, .send-button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-width: 82px; min-height: 42px; padding: 0 16px; border-radius: 6px; color: white; font-weight: 650; }
 .stop-button { border: 1px solid var(--stop-dark); background: var(--stop); }
 .stop-button:hover { background: var(--stop-dark); }
@@ -613,6 +617,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .context-feedback { margin: 0; padding: 8px 15px; border-top: 1px solid var(--line); color: #526873; background: #f4f8fa; font-size: 12px; line-height: 1.5; }
 .context-feedback.error { color: #8b442a; }
 @media (max-width: 760px) {
+  .input-resize-handle { min-height: 44px; }
   .composer .context-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 0 10px; padding-top: 7px; }
   .context-row > span { grid-column: 1 / -1; white-space: normal; }
   .context-track { width: 100%; }
