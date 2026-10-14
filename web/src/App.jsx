@@ -1022,7 +1022,7 @@ function Composer({ streaming, onStop, onSend, empty, model, models, setModel, m
           onPointerCancel={finishInputResize}
           onLostPointerCapture={() => { resizeDragRef.current = null; }}
           onKeyDown={resizeInputWithKeyboard}
-        ><span className="input-resize-grip" aria-hidden="true" />Drag to resize input</button>
+        ><span className="input-resize-grip" aria-hidden="true" /></button>
         {empty ? (
           <>
             <div className="launch-prompt-row">{messageField}</div>
