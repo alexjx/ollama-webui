@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { contextUsage } from "./context-usage";
-import { mergeConversationTitles, newestConversationTitle } from "./conversation-titles";
+import { applyKnownConversationTitles, mergeConversationTitles, newestConversationTitle } from "./conversation-titles";
 import { cancelRunningSubagents, reduceSubagentEvent } from "./agent-events";
 import { formatDuration, formatRate, responseMetrics } from "./response-metrics";
 import { scrollToEnd } from "./scroll-position";
@@ -202,7 +202,7 @@ function ConversationSidebar({ activeId, conversations, query, streaming, titleR
                             onGenerateTitle(item);
                             trigger?.focus();
                           }}
-                        ><ArrowCounterClockwise size={17} />Generate title from latest turn</button>
+                        ><ArrowCounterClockwise size={17} />Generate title</button>
                         <button
                           className="danger-menu-item"
                           role="menuitem"
@@ -1174,8 +1174,12 @@ export function App() {
   }, [activeId, scrollRequest]);
 
   async function refreshConversations(search = query, signal) {
-    const items = await listConversations(search, signal);
+    const refreshed = await listConversations(search, signal);
     if (signal?.aborted || search !== queryRef.current) return;
+    for (const item of refreshed) {
+      if (!item.auto_title_pending) recentTitlesRef.current.set(item.id, newestConversationTitle(item, recentTitlesRef.current.get(item.id)));
+    }
+    const items = applyKnownConversationTitles(refreshed, recentTitlesRef.current);
     setConversationItems(items);
     const pending = items.filter((item) => item.auto_title_pending && item.message_count >= 2).map((item) => item.id);
     if (pending.length) setTitlePollIDs((current) => [...new Set([...current, ...pending])]);
@@ -1189,7 +1193,6 @@ export function App() {
     const pending = pendingTitleIDs.split(",").map(Number);
     const titleVersion = titleVersionRef.current;
     let timer;
-    let attempts = 0;
     async function refreshTitles() {
       try {
         const items = await listConversations("", controller.signal);
@@ -1205,7 +1208,9 @@ export function App() {
       } catch {
         // A title refresh failure must not interrupt the conversation.
       }
-      if (!controller.signal.aborted && ++attempts < 45) timer = window.setTimeout(refreshTitles, 1000);
+      // Watch until the server resolves the pending titles. Slow model calls
+      // and first answers must not exhaust an arbitrary polling allowance.
+      if (!controller.signal.aborted) timer = window.setTimeout(refreshTitles, 1000);
     }
     timer = window.setTimeout(refreshTitles, 1000);
     return () => { controller.abort(); window.clearTimeout(timer); };

@@ -7,7 +7,18 @@ function titleTime(value = "") {
 }
 
 export function newestConversationTitle(conversation, recent) {
+  if (recent && conversation.auto_title_pending !== recent.auto_title_pending) {
+    if (conversation.auto_title_pending === true && recent.auto_title_pending === false) return recent;
+    if (conversation.auto_title_pending === false && recent.auto_title_pending === true) return conversation;
+  }
   return recent && titleTime(recent.updated_at) >= titleTime(conversation.updated_at) ? recent : conversation;
+}
+
+export function applyKnownConversationTitles(items, known) {
+  return items.map((item) => {
+    const latest = newestConversationTitle(item, known.get(item.id));
+    return latest === item ? item : { ...item, title: latest.title, auto_title_pending: latest.auto_title_pending };
+  });
 }
 
 export function mergeConversationTitles(items, refreshed) {

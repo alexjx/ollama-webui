@@ -21,12 +21,14 @@ to copy text on HTTP deployments such as `http://ollama-webui.local`. These acti
 fall back when the modern Clipboard API is unavailable. **Select** actions remain
 available for native Ctrl+C/Cmd+C copying when browser copying is denied.
 
-Use **Generate title from latest turn** in any session's history-row menu to
+Use **Generate title** in any session's history-row menu to
 replace its name using the latest completed user question and final answer.
 This works in both modes without opening the session. New Agent replies keep an
 exact final-answer boundary so progress narration is excluded; older saved
 replies ask the title model to focus on the final answer. Failed or stopped turns
 are skipped, and naming errors keep the current name and saved conversation.
+Automatic names keep updating in the browser until generation finishes; slow
+model calls and older list responses do not leave the provisional name behind.
 
 To protect short local-model context windows, Agent mode automatically replaces
 an immutable prefix of long conversations with a durable checkpoint summary while
