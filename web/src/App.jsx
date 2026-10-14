@@ -9,6 +9,8 @@ import { selectElementText } from "./select-text";
 import { fileFromLargePaste, isImageAttachment, readAttachment, splitAttachments, validateAttachmentFiles } from "./text-attachments";
 import MarkdownContent from "./markdown-content";
 import CopyButton from "./copy-button";
+import ThinkingLabel from "./thinking-label";
+import { applyThinkingTiming, finishThinkingTiming, thinkingDuration } from "./thinking-duration";
 import { thinkingModeForRequest, thinkingModeFromConversation } from "./thinking-mode";
 import {
   clearConversations as clearAllConversations,
@@ -511,12 +513,13 @@ function AgentActivity({ message, mode }) {
   const phase = message.agent_phase || (message.status === "complete" ? "finished" : message.status === "cancelled" ? "stopped" : message.status === "error" ? "error" : "thinking");
   const turn = mode === "agent" ? message.agent_turn || message.metadata?.agent_turns : null;
   const active = message.status === "streaming";
+  const liveThinking = thinkingDuration(message)?.live ?? (active && phase === "thinking");
 
   useEffect(() => {
-    if (active && phase === "thinking" && thinkingRef.current) {
+    if (liveThinking && thinkingRef.current) {
       thinkingRef.current.scrollTop = thinkingRef.current.scrollHeight;
     }
-  }, [active, phase, message.thinking]);
+  }, [liveThinking, message.thinking]);
 
   if (!hasActivity) return null;
 
@@ -532,13 +535,13 @@ function AgentActivity({ message, mode }) {
       </div>
 
       {message.thinking && (
-        <details className="thinking-step" open={active && phase === "thinking"}>
+        <details className="thinking-step" open={liveThinking}>
           <summary>
             <span className="agent-step-icon"><Brain size={17} /></span>
-            <span>Model thinking</span>
-            <span className="agent-step-status">{active && phase === "thinking" ? "Live" : "View"}</span>
+            <ThinkingLabel message={message} />
+            <span className="agent-step-status">{liveThinking ? "Live" : "View"}</span>
           </summary>
-          <div className="thinking-content" ref={thinkingRef}>{message.thinking}{active && phase === "thinking" && <span className="stream-cursor" aria-hidden="true" />}</div>
+          <div className="thinking-content" ref={thinkingRef}>{message.thinking}{liveThinking && <span className="stream-cursor" aria-hidden="true" />}</div>
         </details>
       )}
 
@@ -1855,7 +1858,10 @@ export function App() {
               index === current.length - 1 ? { ...message, agent_phase: "thinking", agent_turn: event.turn } : message));
           } else if (event.type === "turn.done") {
             setMessages((current) => current.map((message, index) =>
-              index === current.length - 1 ? { ...message, metadata: event.metadata } : message));
+              index === current.length - 1 ? finishThinkingTiming(message, event.metadata) : message));
+          } else if (event.type === "thinking.timing") {
+            setMessages((current) => current.map((message, index) =>
+              index === current.length - 1 ? applyThinkingTiming(message, event.metadata) : message));
           } else if (event.type === "thinking.delta") {
             setMessages((current) => current.map((message, index) =>
               index === current.length - 1
@@ -1882,7 +1888,7 @@ export function App() {
           } else if (event.type === "done") {
             if (event.title_pending) setTitlePollIDs((current) => [...new Set([...current, conversationId])]);
             setMessages((current) => current.map((message, index) =>
-              index === current.length - 1 ? { ...message, status: "complete", metadata: event.metadata, agent_phase: "finished", agent_turn: event.metadata?.agent_turns || message.agent_turn } : message));
+              index === current.length - 1 ? { ...finishThinkingTiming(message, event.metadata), status: "complete", agent_phase: "finished", agent_turn: event.metadata?.agent_turns || message.agent_turn } : message));
           } else if (event.type === "error") {
             throw new Error(event.message);
           }
@@ -1895,7 +1901,7 @@ export function App() {
         : current.map((message, index) =>
         index === current.length - 1 && message.role === "assistant"
           ? {
-              ...message,
+              ...finishThinkingTiming(message),
               status: cancelled ? "cancelled" : "error",
               agent_phase: cancelled ? "stopped" : "error",
               agent_steps: (message.agent_steps || []).map((step) =>

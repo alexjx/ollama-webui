@@ -7,6 +7,12 @@ continues until the task is complete. The Go service streams both modes to a
 responsive React interface and stores chats, model thinking, image and text attachments,
 and tool traces in SQLite.
 
+Thinking sections show a live duration and retain **Thought for …** after the
+reply finishes or stops. Time is measured from the first thinking output to the
+answer or end of each reasoning phase, summed across the reply's model turns;
+model loading, prompt processing and tool execution are excluded. Older saved
+replies without a measured duration keep their existing thinking label.
+
 After the first turn finishes successfully in a new Chat or Agent conversation, the same
 model creates a short title from the first user input and its reply. Naming runs
 in the background and updates the browser tab and session history automatically.

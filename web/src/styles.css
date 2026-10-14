@@ -489,6 +489,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .thinking-step summary::-webkit-details-marker,
 .agent-step summary::-webkit-details-marker { display: none; }
 .thinking-step summary > span:nth-child(2) { color: #46525a; font-size: 12.5px; font-weight: 620; }
+.thinking-duration-label { font-variant-numeric: tabular-nums; }
 .thinking-content {
   max-height: 300px;
   padding: 10px 12px;

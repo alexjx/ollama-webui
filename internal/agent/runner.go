@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"strings"
 	"time"
 
@@ -144,7 +145,7 @@ func (metrics *runMetrics) add(chunk ollama.ChatChunk) {
 	metrics.loadDuration += chunk.LoadDuration
 }
 
-func (runner Runner) Run(ctx context.Context, input RunInput, emit func(Event) error) (RunResult, error) {
+func (runner Runner) Run(ctx context.Context, input RunInput, emit func(Event) error) (result RunResult, runErr error) {
 	agentMode := input.Mode != "chat"
 	if agentMode && runner.MaxTurns <= 0 {
 		return RunResult{}, errors.New("agent max turns must be positive")
@@ -155,6 +156,17 @@ func (runner Runner) Run(ctx context.Context, input RunInput, emit func(Event) e
 	var thinking strings.Builder
 	var metadata map[string]any
 	var metrics runMetrics
+	var timing thinkingTimer
+	// Also retain timing when streaming, tools, or cancellation end the run early.
+	defer func() {
+		if timing.observed {
+			result.Metadata = maps.Clone(result.Metadata)
+			if result.Metadata == nil {
+				result.Metadata = make(map[string]any)
+			}
+			result.Metadata["thinking_duration_ms"] = timing.duration.Milliseconds()
+		}
+	}()
 
 	maxTurns := 1
 	tools := []ollama.Tool(nil)
@@ -179,6 +191,12 @@ func (runner Runner) Run(ctx context.Context, input RunInput, emit func(Event) e
 		}
 	}
 	for turn := 1; turn <= maxTurns; turn++ {
+		stopThinking := func() error {
+			if timing.stop(time.Now()) {
+				return emit(Event{Type: "thinking.timing", Turn: turn, Metadata: timing.metadata()})
+			}
+			return nil
+		}
 		if err := emit(Event{Type: "turn.started", Turn: turn}); err != nil {
 			return RunResult{Content: visible.String(), Thinking: thinking.String(), Metadata: metadata}, err
 		}
@@ -191,6 +209,11 @@ func (runner Runner) Run(ctx context.Context, input RunInput, emit func(Event) e
 			Model: input.Model, Messages: messages, Tools: tools, Options: input.Options, Think: input.Think,
 		}, func(chunk ollama.ChatChunk) error {
 			if chunk.Message.Thinking != "" {
+				if timing.start(time.Now()) {
+					if err := emit(Event{Type: "thinking.timing", Turn: turn, Metadata: timing.metadata()}); err != nil {
+						return err
+					}
+				}
 				assistant.Thinking += chunk.Message.Thinking
 				prefix := ""
 				if !turnStartedThinking && thinking.Len() > 0 {
@@ -200,6 +223,11 @@ func (runner Runner) Run(ctx context.Context, input RunInput, emit func(Event) e
 				turnStartedThinking = true
 				thinking.WriteString(chunk.Message.Thinking)
 				if err := emit(Event{Type: "thinking.delta", Content: prefix + chunk.Message.Thinking, Turn: turn}); err != nil {
+					return err
+				}
+			}
+			if chunk.Message.Content != "" || len(chunk.Message.ToolCalls) > 0 || chunk.Done {
+				if err := stopThinking(); err != nil {
 					return err
 				}
 			}
@@ -225,6 +253,10 @@ func (runner Runner) Run(ctx context.Context, input RunInput, emit func(Event) e
 			}
 			return nil
 		})
+		// A failed or interrupted stream may never send a final chunk.
+		if timingErr := stopThinking(); err == nil {
+			err = timingErr
+		}
 		if err != nil {
 			return RunResult{Content: visible.String(), Thinking: thinking.String(), Metadata: metadata}, err
 		}
@@ -233,6 +265,9 @@ func (runner Runner) Run(ctx context.Context, input RunInput, emit func(Event) e
 		messages = append(messages, assistant)
 		metrics.add(final)
 		metadata = chunkMetadata(final, turn, metrics, input.Mode)
+		if timing.observed {
+			metadata["thinking_duration_ms"] = timing.duration.Milliseconds()
+		}
 		metadata["response_model"] = input.Model
 		if !agentMode || len(assistant.ToolCalls) == 0 {
 			metadata["final_answer_start"] = finalAnswerStart

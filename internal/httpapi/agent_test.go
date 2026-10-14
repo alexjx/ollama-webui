@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -83,6 +84,7 @@ func TestGenerateRunsShellAgentAndPersistsTrace(t *testing.T) {
 
 	eventTypes := make([]string, 0)
 	turnMetadata := make([]map[string]any, 0)
+	timingMetadata := make([]map[string]any, 0)
 	scanner := bufio.NewScanner(strings.NewReader(response.Body.String()))
 	for scanner.Scan() {
 		var event struct {
@@ -96,9 +98,12 @@ func TestGenerateRunsShellAgentAndPersistsTrace(t *testing.T) {
 		if event.Type == "turn.done" {
 			turnMetadata = append(turnMetadata, event.Metadata)
 		}
+		if event.Type == "thinking.timing" {
+			timingMetadata = append(timingMetadata, event.Metadata)
+		}
 	}
 	joined := strings.Join(eventTypes, ",")
-	if joined != "started,turn.started,thinking.delta,delta,turn.done,tool.started,tool.done,turn.started,thinking.delta,delta,turn.done,done" {
+	if joined != "started,turn.started,thinking.timing,thinking.delta,thinking.timing,delta,turn.done,tool.started,tool.done,turn.started,thinking.timing,thinking.delta,thinking.timing,delta,turn.done,done" {
 		t.Fatalf("unexpected event flow: %s\n%s", joined, response.Body.String())
 	}
 	if len(turnMetadata) != 2 || turnMetadata[0]["prompt_eval_count"] != float64(10) || turnMetadata[0]["eval_count"] != float64(5) || turnMetadata[1]["prompt_eval_count"] != float64(20) || turnMetadata[1]["eval_count"] != float64(10) || turnMetadata[1]["agent_prompt_eval_count"] != float64(30) {
@@ -120,6 +125,12 @@ func TestGenerateRunsShellAgentAndPersistsTrace(t *testing.T) {
 	}
 	if messages[1].Metadata["prompt_eval_count"] != float64(20) || messages[1].Metadata["eval_count"] != float64(10) {
 		t.Fatalf("latest context metadata was not persisted: %#v", messages[1].Metadata)
+	}
+	if len(timingMetadata) != 4 || timingMetadata[0]["thinking_active"] != true || timingMetadata[1]["thinking_active"] != false || timingMetadata[2]["thinking_active"] != true || timingMetadata[3]["thinking_active"] != false {
+		t.Fatalf("thinking phase timing was not streamed: %#v", timingMetadata)
+	}
+	if messages[1].Metadata["thinking_duration_ms"] != timingMetadata[3]["thinking_duration_ms"] {
+		t.Fatalf("final thinking duration was not persisted: %#v", messages[1].Metadata)
 	}
 	if messages[0].Content != inlineInput {
 		t.Fatalf("stored user input lost whitespace: %q", messages[0].Content)
@@ -419,6 +430,83 @@ func TestGenerateChatModeSupportsNonToolModelWithoutAgentPrompt(t *testing.T) {
 	stored, err := database.Messages(context.Background(), conversation.ID)
 	if err != nil || len(stored) != 2 || stored[1].Content != "chat reply" || stored[1].Metadata["run_mode"] != "chat" {
 		t.Fatalf("chat result was not persisted: %#v, %v", stored, err)
+	}
+	if _, exists := stored[1].Metadata["thinking_duration_ms"]; exists {
+		t.Fatalf("non-thinking reply acquired a fabricated duration: %#v", stored[1].Metadata)
+	}
+}
+
+type thinkingResultChat struct{ interruption error }
+
+func (chat thinkingResultChat) Chat(_ context.Context, _ ollama.ChatRequest, emit func(ollama.ChatChunk) error) error {
+	if err := emit(ollama.ChatChunk{Message: ollama.Message{Thinking: "Reasoning text"}}); err != nil {
+		return err
+	}
+	if chat.interruption != nil {
+		return chat.interruption
+	}
+	return emit(ollama.ChatChunk{Message: ollama.Message{Content: "Answer"}, Done: true})
+}
+
+func TestGeneratePersistsThinkingDurationOnCompleteErrorAndCancellation(t *testing.T) {
+	for _, testCase := range []struct {
+		name         string
+		mode         string
+		interruption error
+		status       string
+	}{
+		{"chat complete", "chat", nil, "complete"},
+		{"chat error", "chat", errors.New("stream failed"), "error"},
+		{"chat cancelled", "chat", context.Canceled, "cancelled"},
+		{"agent cancelled", "agent", context.Canceled, "cancelled"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				_, _ = response.Write([]byte(`{"models":[{"name":"thinker","capabilities":["completion","tools","thinking"]}]}`))
+			}))
+			defer upstream.Close()
+			database, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer database.Close()
+			conversation, err := database.CreateConversation(context.Background(), store.CreateConversationParams{
+				Title: "Thinking", Model: "thinker", Mode: testCase.mode,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			client := ollama.NewClient(upstream.URL)
+			api := New(database, client, agent.Runner{Chat: thinkingResultChat{testCase.interruption}, MaxTurns: 2}, RuntimeSettings{}, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+			defer api.Close()
+			request := httptest.NewRequest(http.MethodPost, "/api/conversations/1/messages", strings.NewReader(`{"content":"Question"}`))
+			response := httptest.NewRecorder()
+			api.ServeHTTP(response, request)
+			if response.Code != http.StatusOK {
+				t.Fatalf("unexpected response: %d %s", response.Code, response.Body.String())
+			}
+			messages, err := database.Messages(context.Background(), conversation.ID)
+			if err != nil || len(messages) != 2 || messages[1].Status != testCase.status || messages[1].Thinking != "Reasoning text" {
+				t.Fatalf("thinking response not persisted: %#v, %v", messages, err)
+			}
+			var stoppedMetadata map[string]any
+			scanner := bufio.NewScanner(strings.NewReader(response.Body.String()))
+			for scanner.Scan() {
+				var event struct {
+					Type     string         `json:"type"`
+					Metadata map[string]any `json:"metadata"`
+				}
+				if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
+					t.Fatal(err)
+				}
+				if event.Type == "thinking.timing" && event.Metadata["thinking_active"] == false {
+					stoppedMetadata = event.Metadata
+				}
+			}
+			if stoppedMetadata == nil || messages[1].Metadata["thinking_duration_ms"] != stoppedMetadata["thinking_duration_ms"] {
+				t.Fatalf("stored thinking duration differs from stream: stored=%#v stream=%#v", messages[1].Metadata, stoppedMetadata)
+			}
+		})
 	}
 }
 
