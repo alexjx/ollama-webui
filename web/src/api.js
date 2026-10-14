@@ -32,6 +32,24 @@ export function getSettings(signal) {
   return request("/api/settings", { signal });
 }
 
+export function saveWebSearchSettings(input, signal) {
+  return request("/api/settings/web-search", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+    signal,
+  });
+}
+
+export function testWebSearchSettings(signal) {
+  return request("/api/settings/web-search/test", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+    signal,
+  });
+}
+
 export async function listConversations(query = "", signal) {
   const params = new URLSearchParams();
   if (query.trim()) params.set("q", query.trim());
@@ -82,6 +100,14 @@ export function deleteConversation(id, signal) {
   return request(`/api/conversations/${id}`, {
     method: "DELETE",
     signal,
+  });
+}
+
+export function changeConversationWebSearch(id, enabled) {
+  return request(`/api/conversations/${id}/web-search`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled: Boolean(enabled) }),
   });
 }
 

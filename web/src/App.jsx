@@ -10,12 +10,17 @@ import { fileFromLargePaste, isImageAttachment, readAttachment, splitAttachments
 import MarkdownContent from "./markdown-content";
 import CopyButton from "./copy-button";
 import ThinkingLabel from "./thinking-label";
+import TavilySettings from "./tavily-settings";
+import WebSearchResults from "./web-search-results";
+import { createSettingsRequestGuard } from "./web-search";
+import ConversationWebSearch, { conversationWebSearchEnabled } from "./conversation-web-search";
 import { applyThinkingTiming, finishThinkingTiming, thinkingDuration } from "./thinking-duration";
 import { thinkingModeForRequest, thinkingModeFromConversation } from "./thinking-mode";
 import { CONTEXT_WINDOW_VALUES, DEFAULT_MODEL_SETTINGS, createModelPreferences, modelSettingsForCapabilities, normalizeModelSettings } from "./model-preferences";
 import {
   clearConversations as clearAllConversations,
   changeConversationModel,
+  changeConversationWebSearch,
   compactConversationContext,
   createConversation,
   deleteConversation,
@@ -27,7 +32,9 @@ import {
   listConversations,
   listModels,
   renameConversation,
+  saveWebSearchSettings,
   streamMessage,
+  testWebSearchSettings,
 } from "./api";
 import {
   ArrowCounterClockwise,
@@ -263,6 +270,12 @@ function ConversationSettings({
   temperature,
   setTemperature,
   onResetDefaults,
+  webSearchEnabled,
+  onChangeWebSearch,
+  webSearchSaving,
+  webSearchError,
+  webSearchProvider,
+  webSearchProviderError,
 }) {
   return (
     <aside className="settings-panel" aria-label="Conversation settings">
@@ -309,6 +322,8 @@ function ConversationSettings({
             <p>This model uses Chat because it does not advertise tool support.</p>
           )}
         </section>
+
+        <ConversationWebSearch mode={conversationMode} enabled={webSearchEnabled} onChange={onChangeWebSearch} disabled={modelDisabled} saving={webSearchSaving} error={webSearchError} provider={webSearchProvider} providerError={webSearchProviderError} />
 
         <section className="settings-section context-section">
           <label htmlFor="context-window">Context window <Info size={17} aria-label="Context window help" /></label>
@@ -415,7 +430,7 @@ function formatBytes(value) {
   return `${amount >= 10 || power === 0 ? amount.toFixed(0) : amount.toFixed(1)} ${units[power]}`;
 }
 
-function SystemSettings({ connected, modelCount, runtime, loading, error, streaming, onRefresh, onClose, onRequestClear, closeRef }) {
+function SystemSettings({ open, connected, modelCount, runtime, loading, error, streaming, onRefresh, onSaveWebSearch, onTestWebSearch, onClose, onRequestClear, closeRef }) {
   const storage = runtime?.storage;
   const agent = runtime?.agent;
   return (
@@ -427,7 +442,7 @@ function SystemSettings({ connected, modelCount, runtime, loading, error, stream
 
       <div className="settings-scroll">
         <section className="settings-section system-status-section">
-          <div className="system-section-heading"><div><h3>Runtime</h3><p>Current service and Agent boundaries.</p></div><button className="text-action" type="button" onClick={onRefresh} disabled={loading}>{loading ? "Refreshing…" : "Refresh"}</button></div>
+          <div className="system-section-heading"><div><h3>Runtime</h3><p>Current service and Agent boundaries.</p></div><button className="text-action" type="button" onClick={() => onRefresh()} disabled={loading}>{loading ? "Refreshing…" : "Refresh"}</button></div>
           {error && <p className="settings-error" role="alert">{error}</p>}
           <div className="runtime-cards">
             <article>
@@ -456,6 +471,7 @@ function SystemSettings({ connected, modelCount, runtime, loading, error, stream
         </section>
 
         <section className="settings-section data-settings-section">
+          {open && <TavilySettings settings={runtime?.web_search} onSave={onSaveWebSearch} onTest={onTestWebSearch} />}
           <div className="system-section-heading"><div><h3>Local data</h3><p>Conversations, attachments, and managed context stored locally.</p></div><span className="storage-size">{storage ? formatBytes(storage.database_bytes) : "—"}</span></div>
           <dl className="data-counts">
             <div><dt>Conversations</dt><dd>{storage?.conversations ?? "—"}</dd></div>
@@ -491,6 +507,7 @@ function AgentActivity({ message, mode }) {
     starting: "Starting",
     thinking: "Thinking",
     shell: "Running shell",
+    web_search: "Searching the web",
     reviewing: "Reviewing result",
     responding: "Writing answer",
     finished: "Finished",
@@ -540,13 +557,15 @@ function AgentActivity({ message, mode }) {
             const shellStep = step.tool_name === "shell" || !step.tool_name;
             const label = shellStep
               ? parsedInput.command || step.input
+              : step.tool_name === "web_search"
+                ? parsedInput.query || "Web search"
               : step.tool_name === "delegate_task"
                 ? parsedInput.task || "Delegated task"
                 : step.tool_name === "label_image_directory"
                   ? `Label images in ${parsedInput.directory || "directory"}`
                   : step.tool_name?.replaceAll("_", " ") || "Tool action";
             const statusLabel = step.status === "running" ? "Running" : step.status === "complete" ? shellStep ? `Exited ${step.exit_code ?? 0}` : "Complete" : step.status === "cancelled" ? "Stopped" : "Failed";
-            const StepIcon = step.tool_name === "delegate_task" ? Brain : step.tool_name === "label_image_directory" ? SelectionAll : shellStep ? TerminalWindow : Gear;
+            const StepIcon = step.tool_name === "web_search" ? MagnifyingGlass : step.tool_name === "delegate_task" ? Brain : step.tool_name === "label_image_directory" ? SelectionAll : shellStep ? TerminalWindow : Gear;
             return (
               <details className={`agent-step ${step.status}`} key={step.id} open={step.status === "running"}>
                 <summary>
@@ -554,7 +573,7 @@ function AgentActivity({ message, mode }) {
                   <span className={shellStep ? "agent-step-command" : "agent-step-label"}>{label}</span>
                   <span className="agent-step-status">{statusLabel}</span>
                 </summary>
-                {step.output && <pre>{step.output}</pre>}
+                {step.output && (step.tool_name === "web_search" ? <WebSearchResults output={step.output} /> : <pre>{step.output}</pre>)}
               </details>
             );
           })}
@@ -1085,6 +1104,10 @@ export function App() {
   const [loadingConversation, setLoadingConversation] = useState(false);
   const conversationViewRef = useRef(0);
   const modelChangeRef = useRef(null);
+  const webSearchChangeRef = useRef(null);
+  const [webSearchEnabled, setWebSearchEnabled] = useState(true);
+  const [webSearchSaving, setWebSearchSaving] = useState(false);
+  const [webSearchError, setWebSearchError] = useState("");
   const modelListRequestRef = useRef(0);
   const [models, setModels] = useState([]);
   const [visionModels, setVisionModels] = useState(() => new Set());
@@ -1103,6 +1126,7 @@ export function App() {
   const [runtimeSettings, setRuntimeSettings] = useState(null);
   const [runtimeSettingsLoading, setRuntimeSettingsLoading] = useState(false);
   const [runtimeSettingsError, setRuntimeSettingsError] = useState("");
+  const [settingsRequestGuard] = useState(createSettingsRequestGuard);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [renameTarget, setRenameTarget] = useState(null);
@@ -1267,8 +1291,35 @@ export function App() {
     refreshModels().catch((error) => setModelError(`Could not refresh models: ${error.message}`));
   }
 
+  async function changeSessionWebSearch(enabled) {
+    if (conversationMode !== "agent" || streaming || titleRequestRef.current.has(activeId) || compactionRef.current || modelChangeRef.current || webSearchChangeRef.current || loadingConversation || deletingTurns || turnDeleteTarget) return;
+    setWebSearchError("");
+    if (!activeId) {
+      setWebSearchEnabled(enabled);
+      return;
+    }
+    const view = conversationViewRef.current;
+    const pendingChange = changeConversationWebSearch(activeId, enabled);
+    webSearchChangeRef.current = pendingChange;
+    setWebSearchSaving(true);
+    try {
+      const updated = await pendingChange;
+      setConversationItems((items) => items.map((item) => item.id === updated.id ? { ...item, web_search_enabled: updated.web_search_enabled } : item));
+      // Keep the previous selection until the server confirms it. Failed saves
+      // need no rollback, and a switched session keeps its own choice.
+      if (view === conversationViewRef.current) setWebSearchEnabled(conversationWebSearchEnabled(updated));
+    } catch (error) {
+      if (view === conversationViewRef.current) setWebSearchError(error.message);
+    } finally {
+      if (webSearchChangeRef.current === pendingChange) {
+        webSearchChangeRef.current = null;
+        setWebSearchSaving(false);
+      }
+    }
+  }
+
   async function changeModel(nextModel) {
-    if (nextModel === model || streaming || titleRequestRef.current.has(activeId) || compactionRef.current || modelChangeRef.current || loadingConversation || deletingTurns || turnDeleteTarget) return;
+    if (nextModel === model || streaming || titleRequestRef.current.has(activeId) || compactionRef.current || modelChangeRef.current || webSearchChangeRef.current || loadingConversation || deletingTurns || turnDeleteTarget) return;
     setModelError("");
     setModelNotice("");
     if (!activeId) {
@@ -1415,12 +1466,7 @@ export function App() {
   useEffect(() => {
     if (!systemSettingsOpen) return undefined;
     const controller = new AbortController();
-    setRuntimeSettingsLoading(true);
-    setRuntimeSettingsError("");
-    getSettings(controller.signal)
-      .then(setRuntimeSettings)
-      .catch((error) => { if (error.name !== "AbortError") setRuntimeSettingsError(error.message); })
-      .finally(() => { if (!controller.signal.aborted) setRuntimeSettingsLoading(false); });
+    refreshRuntimeSettings(controller.signal);
     return () => controller.abort();
   }, [systemSettingsOpen]);
 
@@ -1492,6 +1538,7 @@ export function App() {
     settingsReturnRef.current = trigger;
     setMenuOpen(false);
     setSettingsOpen(true);
+    refreshRuntimeSettings();
   }
 
   function openSystemSettings(trigger) {
@@ -1530,20 +1577,36 @@ export function App() {
     }, 0);
   }
 
-  async function refreshRuntimeSettings() {
+  async function refreshRuntimeSettings(signal) {
+    const read = settingsRequestGuard.read();
     setRuntimeSettingsLoading(true);
     setRuntimeSettingsError("");
     try {
-      setRuntimeSettings(await getSettings());
+      const result = await getSettings(signal);
+      if (!signal?.aborted && settingsRequestGuard.current(read)) setRuntimeSettings(result);
     } catch (error) {
-      setRuntimeSettingsError(error.message);
+      if (error.name !== "AbortError" && settingsRequestGuard.current(read)) setRuntimeSettingsError(error.message);
     } finally {
-      setRuntimeSettingsLoading(false);
+      if (!signal?.aborted && settingsRequestGuard.latest(read)) setRuntimeSettingsLoading(false);
+    }
+  }
+
+  async function saveSearchSettings(input, signal) {
+    const write = settingsRequestGuard.startWrite();
+    try {
+      const result = await saveWebSearchSettings(input, signal);
+      if (!signal?.aborted && settingsRequestGuard.currentWrite(write)) setRuntimeSettings((current) => ({ ...current, web_search: result }));
+      return result;
+    } finally {
+      settingsRequestGuard.finishWrite();
+      // Re-read after the mutation so overlapping refreshes cannot leave the
+      // public status stale, including when the dialog closed during Save.
+      refreshRuntimeSettings();
     }
   }
 
   function openClearAll(trigger) {
-    if (streaming || titleRequestRef.current.size || compactionRef.current) return;
+    if (streaming || titleRequestRef.current.size || compactionRef.current || webSearchChangeRef.current) return;
     clearAllReturnRef.current = trigger;
     setClearAllConfirmation("");
     setClearAllError("");
@@ -1598,6 +1661,7 @@ export function App() {
     try {
       // Reopening a session while its model is saving must read the saved value.
       await modelChangeRef.current?.catch(() => {});
+      await webSearchChangeRef.current?.catch(() => {});
       if (view !== conversationViewRef.current) return;
       const payload = await getConversation(id, controller.signal);
       if (view !== conversationViewRef.current) return;
@@ -1608,6 +1672,8 @@ export function App() {
         setTitlePollIDs((current) => [...new Set([...current, id])]);
       }
       setModel(payload.conversation.model);
+      setWebSearchEnabled(conversationWebSearchEnabled(payload.conversation));
+      setWebSearchError("");
       setModelSettings({
         conversationMode: payload.conversation.mode || "agent",
         systemPrompt: payload.conversation.system_prompt || "",
@@ -1642,6 +1708,8 @@ export function App() {
     setStreaming(false);
     setModelLoaded(false);
     restoreModelPreferences(model);
+    setWebSearchEnabled(true);
+    setWebSearchError("");
     setChatError("");
     if (closeNavigation) setSidebarOpen(false);
   }
@@ -1706,7 +1774,7 @@ export function App() {
   }
 
   async function generateLatestSessionTitle(conversation) {
-    if (titleRequestRef.current.has(conversation.id) || (conversation.id === activeId && (streaming || compactionRef.current || modelChangeRef.current || deletingTurns))) return;
+    if (titleRequestRef.current.has(conversation.id) || (conversation.id === activeId && (streaming || compactionRef.current || modelChangeRef.current || webSearchChangeRef.current || deletingTurns))) return;
     const controller = new AbortController();
     titleRequestRef.current.set(conversation.id, controller);
     setTitleRequests((current) => ({ ...current, [conversation.id]: true }));
@@ -1730,7 +1798,7 @@ export function App() {
   }
 
   function openDelete(conversation, trigger) {
-    if (titleRequestRef.current.has(conversation.id) || streaming && activeId === conversation.id) return;
+    if (titleRequestRef.current.has(conversation.id) || (streaming || webSearchChangeRef.current) && activeId === conversation.id) return;
     actionReturnRef.current = trigger;
     setDeleteError("");
     setDeleteTarget(conversation);
@@ -1762,7 +1830,7 @@ export function App() {
 
   function openTurnDelete(message, trigger) {
     if (titleRequestRef.current.has(activeId)) return;
-    if (streaming || compactionRef.current) return;
+    if (streaming || compactionRef.current || webSearchChangeRef.current) return;
     turnDeleteReturnRef.current = trigger;
     setTurnDeleteError("");
     setTurnDeleteTarget({ ...message, conversationId: activeId });
@@ -1794,7 +1862,7 @@ export function App() {
   }
 
   async function manuallyCompactContext() {
-    if (!activeId || streaming || titleRequestRef.current.has(activeId) || compactionRef.current || modelChangeRef.current || loadingConversation || deletingTurns || turnDeleteTarget) return;
+    if (!activeId || streaming || titleRequestRef.current.has(activeId) || compactionRef.current || modelChangeRef.current || webSearchChangeRef.current || loadingConversation || deletingTurns || turnDeleteTarget) return;
     const view = conversationViewRef.current;
     const controller = new AbortController();
     compactionRef.current = controller;
@@ -1822,7 +1890,7 @@ export function App() {
   }
 
   async function sendMessage(value, attachments = [], onAccepted = () => {}) {
-    if (!model || !models.includes(model) || streaming || titleRequestRef.current.has(activeId) || compactionRef.current || modelChangeRef.current || loadingConversation || deletingTurns || turnDeleteTarget) return;
+    if (!model || !models.includes(model) || streaming || titleRequestRef.current.has(activeId) || compactionRef.current || modelChangeRef.current || webSearchChangeRef.current || loadingConversation || deletingTurns || turnDeleteTarget) return;
     setChatError("");
     setModelError("");
     setModelNotice("");
@@ -1838,6 +1906,7 @@ export function App() {
           title: value.trim().replace(/\s+/g, " ").slice(0, 60) || `File: ${attachments[0]?.name || "conversation"}`,
           model,
           mode: conversationMode,
+          web_search_enabled: webSearchEnabled,
           system_prompt: systemPrompt,
           context_window: contextWindow === "default" ? null : Number(contextWindow),
           thinking_mode: thinkingModeForRequest(thinkingMode),
@@ -1892,7 +1961,7 @@ export function App() {
           } else if (event.type === "tool.started") {
             setMessages((current) => current.map((message, index) =>
               index === current.length - 1
-                ? { ...message, agent_steps: [...(message.agent_steps || []), event.step], agent_phase: "shell", agent_turn: event.turn }
+                ? { ...message, agent_steps: [...(message.agent_steps || []), event.step], agent_phase: event.step.tool_name === "web_search" ? "web_search" : "shell", agent_turn: event.turn }
                 : message));
           } else if (event.type === "tool.done") {
             setMessages((current) => current.map((message, index) =>
@@ -1952,7 +2021,7 @@ export function App() {
   const overlaySettings = settingsOpen && viewportWidth < 1200;
   const sidebarVisible = viewportWidth > 900 || sidebarOpen;
   const modelUnavailable = modelsLoaded && model && !models.includes(model);
-  const modelDisabled = streaming || activeTitleGenerating || compacting || changingModel || loadingConversation || deletingTurns || !!turnDeleteTarget;
+  const modelDisabled = streaming || activeTitleGenerating || compacting || changingModel || webSearchSaving || loadingConversation || deletingTurns || !!turnDeleteTarget;
   const modelFeedback = changingModel ? "Changing model…" : modelError || (modelUnavailable ? "This model is no longer installed. Choose another model to continue this conversation." : modelNotice);
 
   return (
@@ -1962,7 +2031,7 @@ export function App() {
           activeId={activeId}
           conversations={conversationItems}
           query={query}
-          streaming={streaming || compacting}
+          streaming={streaming || compacting || webSearchSaving}
           titleRequests={titleRequests}
           titleNotices={titleNotices}
           onQuery={setQuery}
@@ -2086,7 +2155,7 @@ export function App() {
           compactDisabled={!activeId || modelDisabled || modelUnavailable || !messages.length}
           compactionNotice={compactionNotice}
           onCompact={manuallyCompactContext}
-          disabled={!model || !models.includes(model) || compacting || activeTitleGenerating || changingModel || loadingConversation || deletingTurns || !!turnDeleteTarget || conversationMode === "agent" && !toolModels.has(model)}
+          disabled={!model || !models.includes(model) || compacting || activeTitleGenerating || changingModel || webSearchSaving || loadingConversation || deletingTurns || !!turnDeleteTarget || conversationMode === "agent" && !toolModels.has(model)}
           supportsImages={visionModels.has(model)}
           supportsTools={toolModels.has(model)}
           supportsThinking={thinkingModels.has(model)}
@@ -2120,6 +2189,12 @@ export function App() {
           temperature={temperature}
           setTemperature={(value) => updateChosenModelSettings({ temperature: value })}
           onResetDefaults={resetModelDefaults}
+          webSearchEnabled={webSearchEnabled}
+          onChangeWebSearch={changeSessionWebSearch}
+          webSearchSaving={webSearchSaving}
+          webSearchError={webSearchError}
+          webSearchProvider={runtimeSettings?.web_search}
+          webSearchProviderError={runtimeSettingsError}
         />
       </div>
 
@@ -2139,13 +2214,16 @@ export function App() {
         onClose={restoreSystemSettingsFocus}
       >
         <SystemSettings
+          open={systemSettingsOpen}
           connected={connected}
           modelCount={models.length}
           runtime={runtimeSettings}
           loading={runtimeSettingsLoading}
           error={runtimeSettingsError}
-          streaming={streaming || compacting || Object.keys(titleRequests).length > 0}
+          streaming={streaming || compacting || webSearchSaving || Object.keys(titleRequests).length > 0}
           onRefresh={refreshRuntimeSettings}
+          onSaveWebSearch={saveSearchSettings}
+          onTestWebSearch={testWebSearchSettings}
           onClose={closeSystemSettings}
           onRequestClear={(event) => openClearAll(event.currentTarget)}
           closeRef={systemSettingsCloseRef}

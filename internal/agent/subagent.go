@@ -27,6 +27,7 @@ type SubagentRequest struct {
 	Task                string
 	ImagePaths          []string
 	OutputPaths         []string
+	DisableWebSearch    bool
 }
 
 type SubagentResult struct {
@@ -58,6 +59,7 @@ type SubagentOrchestrator struct {
 	Store             SubagentStore
 	Chat              ChatClient
 	Shell             CommandExecutor
+	WebSearch         WebSearcher
 	Artifacts         *ArtifactManager
 	Workspace         string
 	Model             string
@@ -165,9 +167,10 @@ func (orchestrator *SubagentOrchestrator) Execute(ctx context.Context, request S
 		MaxTurns: orchestrator.MaxTurns, ToolFeedbackLimit: orchestrator.ToolFeedbackLimit,
 		Artifacts:   orchestrator.Artifacts,
 		Attachments: attachments,
+		WebSearch:   orchestrator.WebSearch,
 	}
 	childResult, runErr := childRunner.Run(ctx, RunInput{
-		ConversationID: request.ConversationID, Model: model, Mode: "agent",
+		ConversationID: request.ConversationID, Model: model, Mode: "agent", DisableWebSearch: request.DisableWebSearch,
 		Messages: []ollama.Message{
 			{Role: "system", Content: delegatedSystemPrompt},
 			{Role: "user", Content: childPrompt, Images: imageBytes},
@@ -215,7 +218,7 @@ func (orchestrator *SubagentOrchestrator) Execute(ctx context.Context, request S
 	return SubagentResult{Feedback: string(payload), ExitCode: 0, Duration: time.Since(started)}, nil
 }
 
-const delegatedSystemPrompt = `You are a focused child agent. Work only on the delegated task. You have a private context, so do not assume access to the parent conversation. Read any referenced paths directly. For user-attached text files named by attachment ID, use attachment_read and choose the byte range to fit your available context, allowing room for existing messages, tool metadata and your answer. There is no fixed byte cap; omitting limit reads the remaining file. You may read system paths, but the shell enforces that writes are only possible under AGENT_WORKSPACE. Put requested deliverables at the declared workspace paths. Keep your final response concise: state what was completed, verified output paths, failures, and items needing review. Do not include raw logs or per-item reasoning.`
+const delegatedSystemPrompt = `You are a focused child agent. Work only on the delegated task. You have a private context, so do not assume access to the parent conversation. Read any referenced paths directly. For user-attached text files named by attachment ID, use attachment_read and choose the byte range to fit your available context, allowing room for existing messages, tool metadata and your answer. There is no fixed byte cap; omitting limit reads the remaining file. You may read system paths, but the shell enforces that writes are only possible under AGENT_WORKSPACE. Put requested deliverables at the declared workspace paths. Keep your final response concise: state what was completed, verified output paths, failures, and items needing review. Do not include raw logs or per-item reasoning.` + webSearchInstructions
 
 func delegatedPrompt(task string, imagePaths, outputPaths []string) string {
 	var prompt strings.Builder

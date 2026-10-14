@@ -27,6 +27,7 @@ type Conversation struct {
 	ID               int64      `json:"id"`
 	Title            string     `json:"title"`
 	AutoTitlePending bool       `json:"auto_title_pending"`
+	WebSearchEnabled bool       `json:"web_search_enabled"`
 	Model            string     `json:"model"`
 	Mode             string     `json:"mode"`
 	SystemPrompt     string     `json:"system_prompt"`
@@ -248,10 +249,18 @@ func (s *Store) migrate(ctx context.Context) error {
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
 PRAGMA busy_timeout = 5000;
+CREATE TABLE IF NOT EXISTS web_search_settings (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+  api_token TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  CHECK (enabled = 0 OR length(api_token) > 0)
+);
 CREATE TABLE IF NOT EXISTS conversations (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   title TEXT NOT NULL DEFAULT 'New chat',
   auto_title_pending INTEGER NOT NULL DEFAULT 0 CHECK (auto_title_pending IN (0, 1)),
+  web_search_enabled INTEGER NOT NULL DEFAULT 1 CHECK (web_search_enabled IN (0, 1)),
   model TEXT NOT NULL,
   mode TEXT NOT NULL DEFAULT 'agent' CHECK (mode IN ('agent', 'chat')),
   system_prompt TEXT NOT NULL DEFAULT '',
@@ -391,6 +400,9 @@ WHERE thinking_mode IS NULL AND thinking_enabled IS NOT NULL`); err != nil {
 	if err := s.ensureColumn(ctx, "conversations", "auto_title_pending", "INTEGER NOT NULL DEFAULT 0 CHECK (auto_title_pending IN (0, 1))"); err != nil {
 		return err
 	}
+	if err := s.ensureColumn(ctx, "conversations", "web_search_enabled", "INTEGER NOT NULL DEFAULT 1 CHECK (web_search_enabled IN (0, 1))"); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -425,15 +437,16 @@ func (s *Store) ensureColumn(ctx context.Context, table, column, definition stri
 }
 
 type CreateConversationParams struct {
-	Title           string
-	AutoTitle       bool
-	Model           string
-	Mode            string
-	SystemPrompt    string
-	ContextWindow   *int
-	ThinkingMode    *string
-	ThinkingEnabled *bool
-	Temperature     *float64
+	Title            string
+	AutoTitle        bool
+	WebSearchEnabled *bool
+	Model            string
+	Mode             string
+	SystemPrompt     string
+	ContextWindow    *int
+	ThinkingMode     *string
+	ThinkingEnabled  *bool
+	Temperature      *float64
 }
 
 func (s *Store) CreateConversation(ctx context.Context, params CreateConversationParams) (Conversation, error) {
@@ -456,10 +469,11 @@ func (s *Store) CreateConversation(ctx context.Context, params CreateConversatio
 		legacyThinkingEnabled = &enabled
 	}
 	now := time.Now().UTC()
+	webSearchEnabled := params.WebSearchEnabled == nil || *params.WebSearchEnabled
 	result, err := s.db.ExecContext(ctx, `
-INSERT INTO conversations (title, model, mode, system_prompt, context_window, thinking_enabled, thinking_mode, temperature, created_at, updated_at, auto_title_pending)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, params.Title, params.Model, params.Mode, params.SystemPrompt,
-		params.ContextWindow, legacyThinkingEnabled, params.ThinkingMode, params.Temperature, formatTime(now), formatTime(now), params.AutoTitle)
+INSERT INTO conversations (title, model, mode, system_prompt, context_window, thinking_enabled, thinking_mode, temperature, created_at, updated_at, auto_title_pending, web_search_enabled)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, params.Title, params.Model, params.Mode, params.SystemPrompt,
+		params.ContextWindow, legacyThinkingEnabled, params.ThinkingMode, params.Temperature, formatTime(now), formatTime(now), params.AutoTitle, webSearchEnabled)
 	if err != nil {
 		return Conversation{}, fmt.Errorf("create conversation: %w", err)
 	}
@@ -473,7 +487,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, params.Title, params.Model, params.Mo
 func (s *Store) GetConversation(ctx context.Context, id int64) (Conversation, error) {
 	row := s.db.QueryRowContext(ctx, `
 SELECT c.id, c.title, c.model, c.mode, c.system_prompt, c.context_window, c.thinking_enabled, c.thinking_mode, c.temperature,
-       c.created_at, c.updated_at, MAX(m.created_at), COUNT(m.id), c.auto_title_pending
+       c.created_at, c.updated_at, MAX(m.created_at), COUNT(m.id), c.auto_title_pending, c.web_search_enabled
 FROM conversations c
 LEFT JOIN messages m ON m.conversation_id = c.id
 WHERE c.id = ?
@@ -489,7 +503,7 @@ func (s *Store) ListConversations(ctx context.Context, query string) ([]Conversa
 	pattern := "%" + escapeLike(strings.TrimSpace(query)) + "%"
 	rows, err := s.db.QueryContext(ctx, `
 SELECT c.id, c.title, c.model, c.mode, c.system_prompt, c.context_window, c.thinking_enabled, c.thinking_mode, c.temperature,
-       c.created_at, c.updated_at, MAX(m.created_at), COUNT(m.id), c.auto_title_pending
+       c.created_at, c.updated_at, MAX(m.created_at), COUNT(m.id), c.auto_title_pending, c.web_search_enabled
 FROM conversations c
 LEFT JOIN messages m ON m.conversation_id = c.id
 WHERE ? = '%%' OR c.title LIKE ? ESCAPE '\' OR EXISTS (
@@ -1677,7 +1691,7 @@ func scanConversation(row rowScanner) (Conversation, error) {
 	var createdAt, updatedAt string
 	var lastMessageAt sql.NullString
 	if err := row.Scan(&conversation.ID, &conversation.Title, &conversation.Model, &conversation.Mode, &conversation.SystemPrompt,
-		&contextWindow, &thinkingEnabled, &thinkingMode, &temperature, &createdAt, &updatedAt, &lastMessageAt, &conversation.MessageCount, &conversation.AutoTitlePending); err != nil {
+		&contextWindow, &thinkingEnabled, &thinkingMode, &temperature, &createdAt, &updatedAt, &lastMessageAt, &conversation.MessageCount, &conversation.AutoTitlePending, &conversation.WebSearchEnabled); err != nil {
 		return Conversation{}, err
 	}
 	var err error

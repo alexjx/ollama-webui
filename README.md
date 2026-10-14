@@ -19,6 +19,25 @@ preferences stay in this browser; existing sessions retain their saved settings.
 **Reset to model defaults** clears the selected model's preferences, and a
 successful model-list refresh removes preferences for models deleted from Ollama.
 
+To enable web search, open **Settings → Web search**, enter your **Tavily API
+token**, enable **Web search in Agent mode**, and choose **Save**. **Test search**
+checks the saved token with one basic search. Agent models can then call
+`web_search` and use result titles, links and snippets to cite their sources.
+The integration uses only Tavily's [Search API](https://docs.tavily.com/documentation/api-reference/endpoint/search)
+with Bearer authentication; generated answers, raw page content, images and
+automatic advanced search are disabled. Chat stays tool-free.
+
+**Conversation settings → Web search** controls search separately for each Agent
+session, including between replies. The switch is saved with the session and
+also applies to delegated agents. It defaults to on; search still requires the
+enabled Tavily configuration above. Turning it off preserves existing results.
+
+The token and enabled setting persist in the local server database independently
+of conversations. Settings responses expose only whether a token is configured,
+and the token is kept out of browser preferences, model requests and tool traces.
+**Remove token** disables search; clearing conversation history keeps the search
+configuration. Search calls use the latest saved configuration and respect Stop.
+
 After the first turn finishes successfully in a new Chat or Agent conversation, the same
 model creates a short title from the first user input and its reply. Naming runs
 in the background and updates the browser tab and session history automatically.

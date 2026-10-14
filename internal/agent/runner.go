@@ -74,7 +74,7 @@ var labelImageDirectoryTool = ollama.Tool{
 	},
 }
 
-const SystemPrompt = `You are a general-purpose autonomous assistant. Continue until the user's task is actually complete, but answer directly when no tool is needed. A shell tool is available as an optional capability for calculation, search, inspection, execution, and verification; do not inspect or edit files unless that helps the user's request. The shell may read system paths allowed by normal OS permissions, while writes are restricted to AGENT_WORKSPACE. Delegate substantial independent work when its intermediate details would crowd the main context. For a directory of images, use the dedicated image-labeling tool so each image is processed in an isolated request and results go to a workspace JSONL file. Context tools can persist important notes or large outputs outside the prompt and retrieve them later within this conversation. When a user attaches a text file, use attachment_read with its attachment ID. Choose how much to read based on your available context and the task; there is no fixed byte cap, and omitting limit reads the remaining file. Allow room for existing messages, tool metadata and your answer. Keep concise intermediate notes. Use attachment_list to rediscover older attached files after compaction. Prefer narrow commands and small outputs so local model context remains focused. Do not stop after merely describing a plan. When the task is complete, reply with a concise final answer and do not call a tool. The user can interrupt you at any time.`
+const SystemPrompt = `You are a general-purpose autonomous assistant. Continue until the user's task is actually complete, but answer directly when no tool is needed. A shell tool is available as an optional capability for calculation, search, inspection, execution, and verification; do not inspect or edit files unless that helps the user's request. The shell may read system paths allowed by normal OS permissions, while writes are restricted to AGENT_WORKSPACE. Delegate substantial independent work when its intermediate details would crowd the main context. For a directory of images, use the dedicated image-labeling tool so each image is processed in an isolated request and results go to a workspace JSONL file. Context tools can persist important notes or large outputs outside the prompt and retrieve them later within this conversation. When a user attaches a text file, use attachment_read with its attachment ID. Choose how much to read based on your available context and the task; there is no fixed byte cap, and omitting limit reads the remaining file. Allow room for existing messages, tool metadata and your answer. Keep concise intermediate notes. Use attachment_list to rediscover older attached files after compaction. Prefer narrow commands and small outputs so local model context remains focused. Do not stop after merely describing a plan. When the task is complete, reply with a concise final answer and do not call a tool. The user can interrupt you at any time.` + webSearchInstructions
 
 type ChatClient interface {
 	Chat(context.Context, ollama.ChatRequest, func(ollama.ChatChunk) error) error
@@ -99,6 +99,7 @@ type Runner struct {
 	Context           *ContextPreparer
 	Artifacts         *ArtifactManager
 	Subagents         SubagentExecutor
+	WebSearch         WebSearcher
 }
 
 type RunInput struct {
@@ -110,6 +111,7 @@ type RunInput struct {
 	Think              *ollama.ThinkValue
 	AssistantMessageID int64
 	Vision             bool
+	DisableWebSearch   bool
 }
 
 type Event struct {
@@ -173,6 +175,9 @@ func (runner Runner) Run(ctx context.Context, input RunInput, emit func(Event) e
 	if agentMode {
 		maxTurns = runner.MaxTurns
 		tools = []ollama.Tool{shellTool}
+		if !input.DisableWebSearch && runner.WebSearch != nil && runner.WebSearch.Enabled(ctx) {
+			tools = append(tools, webSearchTool)
+		}
 		if runner.Attachments != nil && input.ConversationID > 0 {
 			readTool := attachmentReadTool
 			if input.Options != nil && input.Options.NumCtx != nil && *input.Options.NumCtx > 0 {
@@ -280,7 +285,7 @@ func (runner Runner) Run(ctx context.Context, input RunInput, emit func(Event) e
 		}
 
 		for _, call := range assistant.ToolCalls {
-			resultContent, err := runner.executeTool(ctx, input.ConversationID, input.AssistantMessageID, input.Model, input.Vision, turn, call, emit)
+			resultContent, err := runner.executeTool(ctx, input.ConversationID, input.AssistantMessageID, input.Model, input.Vision, input.DisableWebSearch, turn, call, emit)
 			if err != nil {
 				return RunResult{Content: visible.String(), Thinking: thinking.String(), Metadata: metadata}, err
 			}
@@ -464,7 +469,7 @@ func decodeToolArguments(raw json.RawMessage, target any) error {
 	return nil
 }
 
-func (runner Runner) executeTool(ctx context.Context, conversationID, messageID int64, model string, vision bool, turn int, call ollama.ToolCall, emit func(Event) error) (string, error) {
+func (runner Runner) executeTool(ctx context.Context, conversationID, messageID int64, model string, vision, disableWebSearch bool, turn int, call ollama.ToolCall, emit func(Event) error) (string, error) {
 	raw := call.Function.Arguments
 	if len(raw) == 0 {
 		raw = json.RawMessage(`{}`)
@@ -480,6 +485,13 @@ func (runner Runner) executeTool(ctx context.Context, conversationID, messageID 
 	var result ShellResult
 	status := "complete"
 	switch call.Function.Name {
+	case "web_search":
+		if disableWebSearch {
+			result = ShellResult{ExitCode: -1, Output: "web search is disabled for this session"}
+			status = "error"
+		} else {
+			result, status = runner.executeWebSearch(ctx, raw)
+		}
 	case "shell":
 		arguments, decodeErr := decodeShellArguments(raw)
 		if decodeErr != nil {
@@ -519,7 +531,8 @@ func (runner Runner) executeTool(ctx context.Context, conversationID, messageID 
 			} else {
 				delegated, delegateErr := runner.Subagents.Execute(ctx, SubagentRequest{
 					ConversationID: conversationID, RequestingMessageID: messageID,
-					Model: model, SupportsVision: vision, Task: arguments.Task, ImagePaths: arguments.ImagePaths, OutputPaths: arguments.OutputPaths,
+					DisableWebSearch: disableWebSearch,
+					Model:            model, SupportsVision: vision, Task: arguments.Task, ImagePaths: arguments.ImagePaths, OutputPaths: arguments.OutputPaths,
 				}, emit)
 				result = ShellResult{Output: delegated.Feedback, ExitCode: delegated.ExitCode, Duration: delegated.Duration,
 					Cancelled: errors.Is(delegateErr, context.Canceled)}
@@ -577,7 +590,9 @@ func (runner Runner) executeTool(ctx context.Context, conversationID, messageID 
 	feedback, feedbackTruncated := result.Output, false
 	// Attachment reads already reflect the range chosen by the agent. Clipping
 	// them would discard requested text and invalidate their paging metadata.
-	if call.Function.Name != "attachment_read" {
+	if call.Function.Name == "web_search" {
+		feedback, feedbackTruncated = boundedWebSearchFeedback(result.Output, runner.ToolFeedbackLimit)
+	} else if call.Function.Name != "attachment_read" {
 		feedback, feedbackTruncated = boundedToolFeedback(result.Output, runner.ToolFeedbackLimit)
 	}
 	payloadData := map[string]any{

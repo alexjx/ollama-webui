@@ -26,23 +26,25 @@ import (
 	"ollama-webui/internal/agent"
 	"ollama-webui/internal/ollama"
 	"ollama-webui/internal/store"
+	"ollama-webui/internal/tavily"
 )
 
 type Server struct {
-	store        *store.Store
-	ollama       *ollama.Client
-	agent        agent.Runner
-	runtime      RuntimeSettings
-	webDir       string
-	logger       *slog.Logger
-	handler      http.Handler
-	activeMu     sync.Mutex
-	active       map[int64]struct{}
-	titleMu      sync.Mutex
-	titleJobs    sync.WaitGroup
-	titleContext context.Context
-	titleCancel  context.CancelFunc
-	titlesClosed bool
+	store               *store.Store
+	ollama              *ollama.Client
+	agent               agent.Runner
+	runtime             RuntimeSettings
+	webDir              string
+	logger              *slog.Logger
+	handler             http.Handler
+	activeMu            sync.Mutex
+	active              map[int64]struct{}
+	webSearchSettingsMu sync.Mutex
+	titleMu             sync.Mutex
+	titleJobs           sync.WaitGroup
+	titleContext        context.Context
+	titleCancel         context.CancelFunc
+	titlesClosed        bool
 }
 
 type RuntimeSettings struct {
@@ -64,11 +66,22 @@ func New(database *store.Store, ollamaClient *ollama.Client, runner agent.Runner
 	if runner.Attachments == nil {
 		runner.Attachments = database
 	}
+	if runner.WebSearch == nil {
+		runner.WebSearch = tavily.NewClient(func(ctx context.Context) (tavily.Config, error) {
+			settings, err := database.GetWebSearchSettings(ctx)
+			return tavily.Config{Enabled: settings.Enabled, Token: settings.Token}, err
+		})
+	}
+	if children, ok := runner.Subagents.(*agent.SubagentOrchestrator); ok {
+		children.WebSearch = runner.WebSearch
+	}
 	server := &Server{store: database, ollama: ollamaClient, agent: runner, runtime: runtime, webDir: webDir, logger: logger, active: make(map[int64]struct{})}
 	server.titleContext, server.titleCancel = context.WithCancel(context.Background())
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", server.health)
 	mux.HandleFunc("GET /api/settings", server.settings)
+	mux.HandleFunc("PUT /api/settings/web-search", server.updateWebSearchSettings)
+	mux.HandleFunc("POST /api/settings/web-search/test", server.testWebSearch)
 	mux.HandleFunc("GET /api/models", server.models)
 	mux.HandleFunc("GET /api/conversations", server.listConversations)
 	mux.HandleFunc("POST /api/conversations", server.createConversation)
@@ -76,6 +89,7 @@ func New(database *store.Store, ollamaClient *ollama.Client, runner agent.Runner
 	mux.HandleFunc("GET /api/conversations/{id}", server.getConversation)
 	mux.HandleFunc("PATCH /api/conversations/{id}", server.updateConversation)
 	mux.HandleFunc("PUT /api/conversations/{id}/model", server.updateConversationModel)
+	mux.HandleFunc("PUT /api/conversations/{id}/web-search", server.updateConversationWebSearch)
 	mux.HandleFunc("DELETE /api/conversations/{id}", server.deleteConversation)
 	mux.HandleFunc("POST /api/conversations/{id}/messages", server.generate)
 	mux.HandleFunc("POST /api/conversations/{id}/compact", server.compactConversation)
@@ -111,12 +125,19 @@ func (s *Server) models(response http.ResponseWriter, request *http.Request) {
 }
 
 func (s *Server) settings(response http.ResponseWriter, request *http.Request) {
+	response.Header().Set("Cache-Control", "no-store")
 	stats, err := s.store.Stats(request.Context())
 	if err != nil {
 		s.internalError(response, err)
 		return
 	}
+	webSearch, err := s.store.GetWebSearchSettings(request.Context())
+	if err != nil {
+		s.internalError(response, err)
+		return
+	}
 	writeJSON(response, http.StatusOK, map[string]any{
+		"web_search": publicWebSearchSettings(webSearch),
 		"agent": map[string]any{
 			"workspace":               s.runtime.Workspace,
 			"max_turns":               s.runtime.MaxTurns,
@@ -181,14 +202,15 @@ func (s *Server) clearConversations(response http.ResponseWriter, request *http.
 }
 
 type conversationInput struct {
-	Title           string   `json:"title"`
-	Model           string   `json:"model"`
-	Mode            string   `json:"mode"`
-	SystemPrompt    string   `json:"system_prompt"`
-	ContextWindow   *int     `json:"context_window"`
-	ThinkingMode    *string  `json:"thinking_mode"`
-	ThinkingEnabled *bool    `json:"thinking_enabled"`
-	Temperature     *float64 `json:"temperature"`
+	Title            string   `json:"title"`
+	Model            string   `json:"model"`
+	Mode             string   `json:"mode"`
+	SystemPrompt     string   `json:"system_prompt"`
+	ContextWindow    *int     `json:"context_window"`
+	ThinkingMode     *string  `json:"thinking_mode"`
+	ThinkingEnabled  *bool    `json:"thinking_enabled"`
+	Temperature      *float64 `json:"temperature"`
+	WebSearchEnabled *bool    `json:"web_search_enabled"`
 }
 
 func (s *Server) createConversation(response http.ResponseWriter, request *http.Request) {
@@ -205,6 +227,7 @@ func (s *Server) createConversation(response http.ResponseWriter, request *http.
 	conversation, err := s.store.CreateConversation(request.Context(), store.CreateConversationParams{
 		Title: input.Title, AutoTitle: true, Model: input.Model, Mode: input.Mode, SystemPrompt: input.SystemPrompt,
 		ContextWindow: input.ContextWindow, ThinkingMode: thinkingMode, Temperature: input.Temperature,
+		WebSearchEnabled: input.WebSearchEnabled,
 	})
 	if err != nil {
 		s.internalError(response, err)
@@ -575,6 +598,7 @@ func (s *Server) generate(response http.ResponseWriter, request *http.Request) {
 	result, err := s.agent.Run(request.Context(), agent.RunInput{
 		ConversationID: conversation.ID, Model: conversation.Model, Mode: conversation.Mode, Messages: upstreamMessages, Options: options,
 		Think:              think,
+		DisableWebSearch:   !conversation.WebSearchEnabled,
 		Vision:             containsCapability(modelInfo.Capabilities, "vision"),
 		AssistantMessageID: assistantMessage.ID,
 	}, func(event agent.Event) error {
