@@ -107,7 +107,7 @@ func TestLatestTitleUsesLatestCompletedInteractionAndFinalAnswer(t *testing.T) {
 				if err := json.Unmarshal([]byte(payload.Messages[1].Content), &source); err != nil {
 					t.Fatal(err)
 				}
-				if payload.Model != "answer-model" || payload.Messages[0].Content != latestTitleSystemPrompt || len(payload.Messages) != 2 || len(payload.Tools) != 0 || len(payload.Think) != 0 || source["latest_user_input"] != "Latest question" || source["latest_assistant_reply"] != "最终答案" {
+				if payload.Model != "answer-model" || payload.Messages[0].Content != latestTitleSystemPrompt || len(payload.Messages) != 2 || len(payload.Tools) != 0 || string(payload.Think) != "false" || source["latest_user_input"] != "Latest question" || source["latest_assistant_reply"] != "最终答案" {
 					t.Fatalf("wrong title source/model: %#v %#v", payload, source)
 				}
 				var updated store.Conversation

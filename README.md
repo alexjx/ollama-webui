@@ -12,6 +12,9 @@ model creates a short title from the first user input and its reply. Naming runs
 in the background and updates the browser tab and session history automatically.
 Manual renames take priority; existing sessions keep their names, and a naming
 failure keeps the initial title without affecting the saved reply.
+Title requests ask the same model to turn thinking off and allow reasoning to
+finish on models that still require it, so reasoning cannot consume a short
+title-only token allowance before an answer appears.
 
 Use **Generate title from latest turn** in any session's history-row menu to
 replace its name using the latest completed user question and final answer.

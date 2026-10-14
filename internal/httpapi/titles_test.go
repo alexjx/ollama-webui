@@ -23,10 +23,11 @@ import (
 )
 
 type titleTestPayload struct {
-	Model    string           `json:"model"`
-	Messages []ollama.Message `json:"messages"`
-	Tools    json.RawMessage  `json:"tools"`
-	Think    json.RawMessage  `json:"think"`
+	Model    string              `json:"model"`
+	Messages []ollama.Message    `json:"messages"`
+	Tools    json.RawMessage     `json:"tools"`
+	Think    json.RawMessage     `json:"think"`
+	Options  *ollama.ChatOptions `json:"options"`
 }
 
 type titleTestFixture struct {
@@ -161,7 +162,7 @@ func TestFirstTurnAutomaticallyNamesChatAndAgentWithoutDelayingDone(t *testing.T
 				t.Fatalf("first response did not finish independently: %d %s", response.Code, response.Body.String())
 			}
 			payload := waitForTitleRequest(t, fixture)
-			if payload.Model != conversation.Model || len(payload.Messages) != 2 || len(payload.Tools) != 0 || len(payload.Think) != 0 {
+			if payload.Model != conversation.Model || len(payload.Messages) != 2 || len(payload.Tools) != 0 || string(payload.Think) != "false" {
 				t.Fatalf("naming used different model, tools, thinking or transcript: %#v", payload)
 			}
 			var source map[string]string
@@ -210,6 +211,58 @@ func TestFirstTurnAutomaticallyNamesChatAndAgentWithoutDelayingDone(t *testing.T
 			default:
 			}
 		})
+	}
+}
+
+func TestConversationTitlesDisableDefaultThinking(t *testing.T) {
+	for _, test := range []struct{ name, prompt string }{{"automatic", titleSystemPrompt}, {"manual", latestTitleSystemPrompt}} {
+		t.Run(test.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var payload titleTestPayload
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+					t.Error(err)
+					return
+				}
+				// Default reasoning consumes the output allowance before an answer.
+				if string(payload.Think) != "false" {
+					json.NewEncoder(w).Encode(map[string]any{"message": map[string]string{"role": "assistant", "thinking": strings.Repeat("reasoning ", 256)}, "done": true, "done_reason": "length", "eval_count": 256})
+					return
+				}
+				if payload.Options != nil && payload.Options.NumPredict != nil {
+					t.Error("title generation retains a token cap that can exhaust reasoning before the answer")
+				}
+				json.NewEncoder(w).Encode(map[string]any{"message": map[string]string{"role": "assistant", "thinking": "Never use reasoning as the title", "content": "Input box resizing"}, "done": true})
+			}))
+			defer upstream.Close()
+			api := &Server{ollama: ollama.NewClient(upstream.URL)}
+			title, err := api.requestConversationTitle(context.Background(), "reasoning-model", test.prompt, `{"user":"Resize the input","answer":"Drag the handle"}`)
+			if err != nil || title != "Input box resizing" {
+				t.Fatalf("reasoning model failed to produce a title: %q, %v", title, err)
+			}
+		})
+	}
+}
+
+func TestConversationTitleAllowsUnavoidableReasoningBeforeAnswer(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload titleTestPayload
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Error(err)
+			return
+		}
+		message := map[string]string{"role": "assistant", "thinking": strings.Repeat("reasoning ", 512)}
+		if payload.Options == nil || payload.Options.NumPredict == nil || *payload.Options.NumPredict > 512 {
+			message["content"] = "Input box resizing"
+		}
+		json.NewEncoder(w).Encode(map[string]any{"message": message, "done": true})
+	}))
+	defer upstream.Close()
+	api := &Server{ollama: ollama.NewClient(upstream.URL)}
+	for _, prompt := range []string{titleSystemPrompt, latestTitleSystemPrompt} {
+		title, err := api.requestConversationTitle(context.Background(), "always-reasons", prompt, `{}`)
+		if err != nil || title != "Input box resizing" {
+			t.Fatalf("reasoning exhausted title budget: %q, %v", title, err)
+		}
 	}
 }
 
