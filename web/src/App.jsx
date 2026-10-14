@@ -12,6 +12,7 @@ import CopyButton from "./copy-button";
 import ThinkingLabel from "./thinking-label";
 import { applyThinkingTiming, finishThinkingTiming, thinkingDuration } from "./thinking-duration";
 import { thinkingModeForRequest, thinkingModeFromConversation } from "./thinking-mode";
+import { CONTEXT_WINDOW_VALUES, DEFAULT_MODEL_SETTINGS, createModelPreferences, modelSettingsForCapabilities, normalizeModelSettings } from "./model-preferences";
 import {
   clearConversations as clearAllConversations,
   changeConversationModel,
@@ -54,15 +55,9 @@ import {
   X,
 } from "@phosphor-icons/react";
 
-const contextWindows = [
-  { value: "default", label: "Application default" },
-  { value: "4096", label: "4,096 tokens" },
-  { value: "8192", label: "8,192 tokens" },
-  { value: "16384", label: "16,384 tokens" },
-  { value: "32768", label: "32,768 tokens" },
-  { value: "65536", label: "65,536 tokens" },
-  { value: "131072", label: "131,072 tokens" },
-];
+const contextWindows = CONTEXT_WINDOW_VALUES.map((value) => ({
+  value, label: value === "default" ? "Application default" : `${Number(value).toLocaleString("en-US")} tokens`,
+}));
 
 const thinkingModes = [
   { value: "default", label: "Ollama default" },
@@ -267,16 +262,8 @@ function ConversationSettings({
   setTemperatureOverride,
   temperature,
   setTemperature,
+  onResetDefaults,
 }) {
-  function resetDefaults() {
-    setSystemPrompt("");
-    if (!modelLoaded) setConversationMode(supportsTools ? "agent" : "chat");
-    if (!modelLoaded) setContextWindow("default");
-    if (!modelLoaded) setThinkingMode("default");
-    setTemperatureOverride(false);
-    setTemperature(0.7);
-  }
-
   return (
     <aside className="settings-panel" aria-label="Conversation settings">
       <div className="settings-heading">
@@ -295,7 +282,7 @@ function ConversationSettings({
             </select>
             <CaretDown size={18} aria-hidden="true" />
           </div>
-          <p id="settings-model-help">{modelLoaded ? "Switch models between responses. History and mode stay the same; thinking resets to the new model’s default." : "Select the model to use for this conversation."}</p>
+          <p id="settings-model-help">{modelLoaded ? "Switch models between responses. History and mode stay the same; thinking resets to the new model’s default." : "Settings for this model are remembered in this browser for new sessions."}</p>
           {modelFeedback && <p className={modelError ? "model-feedback-error" : ""} role={modelError ? "alert" : "status"}>{modelFeedback}</p>}
         </section>
 
@@ -412,7 +399,7 @@ function ConversationSettings({
         </section>
       </div>
 
-      <button className="reset-button" onClick={resetDefaults} disabled={modelLoaded}>
+      <button className="reset-button" onClick={onResetDefaults} disabled={modelLoaded}>
         <ArrowCounterClockwise size={21} />
         Reset to model defaults
       </button>
@@ -1087,6 +1074,10 @@ export function App() {
   const activeIdRef = useRef(activeId);
   activeIdRef.current = activeId;
   const [model, setModel] = useState("");
+  const modelRef = useRef(model);
+  modelRef.current = model;
+  const installedModelsRef = useRef(new Map());
+  const [modelPreferences] = useState(() => createModelPreferences());
   const [changingModel, setChangingModel] = useState(false);
   const [modelError, setModelError] = useState("");
   const [modelNotice, setModelNotice] = useState("");
@@ -1095,7 +1086,6 @@ export function App() {
   const conversationViewRef = useRef(0);
   const modelChangeRef = useRef(null);
   const modelListRequestRef = useRef(0);
-  const [conversationMode, setConversationMode] = useState("agent");
   const [models, setModels] = useState([]);
   const [visionModels, setVisionModels] = useState(() => new Set());
   const [toolModels, setToolModels] = useState(() => new Set());
@@ -1133,15 +1123,12 @@ export function App() {
   const [clearAllConfirmation, setClearAllConfirmation] = useState("");
   const [clearAllError, setClearAllError] = useState("");
   const [clearingAll, setClearingAll] = useState(false);
-  const [systemPrompt, setSystemPrompt] = useState("");
-  const [contextWindow, setContextWindow] = useState("default");
+  const [modelSettings, setModelSettings] = useState(() => ({ ...DEFAULT_MODEL_SETTINGS }));
+  const { conversationMode, systemPrompt, contextWindow, thinkingMode, temperatureOverride, temperature } = modelSettings;
   const [contextCheckpoint, setContextCheckpoint] = useState(null);
   const [compacting, setCompacting] = useState(false);
   const [compactionNotice, setCompactionNotice] = useState(null);
   const compactionRef = useRef(null);
-  const [thinkingMode, setThinkingMode] = useState("default");
-  const [temperatureOverride, setTemperatureOverride] = useState(false);
-  const [temperature, setTemperature] = useState(0.7);
   const [modelLoaded, setModelLoaded] = useState(false);
   const [streaming, setStreaming] = useState(false);
   const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
@@ -1167,6 +1154,32 @@ export function App() {
   const transcriptRef = useRef(null);
   const currentContextUsage = useMemo(() => contextUsage(messages, contextWindow, contextCheckpoint), [messages, contextWindow, contextCheckpoint]);
   const activeTitleGenerating = !!titleRequests[activeId];
+
+  function setConversationMode(value) {
+    setModelSettings((current) => ({ ...current, conversationMode: value }));
+  }
+
+  function setThinkingMode(value) {
+    setModelSettings((current) => ({ ...current, thinkingMode: value }));
+  }
+
+  function restoreModelPreferences(name) {
+    setModelSettings(modelPreferences.get(name, installedModelsRef.current.get(name)?.capabilities));
+  }
+
+  function updateChosenModelSettings(patch) {
+    if (modelLoaded) return;
+    const next = normalizeModelSettings({ ...modelSettings, ...patch });
+    setModelSettings(next);
+    // Only explicit edits save defaults; loading a saved conversation never does.
+    if (installedModelsRef.current.has(model)) modelPreferences.update(model, patch);
+  }
+
+  function resetModelDefaults() {
+    if (modelLoaded) return;
+    modelPreferences.clear(model);
+    setModelSettings(modelSettingsForCapabilities(DEFAULT_MODEL_SETTINGS, installedModelsRef.current.get(model)?.capabilities));
+  }
 
   useEffect(() => () => {
     for (const controller of titleRequestRef.current.values()) controller.abort();
@@ -1231,14 +1244,21 @@ export function App() {
   async function refreshModels(signal) {
     const requestId = ++modelListRequestRef.current;
     const items = await listModels(signal);
-    if (requestId !== modelListRequestRef.current) return;
+    if (signal?.aborted || requestId !== modelListRequestRef.current) return;
     const names = items.map((item) => item.name);
     const toolNames = items.filter((item) => item.capabilities?.includes("tools")).map((item) => item.name);
+    installedModelsRef.current = new Map(items.map((item) => [item.name, item]));
+    modelPreferences.prune(names);
     setModels(names);
     setVisionModels(new Set(items.filter((item) => item.capabilities?.includes("vision")).map((item) => item.name)));
     setToolModels(new Set(toolNames));
     setThinkingModels(new Set(items.filter((item) => item.capabilities?.includes("thinking")).map((item) => item.name)));
-    setModel((current) => current || toolNames[0] || names[0] || "");
+    // Ordinary refreshes keep the draft. A missing model falls back only in new-session setup.
+    if (!activeIdRef.current && (!modelRef.current || !names.includes(modelRef.current))) {
+      const nextModel = toolNames[0] || names[0] || "";
+      setModel(nextModel);
+      restoreModelPreferences(nextModel);
+    }
     setModelsLoaded(true);
     setConnected(true);
   }
@@ -1253,6 +1273,7 @@ export function App() {
     setModelNotice("");
     if (!activeId) {
       setModel(nextModel);
+      restoreModelPreferences(nextModel);
       return;
     }
     const view = conversationViewRef.current;
@@ -1587,12 +1608,14 @@ export function App() {
         setTitlePollIDs((current) => [...new Set([...current, id])]);
       }
       setModel(payload.conversation.model);
-      setConversationMode(payload.conversation.mode || "agent");
-      setSystemPrompt(payload.conversation.system_prompt || "");
-      setContextWindow(payload.conversation.context_window == null ? "default" : String(payload.conversation.context_window));
-      setThinkingMode(thinkingModeFromConversation(payload.conversation));
-      setTemperatureOverride(payload.conversation.temperature != null);
-      setTemperature(payload.conversation.temperature ?? 0.7);
+      setModelSettings({
+        conversationMode: payload.conversation.mode || "agent",
+        systemPrompt: payload.conversation.system_prompt || "",
+        contextWindow: payload.conversation.context_window == null ? "default" : String(payload.conversation.context_window),
+        thinkingMode: thinkingModeFromConversation(payload.conversation),
+        temperatureOverride: payload.conversation.temperature != null,
+        temperature: payload.conversation.temperature ?? 0.7,
+      });
       setModelLoaded(payload.conversation.message_count > 0);
       setMessages(payload.messages);
       setContextCheckpoint(payload.context_checkpoint || null);
@@ -1618,18 +1641,14 @@ export function App() {
     setMessages([]);
     setStreaming(false);
     setModelLoaded(false);
-    setConversationMode(toolModels.has(model) ? "agent" : "chat");
-    setSystemPrompt("");
-    setContextWindow("default");
-    setThinkingMode("default");
-    setTemperatureOverride(false);
-    setTemperature(0.7);
+    restoreModelPreferences(model);
     setChatError("");
     if (closeNavigation) setSidebarOpen(false);
   }
 
   function newChat() {
     resetConversation(true);
+    refreshModelChoices();
   }
 
   function restoreActionFocus() {
@@ -2056,11 +2075,11 @@ export function App() {
           modelDisabled={modelDisabled}
           onRefreshModels={refreshModelChoices}
           conversationMode={conversationMode}
-          setConversationMode={setConversationMode}
+          setConversationMode={(value) => updateChosenModelSettings({ conversationMode: value })}
           contextWindow={contextWindow}
-          setContextWindow={setContextWindow}
+          setContextWindow={(value) => updateChosenModelSettings({ contextWindow: value })}
           thinkingMode={thinkingMode}
-          setThinkingMode={setThinkingMode}
+          setThinkingMode={(value) => updateChosenModelSettings({ thinkingMode: value })}
           contextUsedTokens={currentContextUsage.usedTokens}
           contextEstimated={!!currentContextUsage.estimated}
           compacting={compacting}
@@ -2085,21 +2104,22 @@ export function App() {
           modelError={!!modelError || !!modelUnavailable}
           onRefreshModels={refreshModelChoices}
           conversationMode={conversationMode}
-          setConversationMode={setConversationMode}
+          setConversationMode={(value) => updateChosenModelSettings({ conversationMode: value })}
           supportsTools={toolModels.has(model)}
           onClose={closeSettings}
           systemPrompt={systemPrompt}
-          setSystemPrompt={setSystemPrompt}
+          setSystemPrompt={(value) => updateChosenModelSettings({ systemPrompt: value })}
           contextWindow={contextWindow}
-          setContextWindow={setContextWindow}
+          setContextWindow={(value) => updateChosenModelSettings({ contextWindow: value })}
           thinkingMode={thinkingMode}
-          setThinkingMode={setThinkingMode}
+          setThinkingMode={(value) => updateChosenModelSettings({ thinkingMode: value })}
           supportsThinking={thinkingModels.has(model)}
           modelLoaded={modelLoaded}
           temperatureOverride={temperatureOverride}
-          setTemperatureOverride={setTemperatureOverride}
+          setTemperatureOverride={(value) => updateChosenModelSettings({ temperatureOverride: value })}
           temperature={temperature}
-          setTemperature={setTemperature}
+          setTemperature={(value) => updateChosenModelSettings({ temperature: value })}
+          onResetDefaults={resetModelDefaults}
         />
       </div>
 

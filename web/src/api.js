@@ -22,7 +22,10 @@ export async function getHealth(signal) {
 
 export async function listModels(signal) {
   const payload = await request("/api/models", { signal });
-  return payload.models || [];
+  if (!Array.isArray(payload?.models) || payload.models.some((model) => typeof model?.name !== "string" || !model.name.trim())) {
+    throw new Error("Received an invalid model list");
+  }
+  return payload.models;
 }
 
 export function getSettings(signal) {

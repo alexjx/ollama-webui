@@ -13,6 +13,12 @@ answer or end of each reasoning phase, summed across the reply's model turns;
 model loading, prompt processing and tool execution are excluded. Older saved
 replies without a measured duration keep their existing thinking label.
 
+New sessions reuse your browser's saved settings for each exact model name:
+Chat/Agent mode, context window, thinking, system prompt and temperature. These
+preferences stay in this browser; existing sessions retain their saved settings.
+**Reset to model defaults** clears the selected model's preferences, and a
+successful model-list refresh removes preferences for models deleted from Ollama.
+
 After the first turn finishes successfully in a new Chat or Agent conversation, the same
 model creates a short title from the first user input and its reply. Naming runs
 in the background and updates the browser tab and session history automatically.
