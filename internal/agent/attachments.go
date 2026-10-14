@@ -12,8 +12,6 @@ import (
 	"ollama-webui/internal/store"
 )
 
-const maxAttachmentReadBytes = 8192
-
 // AttachmentStore exposes only text files owned by a conversation.
 type AttachmentStore interface {
 	ListTextAttachments(context.Context, int64) ([]store.Attachment, error)
@@ -33,8 +31,8 @@ var attachmentReadTool = ollama.Tool{
 	Type: "function",
 	Function: ollama.ToolFunction{
 		Name:        "attachment_read",
-		Description: "Read a bounded UTF-8 byte range from a user-attached text file in this conversation. Continue from next_offset when eof is false. Read only relevant ranges instead of dumping the whole file.",
-		Parameters:  json.RawMessage(`{"type":"object","properties":{"attachment_id":{"type":"integer","minimum":1},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":8192}},"required":["attachment_id"],"additionalProperties":false}`),
+		Description: "Read UTF-8 text from a user-attached file in this conversation. Choose offset and limit in bytes to fit the relevant text within your available context, allowing room for tool metadata and your answer. There is no fixed read cap; omitting limit reads the remaining file. Continue from next_offset when eof is false.",
+		Parameters:  json.RawMessage(`{"type":"object","properties":{"attachment_id":{"type":"integer","minimum":1},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"description":"Optional byte count chosen to fit your available context. Omit to read the remaining file."}},"required":["attachment_id"],"additionalProperties":false}`),
 	},
 }
 
@@ -56,7 +54,7 @@ func ModelMessage(message store.Message, includeText bool) ollama.Message {
 		if includeText {
 			result.Content += fmt.Sprintf("[Attached text file %q, attachment_id=%d]\n%s\n[End attached text file]", attachment.FileName, attachment.ID, string(attachment.Data))
 		} else {
-			result.Content += fmt.Sprintf("[User-attached text file %q: attachment_id=%d, %d bytes. Use attachment_read with this ID and bounded byte ranges to inspect the relevant contents; attachment_list can rediscover this file later.]", attachment.FileName, attachment.ID, attachment.Size)
+			result.Content += fmt.Sprintf("[User-attached text file %q: attachment_id=%d, %d bytes. Use attachment_read with this ID; choose the byte range based on your available context, or omit limit to read the remaining file. attachment_list can rediscover this file later.]", attachment.FileName, attachment.ID, attachment.Size)
 		}
 	}
 	return result
@@ -73,9 +71,9 @@ func MessageImageCount(message store.Message) int {
 }
 
 type attachmentReadArguments struct {
-	AttachmentID int64 `json:"attachment_id"`
-	Offset       int64 `json:"offset,omitempty"`
-	Limit        int64 `json:"limit,omitempty"`
+	AttachmentID int64  `json:"attachment_id"`
+	Offset       int64  `json:"offset,omitempty"`
+	Limit        *int64 `json:"limit,omitempty"`
 }
 
 func (runner Runner) executeAttachmentTool(ctx context.Context, conversationID int64, name string, raw json.RawMessage) (ShellResult, string) {
@@ -91,7 +89,7 @@ func (runner Runner) executeAttachmentTool(ctx context.Context, conversationID i
 		if err != nil {
 			return fail(err)
 		}
-		if len(data) > feedbackLimit {
+		if name == "attachment_list" && len(data) > feedbackLimit {
 			return fail(errors.New("attachment response exceeds the tool feedback budget; increase AGENT_TOOL_FEEDBACK_BYTES"))
 		}
 		return ShellResult{Output: string(data)}, "complete"
@@ -131,20 +129,14 @@ func (runner Runner) executeAttachmentTool(ctx context.Context, conversationID i
 		if err := decodeToolArguments(raw, &arguments); err != nil {
 			return fail(err)
 		}
-		if arguments.AttachmentID <= 0 || arguments.Offset < 0 || arguments.Limit < 0 || arguments.Limit > maxAttachmentReadBytes {
-			return fail(errors.New("attachment_id must be positive, offset non-negative, and limit between 1 and 8192 bytes"))
+		if arguments.AttachmentID <= 0 || arguments.Offset < 0 || (arguments.Limit != nil && *arguments.Limit <= 0) {
+			return fail(errors.New("attachment_id must be positive, offset non-negative, and limit positive when provided"))
 		}
-		if arguments.Limit == 0 {
-			arguments.Limit = 4096
+		var limit int64 // Zero means read the remaining file when limit is omitted.
+		if arguments.Limit != nil {
+			limit = *arguments.Limit
 		}
-		// JSON can escape each input byte into six bytes. Reserve metadata space
-		// so next_offset is never hidden by the outer feedback truncation.
-		maxPage := (feedbackLimit - 512) / 6
-		if maxPage < utf8.UTFMax {
-			return fail(errors.New("tool feedback budget is too small for attachment reads"))
-		}
-		arguments.Limit = min(arguments.Limit, int64(maxPage))
-		attachment, err := runner.Attachments.ReadTextAttachment(ctx, conversationID, arguments.AttachmentID, arguments.Offset, arguments.Limit)
+		attachment, err := runner.Attachments.ReadTextAttachment(ctx, conversationID, arguments.AttachmentID, arguments.Offset, limit)
 		if err != nil {
 			return fail(err)
 		}

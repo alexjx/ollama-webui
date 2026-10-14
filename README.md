@@ -29,7 +29,10 @@ artifact ID; the Agent can list and page through those artifacts when needed.
 Pasted text above 16 KiB becomes a UTF-8 text attachment in the browser before
 sending. Existing composer text stays inline. Chat mode sends labelled file text
 to the model; Agent mode receives file references and reads relevant ranges with
-conversation-scoped attachment tools. Raw inline messages are never staged to
+conversation-scoped attachment tools. Attachment reads have no fixed byte cap:
+the Agent chooses a range to fit its available context, or omits the limit to
+read the remaining file. Requested text reaches the model without tool-feedback
+clipping. Raw inline messages are never staged to
 workspace files. Prior thinking is never sent back to the model. Artifacts preserve the output
 captured by the shell executor; output beyond `SHELL_MAX_OUTPUT_BYTES` is still
 discarded at capture time and is marked as source-truncated.

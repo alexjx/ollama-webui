@@ -73,7 +73,7 @@ var labelImageDirectoryTool = ollama.Tool{
 	},
 }
 
-const SystemPrompt = `You are a general-purpose autonomous assistant. Continue until the user's task is actually complete, but answer directly when no tool is needed. A shell tool is available as an optional capability for calculation, search, inspection, execution, and verification; do not inspect or edit files unless that helps the user's request. The shell may read system paths allowed by normal OS permissions, while writes are restricted to AGENT_WORKSPACE. Delegate substantial independent work when its intermediate details would crowd the main context. For a directory of images, use the dedicated image-labeling tool so each image is processed in an isolated request and results go to a workspace JSONL file. Context tools can persist important notes or large outputs outside the prompt and retrieve them later within this conversation. When a user attaches a text file, use attachment_read with its attachment ID to inspect only relevant bounded byte ranges, keep concise intermediate notes, and avoid printing the whole file into the conversation. Use attachment_list to rediscover older attached files after compaction. Prefer narrow commands and small outputs so local model context remains focused. Do not stop after merely describing a plan. When the task is complete, reply with a concise final answer and do not call a tool. The user can interrupt you at any time.`
+const SystemPrompt = `You are a general-purpose autonomous assistant. Continue until the user's task is actually complete, but answer directly when no tool is needed. A shell tool is available as an optional capability for calculation, search, inspection, execution, and verification; do not inspect or edit files unless that helps the user's request. The shell may read system paths allowed by normal OS permissions, while writes are restricted to AGENT_WORKSPACE. Delegate substantial independent work when its intermediate details would crowd the main context. For a directory of images, use the dedicated image-labeling tool so each image is processed in an isolated request and results go to a workspace JSONL file. Context tools can persist important notes or large outputs outside the prompt and retrieve them later within this conversation. When a user attaches a text file, use attachment_read with its attachment ID. Choose how much to read based on your available context and the task; there is no fixed byte cap, and omitting limit reads the remaining file. Allow room for existing messages, tool metadata and your answer. Keep concise intermediate notes. Use attachment_list to rediscover older attached files after compaction. Prefer narrow commands and small outputs so local model context remains focused. Do not stop after merely describing a plan. When the task is complete, reply with a concise final answer and do not call a tool. The user can interrupt you at any time.`
 
 type ChatClient interface {
 	Chat(context.Context, ollama.ChatRequest, func(ollama.ChatChunk) error) error
@@ -162,7 +162,11 @@ func (runner Runner) Run(ctx context.Context, input RunInput, emit func(Event) e
 		maxTurns = runner.MaxTurns
 		tools = []ollama.Tool{shellTool}
 		if runner.Attachments != nil && input.ConversationID > 0 {
-			tools = append(tools, attachmentListTool, attachmentReadTool)
+			readTool := attachmentReadTool
+			if input.Options != nil && input.Options.NumCtx != nil && *input.Options.NumCtx > 0 {
+				readTool.Function.Description += fmt.Sprintf(" Your configured context window is %d tokens; existing messages also use this space.", *input.Options.NumCtx)
+			}
+			tools = append(tools, attachmentListTool, readTool)
 		}
 		if runner.Artifacts != nil && input.ConversationID > 0 {
 			tools = append(tools, contextListTool, contextReadTool, contextWriteTool)
@@ -535,7 +539,12 @@ func (runner Runner) executeTool(ctx context.Context, conversationID, messageID 
 	if err := emit(Event{Type: "tool.done", Turn: turn, Step: &completed}); err != nil {
 		return "", err
 	}
-	feedback, feedbackTruncated := boundedToolFeedback(result.Output, runner.ToolFeedbackLimit)
+	feedback, feedbackTruncated := result.Output, false
+	// Attachment reads already reflect the range chosen by the agent. Clipping
+	// them would discard requested text and invalidate their paging metadata.
+	if call.Function.Name != "attachment_read" {
+		feedback, feedbackTruncated = boundedToolFeedback(result.Output, runner.ToolFeedbackLimit)
+	}
 	payloadData := map[string]any{
 		"output": feedback, "output_bytes": len(result.Output), "feedback_truncated": feedbackTruncated, "exit_code": result.ExitCode,
 		"duration_ms": result.Duration.Milliseconds(), "timed_out": result.TimedOut,

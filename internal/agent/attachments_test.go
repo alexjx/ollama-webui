@@ -79,7 +79,8 @@ func TestAttachmentToolsReadScopedUTF8PagesAndRediscoverFiles(t *testing.T) {
 		fmt.Sprintf(`{"attachment_id":%d,"offset":2}`, id),
 		fmt.Sprintf(`{"attachment_id":%d,"offset":-1}`, id),
 		fmt.Sprintf(`{"attachment_id":%d,"offset":999999}`, id),
-		fmt.Sprintf(`{"attachment_id":%d,"limit":8193}`, id),
+		fmt.Sprintf(`{"attachment_id":%d,"limit":0}`, id),
+		fmt.Sprintf(`{"attachment_id":%d,"limit":-1}`, id),
 		fmt.Sprintf(`{"attachment_id":%d,"offset":1,"limit":1}`, id),
 		fmt.Sprintf(`{"attachment_id":%d}`, message.Attachments[1].ID),
 	} {
@@ -94,8 +95,8 @@ func TestAttachmentToolsReadScopedUTF8PagesAndRediscoverFiles(t *testing.T) {
 	offset := int64(0)
 	for {
 		result, status := runner.executeAttachmentTool(ctx, conversationID, "attachment_read", json.RawMessage(fmt.Sprintf(`{"attachment_id":%d,"offset":%d,"limit":8192}`, id, offset)))
-		if status != "complete" || len(result.Output) > runner.ToolFeedbackLimit {
-			t.Fatalf("read failed or exceeded feedback budget: %#v", result)
+		if status != "complete" {
+			t.Fatalf("read failed: %#v", result)
 		}
 		var page struct {
 			Content    string `json:"content"`
@@ -105,7 +106,7 @@ func TestAttachmentToolsReadScopedUTF8PagesAndRediscoverFiles(t *testing.T) {
 		if err := json.Unmarshal([]byte(result.Output), &page); err != nil {
 			t.Fatal(err)
 		}
-		if !utf8.ValidString(page.Content) || len(page.Content) > maxAttachmentReadBytes || !page.EOF && page.NextOffset <= offset {
+		if !utf8.ValidString(page.Content) || len(page.Content) > 8192 || !page.EOF && page.NextOffset <= offset {
 			t.Fatalf("invalid UTF-8 page: %#v", page)
 		}
 		reconstructed.WriteString(page.Content)
@@ -193,5 +194,160 @@ func TestRunnerAdvertisesAndExecutesTextAttachmentTools(t *testing.T) {
 	history, err := database.Messages(ctx, conversationID)
 	if err != nil || len(history[1].AgentSteps) != 1 || history[1].AgentSteps[0].Status != "complete" {
 		t.Fatalf("read tool step not persisted: %#v, %v", history, err)
+	}
+}
+
+func TestAttachmentReadUsesAgentChosenRangeWithoutFeedbackCap(t *testing.T) {
+	ctx := context.Background()
+	database, conversationID := artifactTestStore(t, ctx)
+	content := strings.Repeat("世界\"<&\r\n ", 10000)
+	message, err := database.AddMessageWithAttachments(ctx, conversationID, "user", "", "complete", []store.NewAttachment{{FileName: "large.txt", MediaType: "text/plain", Data: []byte(content)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := message.Attachments[0].ID
+	runner := Runner{Attachments: database, ToolFeedbackLimit: 256}
+	for _, test := range []struct {
+		name, arguments, want string
+		offset                int64
+	}{
+		{"large range", fmt.Sprintf(`{"attachment_id":%d,"limit":24000}`, id), content[:24000], 0},
+		{"all remaining", fmt.Sprintf(`{"attachment_id":%d,"offset":12}`, id), content[12:], 12},
+		{"past end limit", fmt.Sprintf(`{"attachment_id":%d,"limit":9223372036854775807}`, id), content, 0},
+		{"UTF-8 boundary", fmt.Sprintf(`{"attachment_id":%d,"limit":24001}`, id), content[:24000], 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			result, status := runner.executeAttachmentTool(ctx, conversationID, "attachment_read", json.RawMessage(test.arguments))
+			if status != "complete" {
+				t.Fatalf("read failed: %s", result.Output)
+			}
+			var page struct {
+				Content    string `json:"content"`
+				Offset     int64  `json:"offset"`
+				NextOffset int64  `json:"next_offset"`
+				Bytes      int    `json:"bytes"`
+				EOF        bool   `json:"eof"`
+			}
+			if err := json.Unmarshal([]byte(result.Output), &page); err != nil {
+				t.Fatal(err)
+			}
+			if page.Content != test.want || page.Offset != test.offset || page.Bytes != len(test.want) || page.NextOffset != test.offset+int64(len(test.want)) || page.EOF != (page.NextOffset == int64(len(content))) {
+				t.Fatalf("wrong range: offset=%d next=%d bytes=%d eof=%v", page.Offset, page.NextOffset, page.Bytes, page.EOF)
+			}
+		})
+	}
+}
+
+func TestRunnerReturnsLargeAttachmentReadIntactToModel(t *testing.T) {
+	ctx := context.Background()
+	database, conversationID := artifactTestStore(t, ctx)
+	content := strings.Repeat("世界\"<&\n", 6000)
+	message, err := database.AddMessageWithAttachments(ctx, conversationID, "user", "Read this", "complete", []store.NewAttachment{{FileName: "large.txt", MediaType: "text/plain", Data: []byte(content)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assistant, err := database.AddMessage(ctx, conversationID, "assistant", "", "streaming")
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := ollama.ToolCall{ID: "large-read", Function: ollama.ToolCallFunction{Name: "attachment_read", Arguments: json.RawMessage(fmt.Sprintf(`{"attachment_id":%d,"limit":%d}`, message.Attachments[0].ID, len(content)))}}
+	chat := &scriptedChat{turns: [][]ollama.ChatChunk{
+		{{Message: ollama.Message{ToolCalls: []ollama.ToolCall{call}}, Done: true}},
+		{{Message: ollama.Message{Content: "done"}, Done: true}},
+	}}
+	numCtx := 131072
+	runner := Runner{Chat: chat, Steps: database, Attachments: database, MaxTurns: 2, ToolFeedbackLimit: 8192}
+	_, err = runner.Run(ctx, RunInput{ConversationID: conversationID, AssistantMessageID: assistant.ID, Messages: []ollama.Message{ModelMessage(message, false)}, Options: &ollama.ChatOptions{NumCtx: &numCtx}}, func(Event) error { return nil })
+	if err != nil || len(chat.requests) != 2 {
+		t.Fatalf("run failed: %v", err)
+	}
+	for _, tool := range chat.requests[0].Tools {
+		if tool.Function.Name == "attachment_read" {
+			var schema struct {
+				Properties map[string]map[string]any `json:"properties"`
+			}
+			if err := json.Unmarshal(tool.Function.Parameters, &schema); err != nil {
+				t.Fatal(err)
+			}
+			if _, exists := schema.Properties["limit"]["maximum"]; exists {
+				t.Fatal("attachment tool still advertises a fixed read maximum")
+			}
+			if !strings.Contains(tool.Function.Description, "131072 tokens") {
+				t.Fatal("attachment tool omits the configured context window")
+			}
+		}
+	}
+	toolMessage := chat.requests[1].Messages[len(chat.requests[1].Messages)-1]
+	var feedback struct {
+		Output    string `json:"output"`
+		Truncated bool   `json:"feedback_truncated"`
+	}
+	if err := json.Unmarshal([]byte(toolMessage.Content), &feedback); err != nil {
+		t.Fatal(err)
+	}
+	var page struct {
+		Content    string `json:"content"`
+		NextOffset int64  `json:"next_offset"`
+		EOF        bool   `json:"eof"`
+	}
+	if err := json.Unmarshal([]byte(feedback.Output), &page); err != nil {
+		t.Fatal(err)
+	}
+	if toolMessage.ToolCallID != call.ID || feedback.Truncated || page.Content != content || page.NextOffset != int64(len(content)) || !page.EOF {
+		t.Fatalf("attachment feedback was clipped: truncated=%v bytes=%d next=%d eof=%v", feedback.Truncated, len(page.Content), page.NextOffset, page.EOF)
+	}
+	history, err := database.Messages(ctx, conversationID)
+	if err != nil || len(history) != 2 || len(history[1].AgentSteps) != 1 || history[1].AgentSteps[0].Output != feedback.Output {
+		t.Fatalf("saved read differs from model feedback: %v", err)
+	}
+}
+
+func TestSubagentReturnsLargeAttachmentReadIntactToModel(t *testing.T) {
+	ctx := context.Background()
+	database, conversationID := artifactTestStore(t, ctx)
+	content := strings.Repeat("attached text\n", 3000)
+	message, err := database.AddMessageWithAttachments(ctx, conversationID, "user", "Read this", "complete", []store.NewAttachment{{FileName: "large.txt", MediaType: "text/plain", Data: []byte(content)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assistant, err := database.AddMessage(ctx, conversationID, "assistant", "", "streaming")
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := ollama.ToolCall{ID: "child-read", Function: ollama.ToolCallFunction{Name: "attachment_read", Arguments: json.RawMessage(fmt.Sprintf(`{"attachment_id":%d}`, message.Attachments[0].ID))}}
+	chat := &scriptedChat{turns: [][]ollama.ChatChunk{
+		{{Message: ollama.Message{ToolCalls: []ollama.ToolCall{call}}, Done: true}},
+		{{Message: ollama.Message{Content: "done"}, Done: true}},
+	}}
+	orchestrator, err := NewSubagentOrchestrator(database, chat, &recordingShell{}, nil, t.TempDir(), "", 32768, 2, 1, 1024, 256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = orchestrator.Execute(ctx, SubagentRequest{ConversationID: conversationID, RequestingMessageID: assistant.ID, Model: "tools", Task: "Read the attached file."}, func(Event) error { return nil })
+	if err != nil || len(chat.requests) != 2 {
+		t.Fatalf("child run failed: %v", err)
+	}
+	var feedback struct {
+		Output    string `json:"output"`
+		Truncated bool   `json:"feedback_truncated"`
+	}
+	toolMessage := chat.requests[1].Messages[len(chat.requests[1].Messages)-1]
+	if err := json.Unmarshal([]byte(toolMessage.Content), &feedback); err != nil {
+		t.Fatal(err)
+	}
+	var page struct {
+		Content string `json:"content"`
+		EOF     bool   `json:"eof"`
+	}
+	if err := json.Unmarshal([]byte(feedback.Output), &page); err != nil {
+		t.Fatal(err)
+	}
+	if feedback.Truncated || page.Content != content || !page.EOF {
+		t.Fatalf("child attachment feedback clipped: truncated=%v bytes=%d eof=%v", feedback.Truncated, len(page.Content), page.EOF)
+	}
+	for _, tool := range chat.requests[0].Tools {
+		if tool.Function.Name == "attachment_read" && !strings.Contains(tool.Function.Description, "32768 tokens") {
+			t.Fatal("child attachment tool omits its context window")
+		}
 	}
 }
