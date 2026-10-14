@@ -270,12 +270,6 @@ function ConversationSettings({
   temperature,
   setTemperature,
   onResetDefaults,
-  webSearchEnabled,
-  onChangeWebSearch,
-  webSearchSaving,
-  webSearchError,
-  webSearchProvider,
-  webSearchProviderError,
 }) {
   return (
     <aside className="settings-panel" aria-label="Conversation settings">
@@ -322,8 +316,6 @@ function ConversationSettings({
             <p>This model uses Chat because it does not advertise tool support.</p>
           )}
         </section>
-
-        <ConversationWebSearch mode={conversationMode} enabled={webSearchEnabled} onChange={onChangeWebSearch} disabled={modelDisabled} saving={webSearchSaving} error={webSearchError} provider={webSearchProvider} providerError={webSearchProviderError} />
 
         <section className="settings-section context-section">
           <label htmlFor="context-window">Context window <Info size={17} aria-label="Context window help" /></label>
@@ -783,7 +775,7 @@ function ChatTranscript({
   );
 }
 
-function Composer({ streaming, onStop, onSend, empty, model, models, setModel, modelDisabled, onRefreshModels, conversationMode, setConversationMode, contextWindow, setContextWindow, thinkingMode, setThinkingMode, contextUsedTokens, contextEstimated, compacting, compactDisabled, compactionNotice, onCompact, disabled, supportsImages, supportsTools, supportsThinking, onOpenSettings }) {
+function Composer({ webSearchEnabled, onChangeWebSearch, webSearchSaving, webSearchError, webSearchProvider, webSearchProviderError, streaming, onStop, onSend, empty, model, models, setModel, modelDisabled, onRefreshModels, conversationMode, setConversationMode, contextWindow, setContextWindow, thinkingMode, setThinkingMode, contextUsedTokens, contextEstimated, compacting, compactDisabled, compactionNotice, onCompact, disabled, supportsImages, supportsTools, supportsThinking, onOpenSettings }) {
   const [message, setMessage] = useState("");
   const [attachments, setAttachments] = useState([]);
   const [attachmentError, setAttachmentError] = useState("");
@@ -921,6 +913,13 @@ function Composer({ streaming, onStop, onSend, empty, model, models, setModel, m
     </IconButton>
   );
 
+  const composerTools = (
+    <div className="composer-tools">
+      {attachButton}
+      <ConversationWebSearch mode={conversationMode} enabled={webSearchEnabled} onChange={onChangeWebSearch} disabled={modelDisabled} saving={webSearchSaving} provider={webSearchProvider} providerError={webSearchProviderError} />
+    </div>
+  );
+
   const sendButton = streaming ? (
     <button className="stop-button" aria-label="Stop generation" onClick={onStop}>
       <Stop size={16} weight="fill" /><span>Stop</span>
@@ -1027,7 +1026,7 @@ function Composer({ streaming, onStop, onSend, empty, model, models, setModel, m
           <>
             <div className="launch-prompt-row">{messageField}</div>
             <div className="launch-dock-footer">
-              {attachButton}
+              {composerTools}
               <label className="launch-runtime-control">
                 <span>Context</span>
                 <select aria-label="Context window" value={contextWindow} onChange={(event) => setContextWindow(event.target.value)}>
@@ -1055,7 +1054,7 @@ function Composer({ streaming, onStop, onSend, empty, model, models, setModel, m
           </>
         ) : (
           <>
-            <div className="composer-row">{attachButton}{messageField}{sendButton}</div>
+            <div className="composer-row">{messageField}<div className="composer-actions">{composerTools}{sendButton}</div></div>
             <div className="context-row">
               <span>{contextEstimated ? "Estimated context" : "Context"}&nbsp;&nbsp;{contextLabel}</span>
               <div
@@ -1075,6 +1074,7 @@ function Composer({ streaming, onStop, onSend, empty, model, models, setModel, m
             </div>
           </>
         )}
+        {webSearchError && <p className="context-feedback error" role="alert">{webSearchError}</p>}
         {compactionNotice && <p className={`context-feedback ${compactionNotice.error ? "error" : ""}`} role={compactionNotice.error ? "alert" : "status"}>{compactionNotice.message}</p>}
       </div>
     </div>
@@ -1462,6 +1462,13 @@ export function App() {
       dialog.close();
     }
   }, [clearAllOpen]);
+
+  // The composer needs provider status before any settings panel is opened.
+  useEffect(() => {
+    const controller = new AbortController();
+    refreshRuntimeSettings(controller.signal);
+    return () => controller.abort();
+  }, []);
 
   useEffect(() => {
     if (!systemSettingsOpen) return undefined;
@@ -2134,6 +2141,12 @@ export function App() {
           />
         </section>
         <Composer
+          webSearchEnabled={webSearchEnabled}
+          onChangeWebSearch={changeSessionWebSearch}
+          webSearchSaving={webSearchSaving}
+          webSearchError={webSearchError}
+          webSearchProvider={runtimeSettings?.web_search}
+          webSearchProviderError={runtimeSettingsError}
           streaming={streaming}
           onStop={() => generationRef.current?.abort()}
           onSend={sendMessage}
@@ -2189,12 +2202,6 @@ export function App() {
           temperature={temperature}
           setTemperature={(value) => updateChosenModelSettings({ temperature: value })}
           onResetDefaults={resetModelDefaults}
-          webSearchEnabled={webSearchEnabled}
-          onChangeWebSearch={changeSessionWebSearch}
-          webSearchSaving={webSearchSaving}
-          webSearchError={webSearchError}
-          webSearchProvider={runtimeSettings?.web_search}
-          webSearchProviderError={runtimeSettingsError}
         />
       </div>
 

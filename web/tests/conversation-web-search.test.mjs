@@ -43,10 +43,10 @@ test("session search saves return the confirmed choice and expose active-session
 
 test("Agent setting is keyboard-labelled, editable between replies, and disabled while saving", () => {
   const normal = render();
-  assert.match(normal, /for="conversation-web-search"/);
-  assert.match(normal, />Web search<\/label>/);
+  assert.match(normal, /aria-label="Web search"/);
+  assert.doesNotMatch(normal, />Search<\/button>/);
   assert.match(normal, /aria-describedby="conversation-web-search-help"/);
-  assert.match(normal, /checked=""/);
+  assert.match(normal, /aria-pressed="true"/);
   assert.doesNotMatch(normal, /disabled=""/);
   const saving = render({ saving: true });
   assert.match(saving, /disabled=""/);
@@ -57,7 +57,7 @@ test("Agent setting is keyboard-labelled, editable between replies, and disabled
 test("Chat stays unchecked and tool-free even when session and provider permit search", () => {
   const html = render({ mode: "chat" });
   assert.match(html, /disabled=""/);
-  assert.doesNotMatch(html, /checked=""/);
+  assert.doesNotMatch(html, /aria-pressed="true"/);
   assert.match(html, /Chat talks to the model without tools/);
 });
 
@@ -67,7 +67,7 @@ test("provider prerequisites, disabled sessions, and save errors have honest inl
   assert.match(render({ provider: { configured: true, enabled: false } }), /Tavily is disabled in System settings/);
   assert.match(render({ providerError: "Offline" }), /Could not refresh Tavily status/);
   const failed = render({ enabled: false, error: "Save failed <try again>" });
-  assert.doesNotMatch(failed, /checked=""/);
+  assert.doesNotMatch(failed, /aria-pressed="true"/);
   assert.match(failed, /Other Agent tools remain available/);
   assert.match(failed, /role="alert">Save failed &lt;try again&gt;/);
 });
