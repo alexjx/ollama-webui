@@ -31,10 +31,12 @@ export function modelSettingsForCapabilities(settings, capabilities = []) {
 // Keep an in-memory copy so blocked or full browser storage cannot break setup.
 export function createModelPreferences(storage) {
   const models = new Map();
+  let selectedModel = "";
   try {
     if (storage === undefined) storage = globalThis.localStorage;
     const saved = JSON.parse(storage?.getItem(MODEL_PREFERENCES_KEY) || "null");
     if (saved?.version === 1 && saved.models && typeof saved.models === "object" && !Array.isArray(saved.models)) {
+      if (typeof saved.selectedModel === "string" && saved.selectedModel.trim()) selectedModel = saved.selectedModel;
       for (const [name, settings] of Object.entries(saved.models)) {
         if (name.trim()) models.set(name, normalizeModelSettings(settings));
       }
@@ -45,7 +47,7 @@ export function createModelPreferences(storage) {
 
   function persist() {
     try {
-      if (models.size) storage?.setItem(MODEL_PREFERENCES_KEY, JSON.stringify({ version: 1, models: Object.fromEntries(models) }));
+      if (models.size || selectedModel) storage?.setItem(MODEL_PREFERENCES_KEY, JSON.stringify({ version: 1, selectedModel, models: Object.fromEntries(models) }));
       else storage?.removeItem(MODEL_PREFERENCES_KEY);
     } catch {
       // Settings remain usable for this page even when persistence is unavailable.
@@ -59,6 +61,12 @@ export function createModelPreferences(storage) {
   }
 
   return {
+    getSelectedModel() { return selectedModel; },
+    select(name) {
+      if (typeof name !== "string" || !name.trim()) return;
+      selectedModel = name;
+      persist();
+    },
     get(name, capabilities) {
       return modelSettingsForCapabilities(models.get(name), capabilities);
     },
@@ -73,6 +81,7 @@ export function createModelPreferences(storage) {
     prune(installedNames) {
       const installed = new Set(installedNames);
       let changed = false;
+      if (selectedModel && !installed.has(selectedModel)) { selectedModel = ""; changed = true; }
       for (const name of models.keys()) {
         if (!installed.has(name)) { models.delete(name); changed = true; }
       }

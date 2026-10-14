@@ -1279,7 +1279,7 @@ export function App() {
     setThinkingModels(new Set(items.filter((item) => item.capabilities?.includes("thinking")).map((item) => item.name)));
     // Ordinary refreshes keep the draft. A missing model falls back only in new-session setup.
     if (!activeIdRef.current && (!modelRef.current || !names.includes(modelRef.current))) {
-      const nextModel = toolNames[0] || names[0] || "";
+      const nextModel = modelPreferences.getSelectedModel() || toolNames[0] || names[0] || "";
       setModel(nextModel);
       restoreModelPreferences(nextModel);
     }
@@ -1323,6 +1323,7 @@ export function App() {
     setModelError("");
     setModelNotice("");
     if (!activeId) {
+      modelPreferences.select(nextModel);
       setModel(nextModel);
       restoreModelPreferences(nextModel);
       return;
@@ -1336,6 +1337,7 @@ export function App() {
       setConversationItems((items) => items.map((item) => item.id === updated.id ? { ...item, model: updated.model } : item));
       // A request may finish after the user has opened another conversation.
       if (view !== conversationViewRef.current) return;
+      modelPreferences.select(updated.model);
       setModel(updated.model);
       setThinkingMode(thinkingModeFromConversation(updated));
       setChatError("");
@@ -1714,7 +1716,9 @@ export function App() {
     setMessages([]);
     setStreaming(false);
     setModelLoaded(false);
-    restoreModelPreferences(model);
+    const nextModel = modelPreferences.getSelectedModel() || model;
+    setModel(nextModel);
+    restoreModelPreferences(nextModel);
     setWebSearchEnabled(true);
     setWebSearchError("");
     setChatError("");

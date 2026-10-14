@@ -109,3 +109,42 @@ test("only a valid model list can confirm deletion, including a valid empty list
   t.mock.method(globalThis, "fetch", async () => Response.json({ error: { message: "Ollama offline" } }, { status: 502 }));
   await assert.rejects(listModels(), /Ollama offline/);
 });
+
+test("selected model survives reload and settings reset without requiring custom settings", () => {
+  const storage = memoryStorage();
+  const preferences = createModelPreferences(storage);
+  preferences.select("plain:latest");
+  assert.equal(createModelPreferences(storage).getSelectedModel(), "plain:latest");
+  preferences.update("plain:latest", { contextWindow: "8192" });
+  preferences.clear("plain:latest");
+  assert.equal(createModelPreferences(storage).getSelectedModel(), "plain:latest");
+  preferences.get("historical:model", capabilities);
+  preferences.update("another:model", { thinkingMode: "high" });
+  assert.equal(preferences.getSelectedModel(), "plain:latest");
+});
+
+test("only pruning an unavailable selection clears it; older storage remains compatible", () => {
+  const storage = memoryStorage(JSON.stringify({ version: 1, models: { a: { contextWindow: "8192" } } }));
+  const preferences = createModelPreferences(storage);
+  assert.equal(preferences.getSelectedModel(), "");
+  assert.equal(preferences.get("a", capabilities).contextWindow, "8192");
+  preferences.select("a");
+  preferences.prune(["a", "b"]);
+  assert.equal(createModelPreferences(storage).getSelectedModel(), "a");
+  preferences.select("b");
+  preferences.prune(["a"]);
+  assert.equal(createModelPreferences(storage).getSelectedModel(), "");
+  assert.equal(preferences.get("a", capabilities).contextWindow, "8192");
+});
+
+test("invalid selected models are ignored and blocked storage preserves selection in memory", () => {
+  for (const selectedModel of [null, {}, 1, "", "   "]) {
+    const preferences = createModelPreferences(memoryStorage(JSON.stringify({ version: 1, selectedModel, models: {} })));
+    assert.equal(preferences.getSelectedModel(), "");
+    preferences.select(selectedModel);
+    assert.equal(preferences.getSelectedModel(), "");
+  }
+  const preferences = createModelPreferences({ getItem() { throw Error("blocked"); }, setItem() { throw Error("quota"); } });
+  preferences.select("a");
+  assert.equal(preferences.getSelectedModel(), "a");
+});
