@@ -16,6 +16,11 @@ Title requests ask the same model to turn thinking off and allow reasoning to
 finish on models that still require it, so reasoning cannot consume a short
 title-only token allowance before an answer appears.
 
+Use **Copy** on a rendered code block or **Copy Markdown** below an answer
+to copy text on HTTP deployments such as `http://ollama-webui.local`. These actions
+fall back when the modern Clipboard API is unavailable. **Select** actions remain
+available for native Ctrl+C/Cmd+C copying when browser copying is denied.
+
 Use **Generate title from latest turn** in any session's history-row menu to
 replace its name using the latest completed user question and final answer.
 This works in both modes without opening the session. New Agent replies keep an

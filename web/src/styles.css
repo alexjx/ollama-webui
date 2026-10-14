@@ -815,7 +815,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .markdown-content pre { max-width: 100%; margin: 1em 0; padding: 14px 16px; overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: #f6f7f7; line-height: 1.55; white-space: pre; overflow-wrap: normal; tab-size: 4; }
 .markdown-code-block { position: relative; min-width: 0; margin: 1em 0; }
 .markdown-code-block pre { margin: 0; padding-top: 52px; }
-.select-code-button { position: absolute; top: 6px; right: 6px; min-height: 36px; padding: 0 12px; border: 1px solid var(--line); border-radius: 6px; color: #65717a; background: #fff; font-size: 12px; font-weight: 620; box-shadow: 0 1px 3px #0000000a; user-select: none; }
+.markdown-code-actions { position: absolute; top: 6px; right: 6px; display: flex; gap: 6px; max-width: calc(100% - 12px); user-select: none; }
+.select-code-button { min-height: 36px; padding: 0 12px; border: 1px solid var(--line); border-radius: 6px; color: #65717a; background: #fff; font-size: 12px; font-weight: 620; box-shadow: 0 1px 3px #0000000a; user-select: none; }
 .select-code-button:hover { color: var(--blue-dark); background: #eef1f2; }
 .select-code-button:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 .markdown-content pre code { padding: 0; border: 0; border-radius: 0; background: transparent; }

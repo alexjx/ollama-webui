@@ -27,5 +27,7 @@ test('preserves code whitespace and provides keyboard access to scrolling region
   const html = render('```\n  spaced\n    indented\n```\n\n| a | b |\n| - | - |\n| 1 | 2 |');
   assert.match(html, /  spaced\n    indented\n/);
   assert.match(html, /<pre tabindex="0"/);
+  assert.match(html, /aria-label="Copy code"/);
+  assert.match(html, /aria-label="Select code"/);
   assert.match(html, /role="region" aria-label="Table"/);
 });

@@ -8,6 +8,7 @@ import { clampInputHeight } from "./input-resize";
 import { selectElementText } from "./select-text";
 import { fileFromLargePaste, isImageAttachment, readAttachment, splitAttachments, validateAttachmentFiles } from "./text-attachments";
 import MarkdownContent from "./markdown-content";
+import CopyButton from "./copy-button";
 import { thinkingModeForRequest, thinkingModeFromConversation } from "./thinking-mode";
 import {
   clearConversations as clearAllConversations,
@@ -34,6 +35,7 @@ import {
   ChatCircle,
   CheckCircle,
   CircleNotch,
+  Copy,
   DotsThreeVertical,
   FileText,
   Gear,
@@ -674,6 +676,12 @@ function AssistantResponse({ message }) {
       </div>
       {message.content && message.status !== "streaming" && (
         <div className="response-actions">
+          <CopyButton label="Copy Markdown" text={message.content} className="select-response-button" onFailure={() => {
+            setShowMarkdown(true);
+            selectMarkdown();
+          }}>
+            <Copy size={16} aria-hidden="true" />
+          </CopyButton>
           <button className="select-response-button" type="button" onClick={selectResponse}>
             <SelectionAll size={16} aria-hidden="true" />
             <span aria-live="polite">{selected ? "Selected" : "Select response"}</span>

@@ -2,6 +2,7 @@ import { createElement, useRef } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { selectElementText } from "./select-text.js";
+import CopyButton from "./copy-button.js";
 
 function CodeBlock({ children }) {
   const codeRef = useRef(null);
@@ -12,13 +13,18 @@ function CodeBlock({ children }) {
   }
 
   return createElement("div", { className: "markdown-code-block" },
-    createElement("button", {
-      className: "select-code-button",
-      type: "button",
-      "aria-label": "Select code",
-      title: "Select code to copy with Ctrl+C or ⌘C",
-      onClick: selectCode,
-    }, "Select"),
+    createElement("div", { className: "markdown-code-actions" },
+      createElement(CopyButton, {
+        label: "Copy", ariaLabel: "Copy code", className: "select-code-button",
+        getText: () => codeRef.current?.textContent || "", onFailure: selectCode,
+      }),
+      createElement("button", {
+        className: "select-code-button",
+        type: "button",
+        "aria-label": "Select code",
+        title: "Select code to copy with Ctrl+C or ⌘C",
+        onClick: selectCode,
+      }, "Select")),
     createElement("pre", { ref: codeRef, tabIndex: 0, "aria-label": "Code block" }, children),
   );
 }
