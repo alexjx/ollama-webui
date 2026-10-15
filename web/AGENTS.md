@@ -8,6 +8,8 @@ When implementing from a selected generated mock, treat that image as the source
 
 ## Selected design
 
+- A Workspace button opens a read-only browser of the shared Agent workspace: folder breadcrumbs, refresh, text/raster-image previews and downloads. Keep file access within the configured workspace, do not open symlinks or special files, and never execute HTML/SVG previews. Bound previews and listings; preserve responsive navigation, Escape/close focus restoration and stale-request isolation.
+
 - Session row and header menus offer Fork conversation: copy saved history, settings, attachments and compacted/agent context into an independent session, then open it. Keep the original intact; block forks during active source operations and show progress/errors. A delayed fork must not replace a different session the user has opened. Shared workspace files are not snapshotted.
 
 - Assistant answers render Markdown with readable headings, emphasis, quotes, lists, code, and tables, including while streaming. Keep wide code and tables scrollable within the response.

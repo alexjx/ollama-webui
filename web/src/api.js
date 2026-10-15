@@ -170,3 +170,11 @@ export async function deleteTurns(id, messageId) {
     }
   }
 }
+
+export function listWorkspace(path = "", offset = 0, signal) {
+  return request(`/api/workspace?${new URLSearchParams({ path, offset: String(offset) })}`, { signal });
+}
+
+export function previewWorkspaceFile(path, signal) {
+  return request(`/api/workspace/preview?${new URLSearchParams({ path })}`, { signal });
+}

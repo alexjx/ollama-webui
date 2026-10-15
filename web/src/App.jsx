@@ -12,6 +12,7 @@ import CopyButton from "./copy-button";
 import ThinkingLabel from "./thinking-label";
 import TavilySettings from "./tavily-settings";
 import WebSearchResults from "./web-search-results";
+import WorkspaceBrowser from "./workspace-browser";
 import { createSettingsRequestGuard } from "./web-search";
 import ConversationWebSearch, { conversationWebSearchEnabled } from "./conversation-web-search";
 import { applyThinkingTiming, finishThinkingTiming, thinkingDuration } from "./thinking-duration";
@@ -49,6 +50,7 @@ import {
   Copy,
   DotsThreeVertical,
   FileText,
+  FolderOpen,
   Gear,
   GitFork,
   Info,
@@ -1134,6 +1136,8 @@ export function App() {
   const [connected, setConnected] = useState(false);
   const [chatError, setChatError] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const workspaceTriggerRef = useRef(null);
+  const [workspaceOpen, setWorkspaceOpen] = useState(false);
   const [systemSettingsOpen, setSystemSettingsOpen] = useState(false);
   const [runtimeSettings, setRuntimeSettings] = useState(null);
   const [runtimeSettingsLoading, setRuntimeSettingsLoading] = useState(false);
@@ -1497,7 +1501,7 @@ export function App() {
   useEffect(() => {
     function onKeyDown(event) {
       if (event.key !== "Escape") return;
-      if (renameTarget || deleteTarget || aboutOpen || systemSettingsOpen || clearAllOpen) {
+      if (workspaceOpen || renameTarget || deleteTarget || aboutOpen || systemSettingsOpen || clearAllOpen) {
         return;
       } else if (settingsOpen && viewportWidth < 1200) {
         setSettingsOpen(false);
@@ -1511,9 +1515,10 @@ export function App() {
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [renameTarget, deleteTarget, aboutOpen, systemSettingsOpen, clearAllOpen, settingsOpen, sidebarOpen, viewportWidth]);
+  }, [workspaceOpen, renameTarget, deleteTarget, aboutOpen, systemSettingsOpen, clearAllOpen, settingsOpen, sidebarOpen, viewportWidth]);
 
   useEffect(() => {
+    if (workspaceOpen) return undefined;
     const isSettingsOverlay = settingsOpen && viewportWidth < 1200;
     const isSidebarOverlay = sidebarOpen && viewportWidth <= 900;
     const overlay = isSettingsOverlay
@@ -1542,7 +1547,7 @@ export function App() {
 
     document.addEventListener("keydown", trapFocus);
     return () => document.removeEventListener("keydown", trapFocus);
-  }, [settingsOpen, sidebarOpen, viewportWidth]);
+  }, [workspaceOpen, settingsOpen, sidebarOpen, viewportWidth]);
 
   function closeSidebar() {
     setSidebarOpen(false);
@@ -2123,6 +2128,7 @@ export function App() {
             )}
           </div>
           <div className="topbar-right">
+            <button ref={workspaceTriggerRef} type="button" className="workspace-trigger" aria-label="Open workspace" title="Browse workspace files" onClick={() => setWorkspaceOpen(true)}><FolderOpen size={21} aria-hidden="true" /><span>Workspace</span></button>
             <div className={`agent-status ${streaming || compacting ? "working" : ""}`} role="status" aria-live="polite">
               {streaming || compacting ? <CircleNotch size={16} /> : <ChatCircle size={16} />}
               <span>{compacting ? "Compacting context" : conversationMode === "agent" ? (streaming ? "Agent working" : "Agent ready") : (streaming ? "Chat responding" : "Chat ready")}</span>
@@ -2277,6 +2283,8 @@ export function App() {
           onClick={() => { if (sidebarOpen) closeSidebar(); if (viewportWidth < 1200 && settingsOpen) closeSettings(); }}
         />
       )}
+
+      {workspaceOpen && <WorkspaceBrowser onClose={() => { setWorkspaceOpen(false); window.requestAnimationFrame(() => workspaceTriggerRef.current?.focus()); }} />}
 
       <dialog
         className="system-settings-dialog"

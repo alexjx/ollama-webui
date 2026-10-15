@@ -115,6 +115,12 @@ ownership. Deleting either session leaves the other intact. Wait for an active
 response or compaction to finish before forking. Shared workspace files remain
 shared; forking does not snapshot or undo shell side effects.
 
+Open **Workspace** in the top bar to browse the shared Agent workspace from the
+web. Navigate folders, preview text and raster images, refresh after Agent changes,
+and download files. The browser is read-only; text previews show at most 256 KiB.
+Links and special files cannot be opened, and files outside the configured
+workspace are not exposed. Workspace files are shared across sessions.
+
 ## Optional shell access: safety boundary
 
 The agent can execute arbitrary shell commands. Commands may read paths visible to
