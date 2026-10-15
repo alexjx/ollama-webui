@@ -557,7 +557,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .is-new-chat .composer-wrap { max-height: calc(100dvh - var(--topbar-height)); overflow-y: auto; padding: 0 28px 72px; background: transparent; }
 .is-new-chat .composer { --message-input-height: 188px; width: min(100%, 900px); margin: 0 auto; border: 1px solid var(--line-strong); border-radius: 14px; box-shadow: 0 12px 32px rgb(38 54 63 / 7%); }
 .is-new-chat .composer:focus-within { border-color: #a8bbc6; box-shadow: 0 12px 32px rgb(38 54 63 / 7%), 0 0 0 3px rgb(50 101 135 / 8%); }
-.launch-dock-header { display: grid; grid-template-columns: minmax(190px, 1fr) auto minmax(190px, 1fr) 44px; align-items: center; gap: 14px; min-height: 72px; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+.launch-dock-header { display: grid; grid-template-columns: minmax(190px, 1fr) auto minmax(190px, 1fr) 44px; align-items: center; gap: 14px; min-height: 72px; padding: 10px 14px; }
 .launch-dock-model { min-width: 0; width: 100%; }
 .launch-dock-model select { height: 48px; padding-right: 38px; font-weight: 620; }
 .launch-dock-modes { display: flex; overflow: hidden; border: 1px solid var(--line-strong); border-radius: 9px; background: #fafbfa; }
@@ -600,10 +600,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .attach-button[aria-disabled="true"] { color: #8b9297; background: #f1f2f2; }
 .composer textarea { display: block; flex: 1; min-width: 0; height: var(--message-input-height, 48px); min-height: min(48px, 50vh); min-height: min(48px, 50dvh); max-height: 50vh; max-height: 50dvh; resize: vertical; overflow-y: auto; border: 0; outline: 0; background: transparent; font-size: 15px; line-height: 1.4; }
 .composer textarea::placeholder { color: #7b8590; }
-.input-resize-handle { display: flex; align-items: center; justify-content: center; width: 44px; height: 24px; margin: 0 auto; padding: 0; border: 0; border-radius: 4px; color: #4d6576; background: transparent; cursor: ns-resize; touch-action: none; user-select: none; }
-.input-resize-handle:hover, .input-resize-handle:active { color: #285c7d; background: #e5eef3; }
-.input-resize-handle:focus-visible { outline-offset: -3px; }
-.input-resize-grip { width: 16px; height: 5px; border-block: 1px solid currentColor; }
+.input-resize-handle { display: block; width: 100%; height: 3px; margin: 0; padding: 0; border: 0; border-radius: 0; background: var(--line); cursor: ns-resize; touch-action: none; user-select: none; }
+.input-resize-handle:hover, .input-resize-handle:active { background: var(--blue); }
+.input-resize-handle:focus-visible { outline-offset: -1px; background: var(--blue); }
 .stop-button, .send-button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-width: 82px; min-height: 42px; padding: 0 16px; border-radius: 6px; color: white; font-weight: 650; }
 .stop-button { border: 1px solid var(--stop-dark); background: var(--stop); }
 .stop-button:hover { background: var(--stop-dark); }

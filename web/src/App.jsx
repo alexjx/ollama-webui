@@ -1021,7 +1021,7 @@ function Composer({ webSearchEnabled, onChangeWebSearch, webSearchSaving, webSea
           onPointerCancel={finishInputResize}
           onLostPointerCapture={() => { resizeDragRef.current = null; }}
           onKeyDown={resizeInputWithKeyboard}
-        ><span className="input-resize-grip" aria-hidden="true" /></button>
+        />
         {empty ? (
           <>
             <div className="launch-prompt-row">{messageField}</div>
