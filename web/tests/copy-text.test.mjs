@@ -53,6 +53,17 @@ test("falls back when the modern clipboard rejects permission", async () => {
   assert.ok(fixture.calls.includes("copy"));
 });
 
+test("HTTP fallback places its input inside the active modal so it can receive focus", async () => {
+  const fixture = legacyDocument();
+  fixture.original.closest = (selector) => {
+    assert.equal(selector, "dialog[open]");
+    return { appendChild(node) { assert.equal(node, fixture.textarea); fixture.calls.push("append modal"); } };
+  };
+  assert.equal(await copyText(text, { navigatorRoot: {}, documentRoot: fixture.documentRoot }), true);
+  assert.equal(fixture.calls[0], "append modal");
+  assert.ok(fixture.calls.includes("restore focus"));
+});
+
 for (const result of [false, new Error("copy denied")]) {
   test(`reports legacy failure and cleans up when ${result}`, async () => {
     const fixture = legacyDocument(result);

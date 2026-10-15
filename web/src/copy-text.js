@@ -16,7 +16,8 @@ function legacyCopy(text, documentRoot) {
   textarea.style.cssText = "position:fixed;top:0;left:-9999px;opacity:0;";
 
   try {
-    documentRoot.body.appendChild(textarea);
+    // Modal dialogs make the rest of the document inert, including a body-level input.
+    (activeElement?.closest?.("dialog[open]") || documentRoot.body).appendChild(textarea);
     textarea.focus({ preventScroll: true });
     textarea.select();
     return documentRoot.execCommand("copy") === true;

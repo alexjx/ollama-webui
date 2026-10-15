@@ -1,7 +1,25 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowLeft, ArrowClockwise, DownloadSimple, File, Folder, FolderOpen, LinkSimple, X } from "@phosphor-icons/react";
+import { ArrowLeft, ArrowClockwise, Check, Copy, DownloadSimple, File, Folder, FolderOpen, LinkSimple, X } from "@phosphor-icons/react";
+import { copyText } from "./copy-text";
 import { listWorkspace, previewWorkspaceFile } from "./api";
 import { formatFileSize, workspaceBreadcrumbs, workspaceFileURL } from "./workspace";
+
+function CopyPreview({ preview }) {
+  const [status, setStatus] = useState("");
+  return <>
+    <button type="button" className="workspace-download" disabled={status === "copying"}
+      aria-label={preview.truncated ? "Copy text preview" : "Copy file content"}
+      title={preview.truncated ? "Copy the displayed text (first 256 KB)" : "Copy file content"}
+      onClick={async () => {
+        setStatus("copying");
+        setStatus(await copyText(preview.text ?? "") ? "copied" : "error");
+      }}>
+      {status === "copied" ? <Check size={19} aria-hidden="true" /> : <Copy size={19} aria-hidden="true" />}
+      <span>{status === "copied" ? "Copied" : preview.truncated ? "Copy preview" : "Copy"}</span>
+    </button>
+    <span className="workspace-copy-status" role="status">{status === "copied" ? "Copied to clipboard." : status === "error" ? "Could not copy. Select the text and press Ctrl+C or ⌘C." : ""}</span>
+  </>;
+}
 
 export default function WorkspaceBrowser({ onClose }) {
   const dialogRef = useRef(null);
@@ -130,6 +148,7 @@ export default function WorkspaceBrowser({ onClose }) {
               <header className="workspace-preview-heading">
                 <button type="button" className="icon-button workspace-files-back" aria-label="Back to files" onClick={backToFiles}><ArrowLeft size={20} /></button>
                 <div><h3 ref={previewHeadingRef} tabIndex={-1}>{selected.name}</h3><span>{formatFileSize(preview?.path === selected.path ? preview.size : selected.size)}</span></div>
+                {!previewLoading && preview?.path === selected.path && preview.kind === "text" && <CopyPreview key={`${selected.path}:${revision}`} preview={preview} />}
                 <a className="workspace-download" href={workspaceFileURL(selected.path)} download aria-label={`Download ${selected.name}`}><DownloadSimple size={19} aria-hidden="true" /><span>Download</span></a>
               </header>
               {previewLoading && <p className="workspace-feedback" role="status">Loading preview…</p>}
