@@ -62,6 +62,10 @@ export function getConversation(id, signal) {
   return request(`/api/conversations/${id}`, { signal });
 }
 
+export function forkConversation(id) {
+  return request(`/api/conversations/${id}/fork`, { method: "POST" });
+}
+
 export function compactConversationContext(id, signal) {
   return request(`/api/conversations/${id}/compact`, { method: "POST", signal });
 }

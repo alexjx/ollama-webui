@@ -107,6 +107,14 @@ Chat/Agent mode, and other settings are preserved; thinking resets to the new
 model's default. Agent sessions require a tool-capable replacement, and sessions
 with images require a model that supports those images.
 
+Use **Fork conversation** in the conversation menu or a history row's menu to
+continue from a copy of the entire saved session. The fork keeps the model and
+settings, messages, attachments, reasoning/tool history, and compacted Agent
+context, while giving the copied records and stored context files independent
+ownership. Deleting either session leaves the other intact. Wait for an active
+response or compaction to finish before forking. Shared workspace files remain
+shared; forking does not snapshot or undo shell side effects.
+
 ## Optional shell access: safety boundary
 
 The agent can execute arbitrary shell commands. Commands may read paths visible to

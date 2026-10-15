@@ -29,6 +29,7 @@ import {
   getHealth,
   getSettings,
   generateConversationTitle,
+  forkConversation,
   listConversations,
   listModels,
   renameConversation,
@@ -49,6 +50,7 @@ import {
   DotsThreeVertical,
   FileText,
   Gear,
+  GitFork,
   Info,
   MagnifyingGlass,
   NotePencil,
@@ -118,7 +120,7 @@ function groupConversations(items) {
   return [...groups].map(([label, groupedItems]) => ({ label, items: groupedItems }));
 }
 
-function ConversationSidebar({ activeId, conversations, query, streaming, titleRequests, titleNotices, onQuery, onSelect, onNew, onRename, onGenerateTitle, onDelete, onSettings, onAbout, onClose }) {
+function ConversationSidebar({ activeId, conversations, query, streaming, titleRequests, titleNotices, onQuery, onSelect, onNew, onRename, onGenerateTitle, onFork, forkDisabled, forkingId, onDelete, onSettings, onAbout, onClose }) {
   const filteredGroups = useMemo(() => groupConversations(conversations), [conversations]);
   const [openActionsId, setOpenActionsId] = useState(null);
 
@@ -190,7 +192,7 @@ function ConversationSidebar({ activeId, conversations, query, streaming, titleR
                       <div className="conversation-actions-menu" role="menu">
                         <button
                           role="menuitem"
-                          disabled={!!titleRequests[item.id]}
+                          disabled={!!forkingId || !!titleRequests[item.id]}
                           onClick={(event) => {
                             const trigger = event.currentTarget.closest(".conversation-entry")?.querySelector(".conversation-actions-trigger");
                             setOpenActionsId(null);
@@ -199,7 +201,7 @@ function ConversationSidebar({ activeId, conversations, query, streaming, titleR
                         ><NotePencil size={17} />Rename</button>
                         <button
                           role="menuitem"
-                          disabled={!!titleRequests[item.id] || streaming && activeId === item.id || item.message_count < 2}
+                          disabled={!!forkingId || !!titleRequests[item.id] || streaming && activeId === item.id || item.message_count < 2}
                           onClick={(event) => {
                             const trigger = event.currentTarget.closest(".conversation-entry")?.querySelector(".conversation-actions-trigger");
                             setOpenActionsId(null);
@@ -208,9 +210,19 @@ function ConversationSidebar({ activeId, conversations, query, streaming, titleR
                           }}
                         ><ArrowCounterClockwise size={17} />Generate title</button>
                         <button
+                          role="menuitem"
+                          disabled={forkDisabled || !!titleRequests[item.id]}
+                          onClick={(event) => {
+                            const trigger = event.currentTarget.closest(".conversation-entry")?.querySelector(".conversation-actions-trigger");
+                            setOpenActionsId(null);
+                            onFork(item);
+                            trigger?.focus();
+                          }}
+                        ><GitFork size={17} />{forkingId === item.id ? "Forking…" : "Fork conversation"}</button>
+                        <button
                           className="danger-menu-item"
                           role="menuitem"
-                          disabled={!!titleRequests[item.id] || streaming && activeId === item.id}
+                          disabled={!!forkingId || !!titleRequests[item.id] || streaming && activeId === item.id}
                           onClick={(event) => {
                             const trigger = event.currentTarget.closest(".conversation-entry")?.querySelector(".conversation-actions-trigger");
                             setOpenActionsId(null);
@@ -1129,6 +1141,9 @@ export function App() {
   const [settingsRequestGuard] = useState(createSettingsRequestGuard);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const forkRequestRef = useRef(null);
+  const [forkingId, setForkingId] = useState(null);
+  const [forkNotice, setForkNotice] = useState(null);
   const [renameTarget, setRenameTarget] = useState(null);
   const [renameTitle, setRenameTitle] = useState("");
   const [renameError, setRenameError] = useState("");
@@ -1292,7 +1307,7 @@ export function App() {
   }
 
   async function changeSessionWebSearch(enabled) {
-    if (conversationMode !== "agent" || streaming || titleRequestRef.current.has(activeId) || compactionRef.current || modelChangeRef.current || webSearchChangeRef.current || loadingConversation || deletingTurns || turnDeleteTarget) return;
+    if (forkRequestRef.current || conversationMode !== "agent" || streaming || titleRequestRef.current.has(activeId) || compactionRef.current || modelChangeRef.current || webSearchChangeRef.current || loadingConversation || deletingTurns || turnDeleteTarget) return;
     setWebSearchError("");
     if (!activeId) {
       setWebSearchEnabled(enabled);
@@ -1319,7 +1334,7 @@ export function App() {
   }
 
   async function changeModel(nextModel) {
-    if (nextModel === model || streaming || titleRequestRef.current.has(activeId) || compactionRef.current || modelChangeRef.current || webSearchChangeRef.current || loadingConversation || deletingTurns || turnDeleteTarget) return;
+    if (forkRequestRef.current || nextModel === model || streaming || titleRequestRef.current.has(activeId) || compactionRef.current || modelChangeRef.current || webSearchChangeRef.current || loadingConversation || deletingTurns || turnDeleteTarget) return;
     setModelError("");
     setModelNotice("");
     if (!activeId) {
@@ -1741,8 +1756,32 @@ export function App() {
     }, 0);
   }
 
+  async function forkSession(conversation) {
+    if (forkRequestRef.current || streaming || compactionRef.current || modelChangeRef.current || webSearchChangeRef.current || loadingConversation || deletingTurns || turnDeleteTarget || deleting || clearingAll || titleRequestRef.current.has(conversation.id)) return;
+    const view = conversationViewRef.current;
+    const pending = forkConversation(conversation.id);
+    forkRequestRef.current = pending;
+    setForkingId(conversation.id);
+    setForkNotice(null);
+    try {
+      const created = await pending;
+      if (view === conversationViewRef.current) {
+        setQuery("");
+        await chooseConversation(created.id);
+      } else {
+        setForkNotice({ message: "Fork created: " + created.title, id: created.id });
+      }
+      await refreshConversations(queryRef.current).catch(() => {});
+    } catch (error) {
+      setForkNotice({ message: "Could not fork conversation: " + error.message, error: true });
+    } finally {
+      forkRequestRef.current = null;
+      setForkingId(null);
+    }
+  }
+
   function openRename(conversation, trigger) {
-    if (titleRequestRef.current.has(conversation.id)) return;
+    if (forkRequestRef.current || titleRequestRef.current.has(conversation.id)) return;
     actionReturnRef.current = trigger;
     setRenameTitle(conversation.title);
     setRenameError("");
@@ -1785,7 +1824,7 @@ export function App() {
   }
 
   async function generateLatestSessionTitle(conversation) {
-    if (titleRequestRef.current.has(conversation.id) || (conversation.id === activeId && (streaming || compactionRef.current || modelChangeRef.current || webSearchChangeRef.current || deletingTurns))) return;
+    if (forkRequestRef.current || titleRequestRef.current.has(conversation.id) || (conversation.id === activeId && (streaming || compactionRef.current || modelChangeRef.current || webSearchChangeRef.current || deletingTurns))) return;
     const controller = new AbortController();
     titleRequestRef.current.set(conversation.id, controller);
     setTitleRequests((current) => ({ ...current, [conversation.id]: true }));
@@ -1809,7 +1848,7 @@ export function App() {
   }
 
   function openDelete(conversation, trigger) {
-    if (titleRequestRef.current.has(conversation.id) || (streaming || webSearchChangeRef.current) && activeId === conversation.id) return;
+    if (forkRequestRef.current || titleRequestRef.current.has(conversation.id) || (streaming || webSearchChangeRef.current) && activeId === conversation.id) return;
     actionReturnRef.current = trigger;
     setDeleteError("");
     setDeleteTarget(conversation);
@@ -1873,7 +1912,7 @@ export function App() {
   }
 
   async function manuallyCompactContext() {
-    if (!activeId || streaming || titleRequestRef.current.has(activeId) || compactionRef.current || modelChangeRef.current || webSearchChangeRef.current || loadingConversation || deletingTurns || turnDeleteTarget) return;
+    if (forkRequestRef.current || !activeId || streaming || titleRequestRef.current.has(activeId) || compactionRef.current || modelChangeRef.current || webSearchChangeRef.current || loadingConversation || deletingTurns || turnDeleteTarget) return;
     const view = conversationViewRef.current;
     const controller = new AbortController();
     compactionRef.current = controller;
@@ -1901,7 +1940,7 @@ export function App() {
   }
 
   async function sendMessage(value, attachments = [], onAccepted = () => {}) {
-    if (!model || !models.includes(model) || streaming || titleRequestRef.current.has(activeId) || compactionRef.current || modelChangeRef.current || webSearchChangeRef.current || loadingConversation || deletingTurns || turnDeleteTarget) return;
+    if (forkRequestRef.current || !model || !models.includes(model) || streaming || titleRequestRef.current.has(activeId) || compactionRef.current || modelChangeRef.current || webSearchChangeRef.current || loadingConversation || deletingTurns || turnDeleteTarget) return;
     setChatError("");
     setModelError("");
     setModelNotice("");
@@ -2032,7 +2071,7 @@ export function App() {
   const overlaySettings = settingsOpen && viewportWidth < 1200;
   const sidebarVisible = viewportWidth > 900 || sidebarOpen;
   const modelUnavailable = modelsLoaded && model && !models.includes(model);
-  const modelDisabled = streaming || activeTitleGenerating || compacting || changingModel || webSearchSaving || loadingConversation || deletingTurns || !!turnDeleteTarget;
+  const modelDisabled = !!forkingId || streaming || activeTitleGenerating || compacting || changingModel || webSearchSaving || loadingConversation || deletingTurns || !!turnDeleteTarget;
   const modelFeedback = changingModel ? "Changing model…" : modelError || (modelUnavailable ? "This model is no longer installed. Choose another model to continue this conversation." : modelNotice);
 
   return (
@@ -2050,6 +2089,9 @@ export function App() {
           onNew={newChat}
           onRename={openRename}
           onGenerateTitle={generateLatestSessionTitle}
+          onFork={forkSession}
+          forkingId={forkingId}
+          forkDisabled={modelDisabled || deleting || clearingAll}
           onDelete={openDelete}
           onSettings={openSystemSettings}
           onAbout={openAbout}
@@ -2057,7 +2099,7 @@ export function App() {
         />
       </div>
 
-      <main className={`chat-workspace ${!activeId ? "is-new-chat" : ""} ${modelFeedback ? "has-model-feedback" : ""}`}>
+      <main className={`chat-workspace ${!activeId ? "is-new-chat" : ""} ${modelFeedback || forkingId || forkNotice ? "has-model-feedback" : ""}`}>
         <header className="topbar">
           <div className="topbar-left">
             <IconButton
@@ -2109,16 +2151,25 @@ export function App() {
                   ><SlidersHorizontal size={19} />Conversation settings</button>
                   <button
                     role="menuitem"
-                    disabled={!activeId || activeTitleGenerating}
+                    disabled={!activeId || !!forkingId || activeTitleGenerating}
                     onClick={() => {
                       setMenuOpen(false);
                       openRename({ id: activeId, title: activeTitle }, settingsTriggerRef.current);
                     }}
                   ><NotePencil size={19} />Rename chat</button>
                   <button
+                    role="menuitem"
+                    disabled={!activeId || modelDisabled || deleting || clearingAll}
+                    onClick={() => {
+                      setMenuOpen(false);
+                      forkSession({ id: activeId, title: activeTitle });
+                      settingsTriggerRef.current?.focus();
+                    }}
+                  ><GitFork size={19} />Fork conversation</button>
+                  <button
                     className="danger-menu-item"
                     role="menuitem"
-                    disabled={!activeId || streaming || compacting || activeTitleGenerating}
+                    disabled={!activeId || !!forkingId || streaming || compacting || activeTitleGenerating}
                     onClick={() => {
                       setMenuOpen(false);
                       openDelete({ id: activeId, title: activeTitle }, settingsTriggerRef.current);
@@ -2130,7 +2181,17 @@ export function App() {
           </div>
         </header>
 
-        {modelFeedback && <div id="active-model-feedback" className={`model-feedback ${modelError || modelUnavailable ? "model-feedback-error" : ""}`} role={modelError ? "alert" : "status"}>{modelFeedback}</div>}
+        {(modelFeedback || forkingId || forkNotice) && (
+          <div>
+            {modelFeedback && <div id="active-model-feedback" className={`model-feedback ${modelError || modelUnavailable ? "model-feedback-error" : ""}`} role={modelError ? "alert" : "status"}>{modelFeedback}</div>}
+            {(forkingId || forkNotice) && (
+              <div className={`model-feedback ${forkNotice?.error ? "model-feedback-error" : ""}`} role={forkNotice?.error ? "alert" : "status"}>
+                {forkingId ? "Forking conversation…" : forkNotice.message}
+                {!forkingId && forkNotice?.id && <button type="button" className="fork-open-button" onClick={() => { chooseConversation(forkNotice.id); setForkNotice(null); }}>Open fork</button>}
+              </div>
+            )}
+          </div>
+        )}
 
         <section className="transcript" aria-label="Conversation" ref={transcriptRef}>
           <ChatTranscript
@@ -2172,7 +2233,7 @@ export function App() {
           compactDisabled={!activeId || modelDisabled || modelUnavailable || !messages.length}
           compactionNotice={compactionNotice}
           onCompact={manuallyCompactContext}
-          disabled={!model || !models.includes(model) || compacting || activeTitleGenerating || changingModel || webSearchSaving || loadingConversation || deletingTurns || !!turnDeleteTarget || conversationMode === "agent" && !toolModels.has(model)}
+          disabled={!!forkingId || !model || !models.includes(model) || compacting || activeTitleGenerating || changingModel || webSearchSaving || loadingConversation || deletingTurns || !!turnDeleteTarget || conversationMode === "agent" && !toolModels.has(model)}
           supportsImages={visionModels.has(model)}
           supportsTools={toolModels.has(model)}
           supportsThinking={thinkingModels.has(model)}
@@ -2231,7 +2292,7 @@ export function App() {
           runtime={runtimeSettings}
           loading={runtimeSettingsLoading}
           error={runtimeSettingsError}
-          streaming={streaming || compacting || webSearchSaving || Object.keys(titleRequests).length > 0}
+          streaming={!!forkingId || streaming || compacting || webSearchSaving || Object.keys(titleRequests).length > 0}
           onRefresh={refreshRuntimeSettings}
           onSaveWebSearch={saveSearchSettings}
           onTestWebSearch={testWebSearchSettings}

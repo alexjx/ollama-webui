@@ -93,6 +93,7 @@ func New(database *store.Store, ollamaClient *ollama.Client, runner agent.Runner
 	mux.HandleFunc("DELETE /api/conversations/{id}", server.deleteConversation)
 	mux.HandleFunc("POST /api/conversations/{id}/messages", server.generate)
 	mux.HandleFunc("POST /api/conversations/{id}/compact", server.compactConversation)
+	mux.HandleFunc("POST /api/conversations/{id}/fork", server.forkConversation)
 	mux.HandleFunc("POST /api/conversations/{id}/title", server.generateLatestTitle)
 	mux.HandleFunc("DELETE /api/conversations/{id}/messages/{messageID}", server.deleteMessagesFrom)
 	mux.HandleFunc("GET /api/attachments/{id}", server.attachment)

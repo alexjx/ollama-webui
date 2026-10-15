@@ -8,6 +8,8 @@ When implementing from a selected generated mock, treat that image as the source
 
 ## Selected design
 
+- Session row and header menus offer Fork conversation: copy saved history, settings, attachments and compacted/agent context into an independent session, then open it. Keep the original intact; block forks during active source operations and show progress/errors. A delayed fork must not replace a different session the user has opened. Shared workspace files are not snapshotted.
+
 - Assistant answers render Markdown with readable headings, emphasis, quotes, lists, code, and tables, including while streaming. Keep wide code and tables scrollable within the response.
 - Preserve a native Select Markdown copy path for HTTP deployments using hosts-file names: select the original source for Ctrl+C/Cmd+C without depending on the Clipboard API.
 - Copy Markdown and rendered code copying must work on http://ollama-webui.local: try the modern Clipboard API when available, then a user-initiated legacy copy fallback on HTTP. Preserve exact whitespace and Unicode, drafts, focus and selections; show Copied only when copying succeeds. Keep native Select actions for browsers that reject both copy methods.
