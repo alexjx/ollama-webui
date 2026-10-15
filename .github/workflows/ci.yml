@@ -99,6 +99,20 @@ jobs:
             su-exec webui:webui test -w /workspace
           '
 
+      - name: Set up Go for sandbox runtime test
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+
+      - name: Verify Python through the agent sandbox
+        run: |
+          CGO_ENABLED=0 go test -c -o "$RUNNER_TEMP/agent-runtime.test" ./internal/agent
+          docker run --rm --user 1000:1000 \
+            --env TEST_CONTAINER_PYTHON=1 --env TMPDIR=/workspace \
+            --mount "type=bind,src=$RUNNER_TEMP/agent-runtime.test,dst=/agent-runtime.test,readonly" \
+            --entrypoint /agent-runtime.test ollama-webui:ci \
+            -test.run '^TestContainerPythonRuntime$' -test.v
+
       - name: Smoke-test running container
         run: |
           set -euo pipefail

@@ -164,9 +164,20 @@ docker compose exec ollama ollama pull qwen3:8b
 ```
 
 The default image is multi-stage: Node and Go toolchains exist only in build
-stages. The final Alpine image keeps the small shell toolkit used by Agent mode,
+stages. The final Alpine image includes Python 3, pip, uv and the shell toolkit used by Agent mode,
 but contains neither compiler nor frontend source. If `./workspace` is bind-mounted,
 it must be writable by container UID 1000 so shell tasks work.
+
+Agent mode can run Python through its existing shell tool. Prefer `uv run script.py`
+or create a workspace-local environment with `uv venv .venv` and install packages
+with `uv pip install --python .venv/bin/python PACKAGE`. Without uv, use
+`python3 -m venv .venv`, `.venv/bin/python -m pip install PACKAGE`, then
+`.venv/bin/python script.py`. Reuse an existing project environment when present.
+Keep scripts, environments and outputs inside the workspace; caches and temporary
+files also stay there through the agent shell's existing environment settings.
+Workspace files persist across container replacement when mounted. Package downloads
+need network access. Native extensions without compatible Alpine wheels may need
+additional build dependencies in a custom image; compilers are not bundled.
 
 ## Container releases
 

@@ -21,7 +21,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     go build -trimpath -ldflags="-s -w" -o /out/ollama-webui ./cmd/server
 
 FROM alpine:3.22
-RUN apk add --no-cache bash ca-certificates curl git jq ripgrep su-exec \
+RUN apk add --no-cache bash ca-certificates curl git jq ripgrep su-exec python3 py3-pip uv \
     && addgroup -g 1000 -S webui \
     && adduser -u 1000 -S -G webui webui \
     && mkdir -p /data /workspace /app/web \
