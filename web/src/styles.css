@@ -929,16 +929,23 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .templates-sidebar-button {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 13px;
+  flex-shrink: 0;
+  width: 100%;
   min-height: 44px;
-  margin: -8px 18px 16px;
-  padding: 8px 14px;
+  margin: -8px 0 16px;
+  padding: 8px 18px;
   border: 1px solid var(--line);
-  border-radius: 9px;
-  background: transparent;
+  border-radius: 10px;
+  color: var(--blue);
+  background: var(--canvas);
+  font-weight: 550;
   text-align: left;
+  transition: background 160ms ease, border-color 160ms ease;
 }
-.templates-sidebar-button:hover { background: var(--surface-active); }
+.templates-sidebar-button svg { flex-shrink: 0; }
+.templates-sidebar-button:hover { border-color: var(--line-strong); background: var(--surface-active); }
+.templates-sidebar-button:active { background: var(--surface-active); color: var(--blue-dark); }
 
 /* New replies retain the order of model text, thinking and tool activity. */
 .response-timeline { min-width: 0; }
