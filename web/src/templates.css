@@ -1,0 +1,69 @@
+.templates-dialog { width: min(960px, calc(100vw - 40px)); max-height: calc(100dvh - 48px); padding: 0; border: 1px solid var(--line); border-radius: 12px; background: var(--canvas); color: var(--text); box-shadow: 0 20px 70px #0003; overflow: hidden; }
+.templates-dialog::backdrop { background: #18242c66; }
+.templates-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; padding: 22px 24px; border-bottom: 1px solid var(--line); }
+.templates-header h2 { font-size: 20px; margin: 0; }
+.templates-header p { margin: 5px 0 0; color: var(--muted); font-size: 13px; }
+.templates-body { display: grid; grid-template-columns: 270px minmax(0, 1fr); height: min(650px, calc(100dvh - 160px)); }
+.templates-library { padding: 16px; background: var(--side); border-right: 1px solid var(--line); overflow: auto; }
+.templates-library > p, .templates-library [role=alert] { font-size: 13px; color: var(--muted); }
+.templates-dialog input:not([type=checkbox]), .templates-dialog select, .templates-dialog textarea { display: block; width: 100%; padding: 9px 10px; border: 1px solid var(--line); border-radius: 5px; background: white; margin-top: 5px; }
+.templates-dialog textarea { resize: vertical; min-height: 70px; }
+.templates-dialog label { display: block; font-size: 13px; font-weight: 550; margin: 14px 0; }
+.templates-dialog button:disabled { cursor: not-allowed; opacity: .5; }
+.templates-create { width: 100%; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 5px; background: white; margin-bottom: 14px; }
+.templates-library ul { list-style: none; margin: 14px 0; padding: 0; }
+.templates-library li button { display: block; width: 100%; text-align: left; padding: 12px 10px; border-radius: 5px; background: transparent; overflow-wrap: anywhere; }
+.templates-library li button:hover { background: var(--surface); }
+.templates-library li button[aria-current=true] { background: var(--surface-active); }
+.templates-library li strong, .templates-library li span { display: block; }
+.templates-library li strong { font-size: 14px; }
+.templates-library li span { color: var(--muted); font-size: 12px; margin-top: 4px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.templates-detail { min-width: 0; overflow: auto; padding: 24px; }
+.templates-detail h3 { margin: 0 0 12px; font-size: 19px; overflow-wrap: anywhere; }
+.templates-detail h4 { font-size: 12px; color: var(--muted); margin: 22px 0 8px; }
+.templates-detail p { overflow-wrap: anywhere; }
+.templates-detail pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: 14px; padding: 14px; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; max-height: 260px; overflow: auto; }
+.templates-detail fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+.templates-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; margin-top: 20px; }
+.templates-actions button { padding: 9px 13px; background: white; border: 1px solid var(--line); border-radius: 5px; font-size: 13px; }
+.templates-actions .templates-primary { background: var(--blue); color: white; border-color: var(--blue); }
+.templates-actions .templates-danger { background: var(--stop); color: white; border-color: var(--stop); }
+.templates-management { justify-content: flex-start; margin-top: 12px; }
+.templates-muted, .templates-settings > p { color: var(--muted); font-size: 12px; font-weight: normal; }
+.templates-dialog .templates-check { display: flex; align-items: center; gap: 8px; }
+.templates-settings { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; padding: 12px; background: var(--surface); border-radius: 6px; }
+.templates-settings > p { grid-column: 1 / -1; margin: 0; }
+.templates-settings label { min-width: 0; }
+.templates-detail dl { font-size: 13px; }
+.templates-detail dl > div { display: flex; justify-content: space-between; gap: 16px; padding: 5px 0; border-bottom: 1px solid var(--line); }
+.templates-detail dd { margin: 0; overflow-wrap: anywhere; text-align: right; }
+.templates-error { color: var(--stop-dark); font-size: 13px; }
+.templates-confirm { padding: 24px; }
+.templates-empty { margin: 90px auto; max-width: 330px; color: var(--muted); text-align: center; }
+.templates-back { display: none; }
+@media (max-width: 640px) {
+  .templates-dialog { width: 100vw; max-width: 100vw; height: 100dvh; max-height: 100dvh; margin: 0; border-radius: 0; border: 0; }
+  .templates-header { padding: 16px; }
+  .templates-header h2 { font-size: 18px; }
+  .templates-body { display: block; height: calc(100dvh - 103px); }
+  .templates-library, .templates-detail { height: 100%; padding: 16px; }
+  .templates-body:not(.templates-has-detail) .templates-detail, .templates-has-detail .templates-library { display: none; }
+  .templates-back { display: flex; align-items: center; gap: 6px; background: transparent; color: var(--blue); padding: 0; margin-bottom: 20px; }
+  .templates-settings { grid-template-columns: 1fr; }
+}
+/* Keep the header visible while either pane scrolls, including with larger text. */
+.templates-dialog[open] { display: flex; flex-direction: column; height: min(760px, calc(100dvh - 48px)); }
+.templates-header { flex-shrink: 0; }
+.templates-body { flex: 1; min-height: 0; height: auto; }
+.templates-confirm { min-height: 0; overflow: auto; }
+.templates-dialog button { min-height: 44px; }
+.templates-dialog .icon-button { min-width: 44px; flex-shrink: 0; }
+.templates-dialog input:not([type=checkbox]), .templates-dialog select { min-height: 44px; }
+.templates-dialog .templates-check { min-height: 44px; }
+@media (max-width: 640px) {
+  .templates-dialog[open] { height: 100dvh; }
+  .templates-header { padding-top: max(16px, env(safe-area-inset-top)); padding-left: max(16px, env(safe-area-inset-left)); padding-right: max(16px, env(safe-area-inset-right)); }
+  .templates-body { height: auto; overflow: hidden; }
+  .templates-library, .templates-detail, .templates-confirm { padding-left: max(16px, env(safe-area-inset-left)); padding-right: max(16px, env(safe-area-inset-right)); padding-bottom: max(16px, env(safe-area-inset-bottom)); }
+  .templates-back { padding-right: 12px; }
+}

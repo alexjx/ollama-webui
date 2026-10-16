@@ -19,6 +19,25 @@ preferences stay in this browser; existing sessions retain their saved settings.
 **Reset to model defaults** clears the selected model's preferences, and a
 successful model-list refresh removes preferences for models deleted from Ollama.
 
+Open **Templates** in the sidebar or **Choose template** beside the message input
+to create, search, preview, edit, duplicate, or delete reusable conversation
+templates. Each template has a name, optional description, message and/or system
+instructions, and optional new-chat settings. **Conversation menu → Save as
+template** starts an editable template from the current settings and lets you
+choose a saved user message. Responses, attachments, and tool history are excluded.
+
+**Use in new chat** loads a template into an editable draft, including its system
+instructions and any saved settings. Unspecified settings inherit the current
+setup; blank system instructions use the model's default. **Insert message** adds
+only the template's message and preserves the current settings and conversation.
+If a draft already exists, choose **Append** (the default) or **Replace draft
+text**; attachments are kept. Nothing is sent until you press **Send**. Missing or
+incompatible models require choosing a suitable model or adjusting the draft
+settings before sending. Applying a template does not change remembered browser
+defaults. Templates are stored in the server database and share the same access
+scope as conversations. Editing or deleting a template does not change existing
+conversations, and clearing conversation history preserves the template library.
+
 To enable web search, open **Settings → Web search**, enter your **Tavily API
 token**, enable **Web search in Agent mode**, and choose **Save**. **Test search**
 checks the saved token with one basic search. Agent models can then call

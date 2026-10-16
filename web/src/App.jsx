@@ -13,6 +13,8 @@ import ThinkingLabel from "./thinking-label";
 import TavilySettings from "./tavily-settings";
 import WebSearchResults from "./web-search-results";
 import WorkspaceBrowser from "./workspace-browser";
+import TemplatesDialog from "./templates-dialog";
+import { insertTemplateMessage, templateDraft, templateSettings } from "./conversation-templates";
 import { createSettingsRequestGuard } from "./web-search";
 import ConversationWebSearch, { conversationWebSearchEnabled } from "./conversation-web-search";
 import { applyThinkingTiming, finishThinkingTiming, thinkingDuration } from "./thinking-duration";
@@ -122,7 +124,7 @@ function groupConversations(items) {
   return [...groups].map(([label, groupedItems]) => ({ label, items: groupedItems }));
 }
 
-function ConversationSidebar({ activeId, conversations, query, streaming, titleRequests, titleNotices, onQuery, onSelect, onNew, onRename, onGenerateTitle, onFork, forkDisabled, forkingId, onDelete, onSettings, onAbout, onClose }) {
+function ConversationSidebar({ activeId, conversations, query, streaming, titleRequests, titleNotices, onQuery, onSelect, onNew, onTemplates, onRename, onGenerateTitle, onFork, forkDisabled, forkingId, onDelete, onSettings, onAbout, onClose }) {
   const filteredGroups = useMemo(() => groupConversations(conversations), [conversations]);
   const [openActionsId, setOpenActionsId] = useState(null);
 
@@ -140,6 +142,10 @@ function ConversationSidebar({ activeId, conversations, query, streaming, titleR
       <button className="new-chat-button" onClick={onNew}>
         <NotePencil size={23} weight="regular" />
         <span>New chat</span>
+      </button>
+
+      <button className="templates-sidebar-button" onClick={(event) => onTemplates(event.currentTarget)}>
+        <FileText size={22} aria-hidden="true" /><span>Templates</span>
       </button>
 
       <label className="search-field">
@@ -340,6 +346,7 @@ function ConversationSettings({
               disabled={modelLoaded}
               onChange={(event) => setContextWindow(event.target.value)}
             >
+              {!CONTEXT_WINDOW_VALUES.includes(contextWindow) && <option value={contextWindow}>{Number(contextWindow).toLocaleString()} tokens</option>}
               {contextWindows.map((item) => (
                 <option key={item.value} value={item.value}>{item.label}</option>
               ))}
@@ -359,12 +366,12 @@ function ConversationSettings({
             <select
               id="thinking-mode"
               value={thinkingMode}
-              disabled={modelLoaded || !supportsThinking}
+              disabled={modelLoaded || !supportsThinking && thinkingMode === "default"}
               onChange={(event) => setThinkingMode(event.target.value)}
             >
               {supportsThinking
                 ? thinkingModes.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)
-                : <option value="default">Not supported</option>}
+                : <><option value="default">{thinkingMode === "default" ? "Not supported" : "Ollama default (no override)"}</option>{thinkingMode !== "default" && <option value={thinkingMode} disabled>{thinkingMode} — not supported</option>}</>}
             </select>
             <CaretDown size={18} aria-hidden="true" />
           </div>
@@ -789,8 +796,7 @@ function ChatTranscript({
   );
 }
 
-function Composer({ webSearchEnabled, onChangeWebSearch, webSearchSaving, webSearchError, webSearchProvider, webSearchProviderError, streaming, onStop, onSend, empty, model, models, setModel, modelDisabled, onRefreshModels, conversationMode, setConversationMode, contextWindow, setContextWindow, thinkingMode, setThinkingMode, contextUsedTokens, contextEstimated, compacting, compactDisabled, compactionNotice, onCompact, disabled, supportsImages, supportsTools, supportsThinking, onOpenSettings }) {
-  const [message, setMessage] = useState("");
+function Composer({ message, setMessage, onTemplates, webSearchEnabled, onChangeWebSearch, webSearchSaving, webSearchError, webSearchProvider, webSearchProviderError, streaming, onStop, onSend, empty, model, models, setModel, modelDisabled, onRefreshModels, conversationMode, setConversationMode, contextWindow, setContextWindow, thinkingMode, setThinkingMode, contextUsedTokens, contextEstimated, compacting, compactDisabled, compactionNotice, onCompact, disabled, supportsImages, supportsTools, supportsThinking, onOpenSettings }) {
   const [attachments, setAttachments] = useState([]);
   const [attachmentError, setAttachmentError] = useState("");
   const [draggingImages, setDraggingImages] = useState(false);
@@ -930,6 +936,7 @@ function Composer({ webSearchEnabled, onChangeWebSearch, webSearchSaving, webSea
   const composerTools = (
     <div className="composer-tools">
       {attachButton}
+      <IconButton label="Choose template" className="attach-button" onClick={(event) => onTemplates(event.currentTarget)}><FileText size={22} /></IconButton>
       <ConversationWebSearch mode={conversationMode} enabled={webSearchEnabled} onChange={onChangeWebSearch} disabled={modelDisabled} saving={webSearchSaving} provider={webSearchProvider} providerError={webSearchProviderError} />
     </div>
   );
@@ -1044,16 +1051,17 @@ function Composer({ webSearchEnabled, onChangeWebSearch, webSearchSaving, webSea
               <label className="launch-runtime-control">
                 <span>Context</span>
                 <select aria-label="Context window" value={contextWindow} onChange={(event) => setContextWindow(event.target.value)}>
+                  {!CONTEXT_WINDOW_VALUES.includes(contextWindow) && <option value={contextWindow}>{Number(contextWindow).toLocaleString()} tokens</option>}
                   {contextWindows.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
                 </select>
                 <CaretDown size={16} aria-hidden="true" />
               </label>
               <label className="launch-runtime-control">
                 <span>Thinking</span>
-                <select aria-label="Thinking" value={thinkingMode} disabled={!supportsThinking} onChange={(event) => setThinkingMode(event.target.value)}>
+                <select aria-label="Thinking" value={thinkingMode} disabled={!supportsThinking && thinkingMode === "default"} onChange={(event) => setThinkingMode(event.target.value)}>
                   {supportsThinking
                     ? thinkingModes.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)
-                    : <option value="default">Not supported</option>}
+                    : <><option value="default">{thinkingMode === "default" ? "Not supported" : "Ollama default (no override)"}</option>{thinkingMode !== "default" && <option value={thinkingMode} disabled>{thinkingMode} — not supported</option>}</>}
                 </select>
                 <CaretDown size={16} aria-hidden="true" />
               </label>
@@ -1096,6 +1104,10 @@ function Composer({ webSearchEnabled, onChangeWebSearch, webSearchSaving, webSea
 }
 
 export function App() {
+  const [draftMessage, setDraftMessage] = useState("");
+  const [templatesDialog, setTemplatesDialog] = useState(null);
+  const templatesTriggerRef = useRef(null);
+  const templateDraftRef = useRef(false);
   const [activeId, setActiveId] = useState(null);
   const [activeTitle, setActiveTitle] = useState("");
   const [titlePollIDs, setTitlePollIDs] = useState([]);
@@ -1213,6 +1225,8 @@ export function App() {
   function updateChosenModelSettings(patch) {
     if (modelLoaded) return;
     const next = normalizeModelSettings({ ...modelSettings, ...patch });
+    // A template/API may supply a context size outside the quick-pick list.
+    if (!Object.hasOwn(patch, "contextWindow")) next.contextWindow = modelSettings.contextWindow;
     setModelSettings(next);
     // Only explicit edits save defaults; loading a saved conversation never does.
     if (installedModelsRef.current.has(model)) modelPreferences.update(model, patch);
@@ -1297,7 +1311,7 @@ export function App() {
     setToolModels(new Set(toolNames));
     setThinkingModels(new Set(items.filter((item) => item.capabilities?.includes("thinking")).map((item) => item.name)));
     // Ordinary refreshes keep the draft. A missing model falls back only in new-session setup.
-    if (!activeIdRef.current && (!modelRef.current || !names.includes(modelRef.current))) {
+    if (!templateDraftRef.current && !activeIdRef.current && (!modelRef.current || !names.includes(modelRef.current))) {
       const nextModel = modelPreferences.getSelectedModel() || toolNames[0] || names[0] || "";
       setModel(nextModel);
       restoreModelPreferences(nextModel);
@@ -1344,7 +1358,7 @@ export function App() {
     if (!activeId) {
       modelPreferences.select(nextModel);
       setModel(nextModel);
-      restoreModelPreferences(nextModel);
+      if (!templateDraftRef.current) restoreModelPreferences(nextModel);
       return;
     }
     const view = conversationViewRef.current;
@@ -1386,13 +1400,13 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (!activeId && !modelLoaded && model && !thinkingModels.has(model) && thinkingMode !== "default") {
+    if (!templateDraftRef.current && !activeId && !modelLoaded && model && !thinkingModels.has(model) && thinkingMode !== "default") {
       setThinkingMode("default");
     }
   }, [activeId, model, modelLoaded, thinkingMode, thinkingModels]);
 
   useEffect(() => {
-    if (!activeId && !modelLoaded && model && !toolModels.has(model) && conversationMode === "agent") {
+    if (!templateDraftRef.current && !activeId && !modelLoaded && model && !toolModels.has(model) && conversationMode === "agent") {
       setConversationMode("chat");
     }
   }, [activeId, conversationMode, model, modelLoaded, toolModels]);
@@ -1501,7 +1515,7 @@ export function App() {
   useEffect(() => {
     function onKeyDown(event) {
       if (event.key !== "Escape") return;
-      if (workspaceOpen || renameTarget || deleteTarget || aboutOpen || systemSettingsOpen || clearAllOpen) {
+      if (templatesDialog || workspaceOpen || renameTarget || deleteTarget || aboutOpen || systemSettingsOpen || clearAllOpen) {
         return;
       } else if (settingsOpen && viewportWidth < 1200) {
         setSettingsOpen(false);
@@ -1515,10 +1529,10 @@ export function App() {
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [workspaceOpen, renameTarget, deleteTarget, aboutOpen, systemSettingsOpen, clearAllOpen, settingsOpen, sidebarOpen, viewportWidth]);
+  }, [templatesDialog, workspaceOpen, renameTarget, deleteTarget, aboutOpen, systemSettingsOpen, clearAllOpen, settingsOpen, sidebarOpen, viewportWidth]);
 
   useEffect(() => {
-    if (workspaceOpen) return undefined;
+    if (templatesDialog || workspaceOpen) return undefined;
     const isSettingsOverlay = settingsOpen && viewportWidth < 1200;
     const isSidebarOverlay = sidebarOpen && viewportWidth <= 900;
     const overlay = isSettingsOverlay
@@ -1547,7 +1561,7 @@ export function App() {
 
     document.addEventListener("keydown", trapFocus);
     return () => document.removeEventListener("keydown", trapFocus);
-  }, [workspaceOpen, settingsOpen, sidebarOpen, viewportWidth]);
+  }, [templatesDialog, workspaceOpen, settingsOpen, sidebarOpen, viewportWidth]);
 
   function closeSidebar() {
     setSidebarOpen(false);
@@ -1675,6 +1689,8 @@ export function App() {
   }
 
   async function chooseConversation(id) {
+    templateDraftRef.current = false;
+    setTemplatesDialog(null);
     const view = ++conversationViewRef.current;
     setLoadingConversation(true);
     setModelError("");
@@ -1722,6 +1738,8 @@ export function App() {
   }
 
   function resetConversation(closeNavigation = true) {
+    templateDraftRef.current = false;
+    setTemplatesDialog(null);
     ++conversationViewRef.current;
     detailRequestRef.current?.abort();
     setLoadingConversation(false);
@@ -1748,6 +1766,50 @@ export function App() {
   function newChat() {
     resetConversation(true);
     refreshModelChoices();
+  }
+
+  function openTemplates(trigger, fromConversation = false) {
+    templatesTriggerRef.current = trigger;
+    setMenuOpen(false);
+    const sourceMessages = messages.filter((message) => message.role === "user" && message.status === "complete");
+    setTemplatesDialog({
+      view: conversationViewRef.current,
+      sourceMessages: fromConversation ? sourceMessages : [],
+      initialTemplate: fromConversation ? {
+        name: Array.from(activeTitle || "").slice(0, 120).join(""),
+        description: "",
+        message: sourceMessages[0]?.content || draftMessage,
+        system_prompt: systemPrompt,
+        settings: templateSettings(model, modelSettings, webSearchEnabled),
+      } : null,
+    });
+  }
+
+  function closeTemplates(focusComposer = false) {
+    setTemplatesDialog(null);
+    window.requestAnimationFrame(() => {
+      const trigger = templatesTriggerRef.current;
+      if (focusComposer || !trigger?.isConnected) document.getElementById("message-input")?.focus();
+      else trigger.focus();
+    });
+  }
+
+  function applyTemplate(template, target, insertion) {
+    if (templatesDialog?.view !== conversationViewRef.current) return "This conversation has changed. Reopen Templates to continue.";
+    if (modelDisabled || deleting || clearingAll) return "Wait for the current operation to finish before applying a template.";
+    if (target === "current" && !template.message?.trim()) return "This template has no message to insert. Use it in a new chat instead.";
+    if (target === "new") {
+      const next = templateDraft(template, { model, modelSettings, webSearchEnabled });
+      resetConversation(true);
+      templateDraftRef.current = true;
+      setModel(next.model);
+      setModelSettings(next.modelSettings);
+      setWebSearchEnabled(next.webSearchEnabled);
+      setModelNotice(`Template “${template.name}” loaded. Review your message and settings, then send.`);
+    }
+    setDraftMessage((current) => insertTemplateMessage(current, template.message, insertion));
+    closeTemplates(true);
+    return "";
   }
 
   function restoreActionFocus() {
@@ -1946,6 +2008,7 @@ export function App() {
 
   async function sendMessage(value, attachments = [], onAccepted = () => {}) {
     if (forkRequestRef.current || !model || !models.includes(model) || streaming || titleRequestRef.current.has(activeId) || compactionRef.current || modelChangeRef.current || webSearchChangeRef.current || loadingConversation || deletingTurns || turnDeleteTarget) return;
+    if (!activeId && templateDraftRef.current && (conversationMode === "agent" && !toolModels.has(model) || thinkingMode !== "default" && !thinkingModels.has(model))) return;
     setChatError("");
     setModelError("");
     setModelNotice("");
@@ -2076,8 +2139,15 @@ export function App() {
   const overlaySettings = settingsOpen && viewportWidth < 1200;
   const sidebarVisible = viewportWidth > 900 || sidebarOpen;
   const modelUnavailable = modelsLoaded && model && !models.includes(model);
+  const templateModelError = !activeId && templateDraftRef.current && !modelUnavailable && (
+    conversationMode === "agent" && !toolModels.has(model)
+      ? "This template uses Agent mode. Choose a tool-capable model or switch to Chat."
+      : thinkingMode !== "default" && !thinkingModels.has(model)
+        ? "This template requests thinking. Choose a thinking-capable model or select Ollama default for Thinking."
+        : ""
+  );
   const modelDisabled = !!forkingId || streaming || activeTitleGenerating || compacting || changingModel || webSearchSaving || loadingConversation || deletingTurns || !!turnDeleteTarget;
-  const modelFeedback = changingModel ? "Changing model…" : modelError || (modelUnavailable ? "This model is no longer installed. Choose another model to continue this conversation." : modelNotice);
+  const modelFeedback = changingModel ? "Changing model…" : modelError || (modelUnavailable ? "This model is no longer installed. Choose another model to continue this conversation." : templateModelError || modelNotice);
 
   return (
     <div className={`app-shell ${settingsOpen ? "settings-is-open" : ""}`}>
@@ -2092,6 +2162,7 @@ export function App() {
           onQuery={setQuery}
           onSelect={chooseConversation}
           onNew={newChat}
+          onTemplates={openTemplates}
           onRename={openRename}
           onGenerateTitle={generateLatestSessionTitle}
           onFork={forkSession}
@@ -2155,6 +2226,7 @@ export function App() {
                     role="menuitem"
                     onClick={() => openConversationSettings(settingsTriggerRef.current)}
                   ><SlidersHorizontal size={19} />Conversation settings</button>
+                  <button role="menuitem" disabled={modelDisabled || deleting || clearingAll} onClick={() => openTemplates(settingsTriggerRef.current, true)}><FileText size={19} />Save as template</button>
                   <button
                     role="menuitem"
                     disabled={!activeId || !!forkingId || activeTitleGenerating}
@@ -2212,6 +2284,9 @@ export function App() {
           />
         </section>
         <Composer
+          message={draftMessage}
+          setMessage={setDraftMessage}
+          onTemplates={openTemplates}
           webSearchEnabled={webSearchEnabled}
           onChangeWebSearch={changeSessionWebSearch}
           webSearchSaving={webSearchSaving}
@@ -2239,7 +2314,7 @@ export function App() {
           compactDisabled={!activeId || modelDisabled || modelUnavailable || !messages.length}
           compactionNotice={compactionNotice}
           onCompact={manuallyCompactContext}
-          disabled={!!forkingId || !model || !models.includes(model) || compacting || activeTitleGenerating || changingModel || webSearchSaving || loadingConversation || deletingTurns || !!turnDeleteTarget || conversationMode === "agent" && !toolModels.has(model)}
+          disabled={!!forkingId || !model || !models.includes(model) || !!templateModelError || compacting || activeTitleGenerating || changingModel || webSearchSaving || loadingConversation || deletingTurns || !!turnDeleteTarget || conversationMode === "agent" && !toolModels.has(model)}
           supportsImages={visionModels.has(model)}
           supportsTools={toolModels.has(model)}
           supportsThinking={thinkingModels.has(model)}
@@ -2285,6 +2360,18 @@ export function App() {
       )}
 
       {workspaceOpen && <WorkspaceBrowser onClose={() => { setWorkspaceOpen(false); window.requestAnimationFrame(() => workspaceTriggerRef.current?.focus()); }} />}
+
+      {templatesDialog && <TemplatesDialog
+        onClose={() => closeTemplates()}
+        onApply={applyTemplate}
+        initialTemplate={templatesDialog.initialTemplate}
+        sourceMessages={templatesDialog.sourceMessages}
+        models={models}
+        currentSettings={templateSettings(model, modelSettings, webSearchEnabled)}
+        hasConversation={!!activeId}
+        hasDraft={!!draftMessage}
+        applyDisabled={modelDisabled || deleting || clearingAll}
+      />}
 
       <dialog
         className="system-settings-dialog"

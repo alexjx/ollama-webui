@@ -249,6 +249,16 @@ func (s *Store) migrate(ctx context.Context) error {
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
 PRAGMA busy_timeout = 5000;
+CREATE TABLE IF NOT EXISTS conversation_templates (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  message TEXT NOT NULL DEFAULT '',
+  system_prompt TEXT NOT NULL DEFAULT '',
+  settings TEXT NOT NULL DEFAULT 'null',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS web_search_settings (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),

@@ -178,3 +178,28 @@ export function listWorkspace(path = "", offset = 0, signal) {
 export function previewWorkspaceFile(path, signal) {
   return request(`/api/workspace/preview?${new URLSearchParams({ path })}`, { signal });
 }
+
+export async function listTemplates(signal) {
+  const payload = await request("/api/templates", { signal });
+  return payload.items || [];
+}
+
+export function createTemplate(input) {
+  return request("/api/templates", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateTemplate(id, input) {
+  return request(`/api/templates/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+}
+
+export function deleteTemplate(id) {
+  return request(`/api/templates/${id}`, { method: "DELETE" });
+}

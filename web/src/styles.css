@@ -925,3 +925,17 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   .workspace-preview-heading { padding: 8px; gap: 6px; }
   .workspace-download span { display: none; }
 }
+
+.templates-sidebar-button {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 44px;
+  margin: -8px 18px 16px;
+  padding: 8px 14px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: transparent;
+  text-align: left;
+}
+.templates-sidebar-button:hover { background: var(--surface-active); }
