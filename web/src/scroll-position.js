@@ -7,3 +7,7 @@ export function scrollToEnd(element) {
   }
   return true;
 }
+
+export function isNearTranscriptEnd(element, threshold = 64) {
+  return !!element && element.scrollHeight - element.scrollTop - element.clientHeight <= threshold;
+}

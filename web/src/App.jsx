@@ -2,8 +2,9 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { contextUsage } from "./context-usage";
 import { applyKnownConversationTitles, mergeConversationTitles, newestConversationTitle } from "./conversation-titles";
 import { cancelRunningSubagents, reduceSubagentEvent } from "./agent-events";
+import { finalizeActivity, readActivityBlocks, recordActivityEvent } from "./activity-timeline";
 import { formatDuration, formatRate, responseMetrics } from "./response-metrics";
-import { scrollToEnd } from "./scroll-position";
+import { isNearTranscriptEnd, scrollToEnd } from "./scroll-position";
 import { clampInputHeight } from "./input-resize";
 import { selectElementText } from "./select-text";
 import { fileFromLargePaste, isImageAttachment, readAttachment, splitAttachments, validateAttachmentFiles } from "./text-attachments";
@@ -510,11 +511,11 @@ function SystemSettings({ open, connected, modelCount, runtime, loading, error, 
   );
 }
 
-function AgentActivity({ message, mode }) {
+function AgentActivity({ message, mode, showProgress = true, progressOnly = false, roundLabel = "Turn" }) {
   const thinkingRef = useRef(null);
   const steps = message.agent_steps || [];
   const subagentRuns = message.subagent_runs || [];
-  const hasActivity = message.status === "streaming" || Boolean(message.thinking) || steps.length > 0 || subagentRuns.length > 0;
+  const hasActivity = progressOnly || message.status === "streaming" || Boolean(message.thinking) || steps.length > 0 || subagentRuns.length > 0;
 
   const phaseLabels = {
     starting: "Starting",
@@ -542,16 +543,16 @@ function AgentActivity({ message, mode }) {
 
   return (
     <section className={`agent-activity ${phase}`} aria-label={mode === "agent" ? "Agent activity" : "Response activity"}>
-      <div className="agent-progress" role="status" aria-live="polite">
+      {showProgress && <div className="agent-progress" role="status" aria-live="polite">
         <span className="agent-progress-icon" aria-hidden="true">
           {active ? <CircleNotch size={17} /> : phase === "finished" ? <CheckCircle size={17} /> : <Stop size={15} weight="fill" />}
         </span>
         <strong>{phaseLabels[phase] || "Working"}</strong>
-        {turn && <span>Turn {turn}</span>}
+        {turn && <span>{roundLabel} {turn}</span>}
         {steps.length > 0 && <span>{steps.length} {steps.length === 1 ? "action" : "actions"}</span>}
-      </div>
+      </div>}
 
-      {message.thinking && (
+      {!progressOnly && message.thinking && (
         <details className="thinking-step" open={liveThinking}>
           <summary>
             <span className="agent-step-icon"><Brain size={17} /></span>
@@ -562,7 +563,7 @@ function AgentActivity({ message, mode }) {
         </details>
       )}
 
-      {steps.length > 0 && (
+      {!progressOnly && steps.length > 0 && (
         <div className="agent-steps" aria-label="Tool activity">
           {steps.map((step) => {
             let parsedInput = {};
@@ -593,7 +594,7 @@ function AgentActivity({ message, mode }) {
         </div>
       )}
 
-      {subagentRuns.length > 0 && (
+      {!progressOnly && subagentRuns.length > 0 && (
         <div className="subagent-runs" aria-label="Child tasks" aria-live="polite">
           {subagentRuns.map((run) => {
             const statusLabel = run.status === "running" ? "Running" : run.status === "complete" ? "Complete" : run.status === "cancelled" ? "Stopped" : run.status === "failed" ? "Failed" : "Queued";
@@ -664,7 +665,7 @@ function ResponseMetrics({ message }) {
   );
 }
 
-function AssistantResponse({ message }) {
+function AssistantResponse({ message, showActions = true }) {
   const contentRef = useRef(null);
   const markdownRef = useRef(null);
   const markdownButtonRef = useRef(null);
@@ -696,7 +697,7 @@ function AssistantResponse({ message }) {
         <MarkdownContent>{message.content || (message.status === "streaming" ? "" : "No response was generated.")}</MarkdownContent>
         {message.status === "streaming" && <span className="stream-cursor" aria-hidden="true" />}
       </div>
-      {message.content && message.status !== "streaming" && (
+      {showActions && message.content && message.status !== "streaming" && (
         <div className="response-actions">
           <CopyButton label="Copy Markdown" text={message.content} className="select-response-button" onFailure={() => {
             setShowMarkdown(true);
@@ -731,6 +732,39 @@ function AssistantResponse({ message }) {
       )}
     </>
   );
+}
+
+function AssistantMessage({ message, mode }) {
+  const blocks = readActivityBlocks(message);
+  // Historical replies have no recorded ordering. Keep their original display.
+  if (blocks === null) return <>
+    <AgentActivity message={message} mode={mode} />
+    {(message.content || message.status !== "streaming") && <AssistantResponse message={message} />}
+  </>;
+
+  return <section className="response-timeline" aria-label="Response progress">
+    <AgentActivity message={message} mode={mode} progressOnly roundLabel="Round" />
+    <ol className="response-timeline-blocks">
+      {blocks.map((block, index) => {
+        const newRound = mode === "agent" && block.turn > 0 && (index === 0 || blocks[index - 1].turn !== block.turn);
+        const activity = {
+          ...message,
+          thinking: block.type === "thinking" ? block.text : "",
+          agent_steps: block.type === "tool" ? [block.step] : [],
+          subagent_runs: block.type === "subagent" ? [block.run] : [],
+          thinking_timing: block.thinking_timing,
+          metadata: { ...message.metadata, thinking_duration_ms: block.duration_ms },
+        };
+        return <li className={`response-timeline-block timeline-${block.type}`} key={block.key} data-activity-type={block.type} data-round={block.turn}>
+          {newRound && <div className="timeline-round">Round {block.turn}</div>}
+          {block.type === "content"
+            ? <AssistantResponse message={{ ...message, content: block.text, status: block.live ? "streaming" : message.status === "streaming" ? "complete" : message.status }} showActions={message.status !== "streaming"} />
+            : <AgentActivity message={activity} mode={mode} showProgress={false} />}
+        </li>;
+      })}
+    </ol>
+    {!blocks.some((block) => block.type === "content") && message.status !== "streaming" && <p className="message-status">No response text was generated.</p>}
+  </section>;
 }
 
 function ChatTranscript({
@@ -774,9 +808,8 @@ function ChatTranscript({
               ))}
             </div>
           )}
-          {message.role === "assistant" && <AgentActivity message={message} mode={conversationMode} />}
           {message.role === "assistant"
-            ? (message.content || message.status !== "streaming") && <AssistantResponse message={message} />
+            ? <AssistantMessage message={message} mode={conversationMode} />
             : message.content && <p className="message-content">{message.content}</p>}
           {message.status === "cancelled" && <p className="message-status">Generation stopped</p>}
           {message.status === "error" && <p className="message-status error">Generation failed</p>}
@@ -1207,6 +1240,7 @@ export function App() {
   const clearAllReturnRef = useRef(null);
   const actionReturnRef = useRef(null);
   const transcriptRef = useRef(null);
+  const followProgressRef = useRef(true);
   const currentContextUsage = useMemo(() => contextUsage(messages, contextWindow, contextCheckpoint), [messages, contextWindow, contextCheckpoint]);
   const activeTitleGenerating = !!titleRequests[activeId];
 
@@ -1243,8 +1277,16 @@ export function App() {
   }, []);
 
   useLayoutEffect(() => {
+    followProgressRef.current = true;
     if (activeId) scrollToEnd(transcriptRef.current);
   }, [activeId, scrollRequest]);
+
+  useLayoutEffect(() => {
+    const latest = messages.at(-1);
+    if (followProgressRef.current && (latest?.activity?.version === 1 || latest?.metadata?.activity?.version === 1)) {
+      scrollToEnd(transcriptRef.current);
+    }
+  }, [messages]);
 
   async function refreshConversations(search = query, signal) {
     const refreshed = await listConversations(search, signal);
@@ -2050,6 +2092,10 @@ export function App() {
         signal: controller.signal,
         ...splitAttachments(attachments),
         onEvent(event) {
+          // Capture order before the aggregate reducers append text/update tools.
+          // Only a new server's activity.started event enables the timeline.
+          if (event.type !== "started") setMessages((current) => current.map((message, index) =>
+            index === current.length - 1 ? recordActivityEvent(message, event) : message));
           if (event.type === "started") {
             accepted = true;
             onAccepted();
@@ -2107,7 +2153,7 @@ export function App() {
         : current.map((message, index) =>
         index === current.length - 1 && message.role === "assistant"
           ? {
-              ...finishThinkingTiming(message),
+              ...finishThinkingTiming(finalizeActivity(message)),
               status: cancelled ? "cancelled" : "error",
               agent_phase: cancelled ? "stopped" : "error",
               agent_steps: (message.agent_steps || []).map((step) =>
@@ -2271,7 +2317,7 @@ export function App() {
           </div>
         )}
 
-        <section className="transcript" aria-label="Conversation" ref={transcriptRef}>
+        <section className="transcript" aria-label="Conversation" ref={transcriptRef} onScroll={(event) => { followProgressRef.current = isNearTranscriptEnd(event.currentTarget); }}>
           <ChatTranscript
             streaming={streaming}
             compacting={compacting}

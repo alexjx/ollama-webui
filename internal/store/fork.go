@@ -147,13 +147,19 @@ func (s *Store) ForkConversation(ctx context.Context, sourceID int64, copyArtifa
 	}
 	// References embedded in persisted tool transcripts and checkpoint state must
 	// refer to the fork too; metric values and unrelated numeric data stay intact.
-	pairs := make([]string, 0, len(keys)*2)
-	for old, newKey := range keys {
-		pairs = append(pairs, old, newKey)
-	}
-	replacer := strings.NewReplacer(pairs...)
 	for _, table := range copied {
 		for _, row := range table.rows {
+			textOffsets := map[string]func(int) int{}
+			// Column order can differ for databases created before migrations.
+			if table.name == "messages" {
+				for i, col := range table.columns {
+					if col == "content" || col == "thinking" {
+						if value, ok := row[i].(string); ok {
+							_, textOffsets[col] = rewriteForkText(value, keys, ids)
+						}
+					}
+				}
+			}
 			var primary any
 			primaryColumn := "id"
 			if table.name == "context_checkpoints" {
@@ -169,28 +175,12 @@ func (s *Store) ForkConversation(ctx context.Context, sourceID int64, copyArtifa
 				if !ok || col == "storage_key" {
 					continue
 				}
-				changed := replacer.Replace(value)
-				changed = forkNumericReference.ReplaceAllStringFunc(changed, func(reference string) string {
-					parts := forkNumericReference.FindStringSubmatch(reference)
-					oldID, _ := strconv.ParseInt(parts[3], 10, 64)
-					table := "messages"
-					if strings.Contains(parts[1], "attachment_id") {
-						table = "message_attachments"
-					}
-					if newID, ok := ids[table][oldID]; ok {
-						return parts[1] + parts[2] + strconv.FormatInt(newID, 10)
-					}
-					return reference
-				})
-				changed = forkAttachmentURL.ReplaceAllStringFunc(changed, func(url string) string {
-					oldID, _ := strconv.ParseInt(strings.TrimPrefix(url, "/api/attachments/"), 10, 64)
-					if newID, ok := ids["message_attachments"][oldID]; ok {
-						return "/api/attachments/" + strconv.FormatInt(newID, 10)
-					}
-					return url
-				})
+				changed, _ := rewriteForkText(value, keys, ids)
 				if col == "metadata_json" || col == "state_json" {
 					changed = remapForkMessageReferences(changed, ids["messages"])
+				}
+				if table.name == "messages" && col == "metadata_json" {
+					changed = remapForkActivity(changed, ids, textOffsets)
 				}
 				if changed != value {
 					updates = append(updates, col+"=?")
@@ -226,6 +216,59 @@ func (s *Store) ForkConversation(ctx context.Context, sourceID int64, copyArtifa
 }
 
 var forkAttachmentURL = regexp.MustCompile(`/api/attachments/[0-9]+`)
+
+func remapForkActivity(value string, ids map[string]map[int64]int64, offsets map[string]func(int) int) string {
+	var metadata map[string]json.RawMessage
+	if json.Unmarshal([]byte(value), &metadata) != nil {
+		return value
+	}
+	var activity map[string]json.RawMessage
+	if json.Unmarshal(metadata["activity"], &activity) != nil {
+		return value
+	}
+	var blocks []map[string]json.RawMessage
+	if json.Unmarshal(activity["blocks"], &blocks) != nil {
+		return value
+	}
+	changed := false
+	if remap := offsets["content"]; remap != nil {
+		var old int
+		if json.Unmarshal(metadata["final_answer_start"], &old) == nil && remap(old) != old {
+			metadata["final_answer_start"], _ = json.Marshal(remap(old))
+			changed = true
+		}
+	}
+	for _, block := range blocks {
+		var kind string
+		_ = json.Unmarshal(block["type"], &kind)
+		if remap := offsets[kind]; remap != nil {
+			for _, key := range []string{"start", "end"} {
+				var old int
+				if json.Unmarshal(block[key], &old) == nil && remap(old) != old {
+					block[key], _ = json.Marshal(remap(old))
+					changed = true
+				}
+			}
+		}
+		for key, table := range map[string]string{"step_id": "agent_steps", "run_id": "agent_runs"} {
+			var old int64
+			if json.Unmarshal(block[key], &old) == nil {
+				if replacement, ok := ids[table][old]; ok {
+					block[key], _ = json.Marshal(replacement)
+					changed = true
+				}
+			}
+		}
+	}
+	if !changed {
+		return value
+	}
+	activity["blocks"], _ = json.Marshal(blocks)
+	metadata["activity"], _ = json.Marshal(activity)
+	encoded, _ := json.Marshal(metadata)
+	return string(encoded)
+}
+
 var forkNumericReference = regexp.MustCompile(`("(?:attachment_id|message_id)"|\battachment_id)(\s*:\s*|=)([0-9]+)`)
 
 func forkRows(ctx context.Context, tx *sql.Tx, query string, args ...any) ([]string, [][]any, error) {
@@ -276,4 +319,65 @@ func remapForkMessageReferences(value string, ids map[int64]int64) string {
 		return value
 	}
 	return string(encoded)
+}
+
+// Translate byte offsets through managed-reference edits as well as rewriting
+// the text. Boundaries within an edited ID remain monotonic; boundaries after
+// it shift by the exact byte-length difference.
+func rewriteForkText(value string, keys map[string]string, ids map[string]map[int64]int64) (string, func(int) int) {
+	patterns := []string{forkAttachmentURL.String(), forkNumericReference.String()}
+	for key := range keys {
+		patterns = append(patterns, regexp.QuoteMeta(key))
+	}
+	pattern := regexp.MustCompile(strings.Join(patterns, "|"))
+	type edit struct{ start, end, size int }
+	edits := []edit{}
+	var output strings.Builder
+	previous := 0
+	for _, match := range pattern.FindAllStringIndex(value, -1) {
+		original := value[match[0]:match[1]]
+		replacement := original
+		if key, ok := keys[original]; ok {
+			replacement = key
+		} else if strings.HasPrefix(original, "/api/attachments/") {
+			old, _ := strconv.ParseInt(strings.TrimPrefix(original, "/api/attachments/"), 10, 64)
+			if id, ok := ids["message_attachments"][old]; ok {
+				replacement = "/api/attachments/" + strconv.FormatInt(id, 10)
+			}
+		} else if parts := forkNumericReference.FindStringSubmatch(original); parts != nil {
+			old, _ := strconv.ParseInt(parts[3], 10, 64)
+			table := "messages"
+			if strings.Contains(parts[1], "attachment_id") {
+				table = "message_attachments"
+			}
+			if id, ok := ids[table][old]; ok {
+				replacement = parts[1] + parts[2] + strconv.FormatInt(id, 10)
+			}
+		}
+		output.WriteString(value[previous:match[0]])
+		output.WriteString(replacement)
+		if replacement != original {
+			// Keep the unchanged prefix outside the edit (for example the URL path).
+			prefix := 0
+			for prefix < len(original) && prefix < len(replacement) && original[prefix] == replacement[prefix] {
+				prefix++
+			}
+			edits = append(edits, edit{match[0] + prefix, match[1], len(replacement) - prefix})
+		}
+		previous = match[1]
+	}
+	output.WriteString(value[previous:])
+	return output.String(), func(offset int) int {
+		shift := 0
+		for _, e := range edits {
+			if offset <= e.start {
+				break
+			}
+			if offset < e.end {
+				return e.start + shift + min(offset-e.start, e.size)
+			}
+			shift += e.size - (e.end - e.start)
+		}
+		return offset + shift
+	}
 }

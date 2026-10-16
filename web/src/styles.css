@@ -939,3 +939,18 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   text-align: left;
 }
 .templates-sidebar-button:hover { background: var(--surface-active); }
+
+/* New replies retain the order of model text, thinking and tool activity. */
+.response-timeline { min-width: 0; }
+.response-timeline > .agent-activity { padding: 0; margin: 8px 0 12px; border: 0; background: transparent; }
+.response-timeline-blocks { display: grid; gap: 12px; margin: 0; padding: 0; list-style: none; }
+.response-timeline-block { min-width: 0; }
+.response-timeline-block .agent-activity { padding: 0; margin: 0; border: 0; background: transparent; }
+.timeline-round { display: flex; align-items: center; gap: 12px; margin: 8px 0 12px; color: var(--muted); font-size: 12px; font-weight: 600; }
+.timeline-round::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+.response-timeline .thinking-step summary, .response-timeline .agent-step summary, .response-timeline .subagent-run summary { min-height: 44px; }
+.response-timeline .thinking-content { white-space: pre-wrap; }
+@media (prefers-reduced-motion: reduce) {
+  .response-timeline .agent-progress-icon svg, .response-timeline .subagent-run-icon svg, .response-timeline .stream-cursor { animation: none; }
+}
+.response-timeline .agent-progress { flex-wrap: wrap; }

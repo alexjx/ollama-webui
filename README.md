@@ -7,9 +7,17 @@ continues until the task is complete. The Go service streams both modes to a
 responsive React interface and stores chats, model thinking, image and text attachments,
 and tool traces in SQLite.
 
+New replies display thinking, response text, tool calls and child tasks in the
+order they occur, with round markers when the agent continues. Thinking and tool
+details remain expandable. Each text segment has its own copy and selection
+actions after completion. The view follows new output while you are near the
+bottom and lets you scroll up to read earlier output. The sequence persists
+across reloads and forks, including stopped replies. Older replies retain their
+existing grouped display; historical boundaries are not reconstructed.
+
 Thinking sections show a live duration and retain **Thought for …** after the
 reply finishes or stops. Time is measured from the first thinking output to the
-answer or end of each reasoning phase, summed across the reply's model turns;
+answer or end of each reasoning phase, shown per block for new replies;
 model loading, prompt processing and tool execution are excluded. Older saved
 replies without a measured duration keep their existing thinking label.
 

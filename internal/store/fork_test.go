@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -49,6 +50,14 @@ func TestForkConversationPreservesContextAndIsolatesDeletion(t *testing.T) {
 	check(err)
 	child, err := db.CreateAgentRun(ctx, CreateAgentRunParams{JobID: job.ID, ParentRunID: &run.ID, Task: "child", Model: "model", ContextWindow: 8192, Depth: 1})
 	check(err)
+	check(db.UpdateMessage(ctx, answer.ID, "answer "+artifact.StorageKey+" "+user.Attachments[0].URL, "reasoning", "complete", map[string]any{
+		"eval_count": 42, "context_through_message_id": user.ID,
+		"activity": map[string]any{"version": 1, "blocks": []map[string]any{
+			{"type": "thinking", "turn": 1, "start": 0, "end": 9, "duration_ms": 12},
+			{"type": "tool", "turn": 1, "step_id": step.ID},
+			{"type": "subagent", "turn": 1, "run_id": child.ID},
+		}},
+	}))
 	for _, id := range []int64{run.ID, child.ID} {
 		_, err = db.StartAgentRun(ctx, id)
 		check(err)
@@ -96,6 +105,13 @@ func TestForkConversationPreservesContextAndIsolatesDeletion(t *testing.T) {
 	runs := messages[1].SubagentRuns
 	if len(runs) != 2 || runs[1].ParentRunID == nil || *runs[1].ParentRunID != runs[0].ID || runs[0].JobID == job.ID || runs[0].OutputRefs[0] != copiedKey {
 		t.Fatalf("runs not copied: %#v", runs)
+	}
+	blocks := messages[1].Metadata["activity"].(map[string]any)["blocks"].([]any)
+	if blocks[1].(map[string]any)["step_id"] != float64(messages[1].AgentSteps[0].ID) || blocks[2].(map[string]any)["run_id"] != float64(runs[1].ID) {
+		t.Fatalf("activity references not copied: %#v", blocks)
+	}
+	if !reflect.DeepEqual(blocks[0], map[string]any{"type": "thinking", "turn": float64(1), "start": float64(0), "end": float64(9), "duration_ms": float64(12)}) {
+		t.Fatalf("activity text boundary changed: %#v", blocks[0])
 	}
 	checkpoint, err := db.GetCheckpoint(ctx, fork.ID)
 	check(err)
@@ -205,5 +221,51 @@ func TestForkConversationCancelsStaleWorkAndRemapsToolReferences(t *testing.T) {
 	check(err)
 	if original[1].Status != "streaming" {
 		t.Fatal("source work changed")
+	}
+}
+
+func TestForkActivityOffsetsFollowRewrittenReferences(t *testing.T) {
+	ids := map[string]map[int64]int64{"message_attachments": {9: 123}, "messages": {8: 456}, "agent_steps": {1: 22}}
+	original := "世界 /api/attachments/9 then attachment_id=9 done"
+	boundary := len("世界 /api/attachments/9 then ")
+	rewritten, remap := rewriteForkText(original, nil, ids)
+	want := "世界 /api/attachments/123 then attachment_id=123 done"
+	if rewritten != want {
+		t.Fatalf("got %q", rewritten)
+	}
+	metadata := fmt.Sprintf(`{"final_answer_start":%d,"activity":{"version":1,"blocks":[{"type":"content","turn":1,"start":0,"end":%d},{"type":"tool","turn":1,"step_id":1},{"type":"content","turn":1,"start":%d,"end":%d}]}}`, boundary, boundary, boundary, len(original))
+	updated := remapForkActivity(metadata, ids, map[string]func(int) int{"content": remap})
+	var data struct {
+		FinalAnswerStart int `json:"final_answer_start"`
+		Activity         struct {
+			Blocks []struct {
+				Type       string
+				Start, End int
+				StepID     int64 `json:"step_id"`
+			}
+		}
+	}
+	if err := json.Unmarshal([]byte(updated), &data); err != nil {
+		t.Fatal(err)
+	}
+	blocks := data.Activity.Blocks
+	if data.FinalAnswerStart != blocks[2].Start || rewritten[data.FinalAnswerStart:] != "attachment_id=123 done" {
+		t.Fatalf("final answer boundary was not translated: %s", updated)
+	}
+	if rewritten[blocks[0].Start:blocks[0].End] != "世界 /api/attachments/123 then " || rewritten[blocks[2].Start:blocks[2].End] != "attachment_id=123 done" || blocks[1].StepID != 22 {
+		t.Fatalf("invalid remapped ranges: %s", updated)
+	}
+	// Even chunk boundaries within a replaced identifier remain ordered and valid.
+	last := 0
+	for offset := 0; offset <= len(original); offset++ {
+		next := remap(offset)
+		if next < last || next > len(rewritten) {
+			t.Fatalf("invalid offset %d -> %d", offset, next)
+		}
+		last = next
+	}
+	legacy := fmt.Sprintf(`{"eval_count":42,"final_answer_start":%d}`, boundary)
+	if remapForkActivity(legacy, ids, map[string]func(int) int{"content": remap}) != legacy {
+		t.Fatal("rewrote legacy metadata")
 	}
 }

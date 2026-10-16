@@ -111,7 +111,7 @@ func TestRunnerExecutesToolAndContinuesUntilFinalAnswer(t *testing.T) {
 	if history[1].Thinking != "" {
 		t.Fatalf("thinking leaked into the next model turn: %#v", history[1])
 	}
-	wantEvents := []string{"turn.started", "thinking.timing", "thinking.delta", "thinking.timing", "delta", "turn.done", "tool.started", "tool.done", "turn.started", "thinking.timing", "thinking.delta", "thinking.timing", "delta", "turn.done"}
+	wantEvents := []string{"activity.started", "turn.started", "thinking.timing", "thinking.delta", "thinking.timing", "delta", "turn.done", "tool.started", "tool.done", "turn.started", "thinking.timing", "thinking.delta", "thinking.timing", "delta", "turn.done"}
 	if len(events) != len(wantEvents) {
 		t.Fatalf("unexpected events: %#v", events)
 	}
@@ -120,13 +120,13 @@ func TestRunnerExecutesToolAndContinuesUntilFinalAnswer(t *testing.T) {
 			t.Fatalf("event %d: got %q, want %q", index, events[index].Type, want)
 		}
 	}
-	for index, event := range []Event{events[5], events[13]} {
+	for index, event := range []Event{events[6], events[14]} {
 		turn := index + 1
 		if event.Turn != turn || event.Metadata["prompt_eval_count"] != turn*10 || event.Metadata["eval_count"] != turn*5 {
 			t.Fatalf("turn %d did not stream current context counts: %#v", turn, event)
 		}
 	}
-	if events[5].Metadata["agent_prompt_eval_count"] != 10 || events[13].Metadata["agent_prompt_eval_count"] != 30 {
+	if events[6].Metadata["agent_prompt_eval_count"] != 10 || events[14].Metadata["agent_prompt_eval_count"] != 30 {
 		t.Fatalf("turn snapshots lost independent aggregate metrics: %#v", events)
 	}
 	if result.Metadata["prompt_eval_count"] != 20 || result.Metadata["eval_count"] != 10 {

@@ -150,6 +150,18 @@ func (metrics *runMetrics) add(chunk ollama.ChatChunk) {
 }
 
 func (runner Runner) Run(ctx context.Context, input RunInput, emit func(Event) error) (result RunResult, runErr error) {
+	var activity activityRecorder
+	emit = activity.wrap(emit)
+	defer func() {
+		result.Metadata = maps.Clone(result.Metadata)
+		if result.Metadata == nil {
+			result.Metadata = make(map[string]any)
+		}
+		result.Metadata["activity"] = activity.snapshot()
+	}()
+	if err := emit(Event{Type: "activity.started", Metadata: map[string]any{"activity_version": 1}}); err != nil {
+		return RunResult{}, err
+	}
 	agentMode := input.Mode != "chat"
 	if agentMode && runner.MaxTurns <= 0 {
 		return RunResult{}, errors.New("agent max turns must be positive")

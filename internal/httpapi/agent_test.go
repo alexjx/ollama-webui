@@ -103,7 +103,7 @@ func TestGenerateRunsShellAgentAndPersistsTrace(t *testing.T) {
 		}
 	}
 	joined := strings.Join(eventTypes, ",")
-	if joined != "started,turn.started,thinking.timing,thinking.delta,thinking.timing,delta,turn.done,tool.started,tool.done,turn.started,thinking.timing,thinking.delta,thinking.timing,delta,turn.done,done" {
+	if joined != "started,activity.started,turn.started,thinking.timing,thinking.delta,thinking.timing,delta,turn.done,tool.started,tool.done,turn.started,thinking.timing,thinking.delta,thinking.timing,delta,turn.done,done" {
 		t.Fatalf("unexpected event flow: %s\n%s", joined, response.Body.String())
 	}
 	if len(turnMetadata) != 2 || turnMetadata[0]["prompt_eval_count"] != float64(10) || turnMetadata[0]["eval_count"] != float64(5) || turnMetadata[1]["prompt_eval_count"] != float64(20) || turnMetadata[1]["eval_count"] != float64(10) || turnMetadata[1]["agent_prompt_eval_count"] != float64(30) {
@@ -131,6 +131,16 @@ func TestGenerateRunsShellAgentAndPersistsTrace(t *testing.T) {
 	}
 	if messages[1].Metadata["thinking_duration_ms"] != timingMetadata[3]["thinking_duration_ms"] {
 		t.Fatalf("final thinking duration was not persisted: %#v", messages[1].Metadata)
+	}
+	activity := messages[1].Metadata["activity"].(map[string]any)
+	blocks := activity["blocks"].([]any)
+	if activity["version"] != float64(1) || len(blocks) != 5 || blocks[2].(map[string]any)["step_id"] != float64(step.ID) {
+		t.Fatalf("chronology was not persisted: %#v", activity)
+	}
+	for i, kind := range []string{"thinking", "content", "tool", "thinking", "content"} {
+		if blocks[i].(map[string]any)["type"] != kind {
+			t.Fatalf("wrong persisted ordering: %#v", blocks)
+		}
 	}
 	if messages[0].Content != inlineInput {
 		t.Fatalf("stored user input lost whitespace: %q", messages[0].Content)
@@ -238,7 +248,7 @@ func TestGenerateStreamsAndPersistsSuccessfulSubagentRun(t *testing.T) {
 	if err := scanner.Err(); err != nil {
 		t.Fatal(err)
 	}
-	wantEvents := "started,turn.started,turn.done,tool.started,subagent.started,subagent.done,tool.done,turn.started,delta,turn.done,done"
+	wantEvents := "started,activity.started,turn.started,turn.done,tool.started,subagent.started,subagent.done,tool.done,turn.started,delta,turn.done,done"
 	if joined := strings.Join(eventTypes, ","); joined != wantEvents {
 		t.Fatalf("unexpected subagent event flow: %s\n%s", joined, response.Body.String())
 	}
@@ -269,6 +279,11 @@ func TestGenerateStreamsAndPersistsSuccessfulSubagentRun(t *testing.T) {
 	}
 	if len(reloaded.Messages) != 2 || len(reloaded.Messages[1].SubagentRuns) != 1 || reloaded.Messages[1].SubagentRuns[0].ID != run.ID {
 		t.Fatalf("conversation API omitted persisted subagent run: %#v", reloaded.Messages)
+	}
+	activity := reloaded.Messages[1].Metadata["activity"].(map[string]any)
+	blocks := activity["blocks"].([]any)
+	if activity["version"] != float64(1) || len(blocks) != 3 || blocks[1].(map[string]any)["run_id"] != float64(run.ID) || blocks[1].(map[string]any)["turn"] != float64(1) {
+		t.Fatalf("conversation API omitted persisted chronology: %#v", activity)
 	}
 
 	mu.Lock()
