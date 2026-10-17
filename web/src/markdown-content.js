@@ -1,7 +1,8 @@
-import { createElement, useRef } from "react";
+import { createElement, useContext, useRef } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { selectElementText } from "./select-text.js";
+import { WorkspaceLinkContext, remarkWorkspaceLinks } from "./workspace-links.js";
 import CopyButton from "./copy-button.js";
 
 function CodeBlock({ children }) {
@@ -40,7 +41,33 @@ const components = {
   pre: CodeBlock,
 };
 
+function WorkspaceAnchor({ node, children, ...props }) {
+  const workspace = useContext(WorkspaceLinkContext);
+  const path = node.properties["data-workspace-path"];
+  if (!workspace || typeof path !== "string") return createElement("a", props, children);
+  return createElement("a", { ...props, className: "workspace-path-link",
+    title: "Open in Workspace",
+    onClick: (event) => {
+      if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      const selection = window.getSelection();
+      // Drag-selecting a path must not open the dialog; keyboard activation still works.
+      if (event.detail > 0 && selection?.toString() && selection.containsNode(event.currentTarget, true)) {
+        event.preventDefault();
+        return;
+      }
+      event.preventDefault();
+      workspace.open(path, event.currentTarget);
+    },
+  }, children);
+}
+
+const linkedComponents = { ...components, a: WorkspaceAnchor };
+
 export default function MarkdownContent({ children }) {
-  // Keep the default URL filtering and HTML escaping for model-generated text.
-  return createElement(Markdown, { remarkPlugins, components }, children);
+  const workspace = useContext(WorkspaceLinkContext);
+  // Keep default URL filtering/HTML escaping; only transform the display tree.
+  return createElement(Markdown, {
+    remarkPlugins: workspace ? [...remarkPlugins, [remarkWorkspaceLinks, { root: workspace.root }]] : remarkPlugins,
+    components: workspace ? linkedComponents : components,
+  }, children);
 }

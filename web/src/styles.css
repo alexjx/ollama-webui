@@ -961,3 +961,14 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   .response-timeline .agent-progress-icon svg, .response-timeline .subagent-run-icon svg, .response-timeline .stream-cursor { animation: none; }
 }
 .response-timeline .agent-progress { flex-wrap: wrap; }
+
+/* Inline workspace paths retain the original text and reading rhythm. */
+.markdown-content a.workspace-path-link {
+  text-decoration-thickness: 1px;
+  text-decoration-color: color-mix(in srgb, var(--blue) 55%, transparent);
+  text-underline-offset: .18em;
+  overflow-wrap: anywhere;
+}
+.markdown-content a.workspace-path-link:hover,
+.markdown-content a.workspace-path-link:focus-visible { text-decoration-color: currentColor; }
+.markdown-content a.workspace-path-link code { color: inherit; }

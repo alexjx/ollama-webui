@@ -13,6 +13,7 @@ import CopyButton from "./copy-button";
 import ThinkingLabel from "./thinking-label";
 import TavilySettings from "./tavily-settings";
 import WebSearchResults from "./web-search-results";
+import { WorkspaceLinkContext, resolveWorkspacePath } from "./workspace-links";
 import WorkspaceBrowser from "./workspace-browser";
 import TemplatesDialog from "./templates-dialog";
 import { insertTemplateMessage, templateDraft, templateSettings } from "./conversation-templates";
@@ -1183,6 +1184,8 @@ export function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const workspaceTriggerRef = useRef(null);
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
+  const [workspacePath, setWorkspacePath] = useState("");
+  const workspaceReturnRef = useRef(null);
   const [systemSettingsOpen, setSystemSettingsOpen] = useState(false);
   const [runtimeSettings, setRuntimeSettings] = useState(null);
   const [runtimeSettingsLoading, setRuntimeSettingsLoading] = useState(false);
@@ -1539,6 +1542,26 @@ export function App() {
       dialog.close();
     }
   }, [clearAllOpen]);
+
+  // Hash links also work when opened in a new tab or pasted into the address bar.
+  useEffect(() => {
+    const root = runtimeSettings?.agent?.workspace;
+    if (!root) return undefined;
+    function openWorkspaceHash() {
+      if (!window.location.hash.startsWith("#workspace=")) return;
+      let target;
+      try { target = decodeURIComponent(window.location.hash.slice(11)); } catch { return; }
+      if (target.startsWith("/")) return;
+      const path = resolveWorkspacePath(root.replace(/\/+$/, "") + "/" + target, root, true);
+      if (path === null) return;
+      workspaceReturnRef.current = workspaceTriggerRef.current;
+      setWorkspacePath(path);
+      setWorkspaceOpen(true);
+    }
+    openWorkspaceHash();
+    window.addEventListener("hashchange", openWorkspaceHash);
+    return () => window.removeEventListener("hashchange", openWorkspaceHash);
+  }, [runtimeSettings?.agent?.workspace]);
 
   // The composer needs provider status before any settings panel is opened.
   useEffect(() => {
@@ -2245,7 +2268,7 @@ export function App() {
             )}
           </div>
           <div className="topbar-right">
-            <button ref={workspaceTriggerRef} type="button" className="workspace-trigger" aria-label="Open workspace" title="Browse workspace files" onClick={() => setWorkspaceOpen(true)}><FolderOpen size={21} aria-hidden="true" /><span>Workspace</span></button>
+            <button ref={workspaceTriggerRef} type="button" className="workspace-trigger" aria-label="Open workspace" title="Browse workspace files" onClick={(event) => { workspaceReturnRef.current = event.currentTarget; setWorkspacePath(""); setWorkspaceOpen(true); }}><FolderOpen size={21} aria-hidden="true" /><span>Workspace</span></button>
             <div className={`agent-status ${streaming || compacting ? "working" : ""}`} role="status" aria-live="polite">
               {streaming || compacting ? <CircleNotch size={16} /> : <ChatCircle size={16} />}
               <span>{compacting ? "Compacting context" : conversationMode === "agent" ? (streaming ? "Agent working" : "Agent ready") : (streaming ? "Chat responding" : "Chat ready")}</span>
@@ -2318,6 +2341,7 @@ export function App() {
         )}
 
         <section className="transcript" aria-label="Conversation" ref={transcriptRef} onScroll={(event) => { followProgressRef.current = isNearTranscriptEnd(event.currentTarget); }}>
+          <WorkspaceLinkContext.Provider value={{ root: runtimeSettings?.agent?.workspace, open: (path, trigger) => { workspaceReturnRef.current = trigger; setWorkspacePath(path); setWorkspaceOpen(true); } }}>
           <ChatTranscript
             streaming={streaming}
             compacting={compacting}
@@ -2328,6 +2352,7 @@ export function App() {
             conversationMode={conversationMode}
             error={chatError}
           />
+          </WorkspaceLinkContext.Provider>
         </section>
         <Composer
           message={draftMessage}
@@ -2405,7 +2430,7 @@ export function App() {
         />
       )}
 
-      {workspaceOpen && <WorkspaceBrowser onClose={() => { setWorkspaceOpen(false); window.requestAnimationFrame(() => workspaceTriggerRef.current?.focus()); }} />}
+      {workspaceOpen && <WorkspaceBrowser key={workspacePath} initialPath={workspacePath} onClose={() => { setWorkspaceOpen(false); window.requestAnimationFrame(() => (workspaceReturnRef.current?.isConnected ? workspaceReturnRef.current : workspaceTriggerRef.current)?.focus()); }} />}
 
       {templatesDialog && <TemplatesDialog
         onClose={() => closeTemplates()}

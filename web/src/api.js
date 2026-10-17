@@ -2,14 +2,17 @@ async function request(path, options = {}) {
   const response = await fetch(path, options);
   if (!response.ok) {
     let message = `${response.status} ${response.statusText}`;
+    let code;
     try {
       const payload = await response.json();
       message = payload.error?.message || message;
+      code = payload.error?.code;
     } catch {
       // The status text is the best available error.
     }
     const error = new Error(message);
     error.status = response.status;
+    error.code = code;
     throw error;
   }
   if (response.status === 204) return null;

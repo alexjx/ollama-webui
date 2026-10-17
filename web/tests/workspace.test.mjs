@@ -35,3 +35,11 @@ test("workspace errors expose a readable reason for retry feedback", async (t) =
   t.mock.method(globalThis, "fetch", async () => Response.json({ error: { message: "Workspace item no longer exists." } }, { status: 404 }));
   await assert.rejects(previewWorkspaceFile("removed.txt"), (error) => error.status === 404 && error.message === "Workspace item no longer exists.");
 });
+
+test("workspace navigation distinguishes a file target from other directory errors", async (t) => {
+  for (const [status, code] of [[400, "not_directory"], [400, "invalid_path"], [403, "symlink_not_supported"], [404, "workspace_not_found"]]) {
+    const fetch = t.mock.method(globalThis, "fetch", async () => Response.json({ error: { code, message: "Workspace lookup failed." } }, { status }));
+    await assert.rejects(listWorkspace("reports/result.txt"), (error) => error.status === status && error.code === code && error.message === "Workspace lookup failed.");
+    fetch.mock.restore();
+  }
+});

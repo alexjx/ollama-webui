@@ -21,12 +21,13 @@ function CopyPreview({ preview }) {
   </>;
 }
 
-export default function WorkspaceBrowser({ onClose }) {
+export default function WorkspaceBrowser({ onClose, initialPath = "" }) {
   const dialogRef = useRef(null);
   const closeRef = useRef(null);
   const selectedTriggerRef = useRef(null);
   const listRequest = useRef(null);
-  const [path, setPath] = useState("");
+  const initialTargetRef = useRef(initialPath);
+  const [path, setPath] = useState(initialPath);
   const [listing, setListing] = useState(null);
   const [loading, setLoading] = useState(true);
   const [listError, setListError] = useState("");
@@ -59,7 +60,14 @@ export default function WorkspaceBrowser({ onClose }) {
         ? { ...result, entries: [...new Map([...current.entries, ...result.entries].map((entry) => [entry.path, entry])).values()] }
         : result);
     } catch (error) {
-      if (!controller.signal.aborted) setListError(error.message);
+      if (controller.signal.aborted) return;
+      if (folder === initialTargetRef.current && error.code === "not_directory") {
+        // Preview the target directly: its entry may be beyond the first list page.
+        initialTargetRef.current = null;
+        const separator = folder.lastIndexOf("/");
+        setPath(separator < 0 ? "" : folder.slice(0, separator));
+        setSelected({ path: folder, name: folder.slice(separator + 1), type: "file" });
+      } else setListError(error.message);
     } finally {
       if (!controller.signal.aborted) setLoading(false);
     }
@@ -89,6 +97,7 @@ export default function WorkspaceBrowser({ onClose }) {
   }, [selected, revision]);
 
   function navigate(nextPath) {
+    initialTargetRef.current = null;
     setSelected(null);
     if (nextPath === path) return;
     setListing(null);
@@ -97,8 +106,13 @@ export default function WorkspaceBrowser({ onClose }) {
 
   function backToFiles() {
     setSelected(null);
-    window.requestAnimationFrame(() => selectedTriggerRef.current?.isConnected && selectedTriggerRef.current.focus());
+    window.requestAnimationFrame(() => {
+      if (selectedTriggerRef.current?.isConnected) selectedTriggerRef.current.focus();
+      else closeRef.current?.focus();
+    });
   }
+
+  const selectedSize = preview?.path === selected?.path ? preview?.size : selected?.size;
 
   return (
     <dialog ref={dialogRef} className="workspace-dialog" aria-labelledby="workspace-title" aria-describedby="workspace-description" onClose={onClose}>
@@ -147,7 +161,7 @@ export default function WorkspaceBrowser({ onClose }) {
             {!selected ? <div className="workspace-preview-empty"><File size={36} aria-hidden="true" /><p>Select a file to preview it.</p><span>Text and images open here. Other files can be downloaded.</span></div> : <>
               <header className="workspace-preview-heading">
                 <button type="button" className="icon-button workspace-files-back" aria-label="Back to files" onClick={backToFiles}><ArrowLeft size={20} /></button>
-                <div><h3 ref={previewHeadingRef} tabIndex={-1}>{selected.name}</h3><span>{formatFileSize(preview?.path === selected.path ? preview.size : selected.size)}</span></div>
+                <div><h3 ref={previewHeadingRef} tabIndex={-1}>{selected.name}</h3><span>{Number.isFinite(selectedSize) ? formatFileSize(selectedSize) : ""}</span></div>
                 {!previewLoading && preview?.path === selected.path && preview.kind === "text" && <CopyPreview key={`${selected.path}:${revision}`} preview={preview} />}
                 <a className="workspace-download" href={workspaceFileURL(selected.path)} download aria-label={`Download ${selected.name}`}><DownloadSimple size={19} aria-hidden="true" /><span>Download</span></a>
               </header>
