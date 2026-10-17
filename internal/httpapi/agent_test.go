@@ -68,7 +68,7 @@ func TestGenerateRunsShellAgentAndPersistsTrace(t *testing.T) {
 		Chat: client, Steps: database, MaxTurns: 200,
 		Shell: agent.ShellExecutor{Workspace: workspace, Timeout: 2 * time.Second, MaxOutput: 4096},
 	}
-	api := New(database, client, runner, RuntimeSettings{}, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	api := New(database, client, runner, RuntimeSettings{Workspace: workspace}, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	inlineInput := "  verify long input\n" + strings.Repeat("inline 世界\n", 2000) + "  "
 	requestBody, err := json.Marshal(map[string]any{"content": inlineInput, "images": []imageInput{{Name: "pixel.png", MediaType: "image/png", Data: base64.StdEncoding.EncodeToString(onePixelPNG)}}})
 	if err != nil {
@@ -147,6 +147,12 @@ func TestGenerateRunsShellAgentAndPersistsTrace(t *testing.T) {
 	}
 	if len(chatRequests) != 2 || chatRequests[0]["tools"] == nil || chatRequests[0]["think"] != "high" || chatRequests[0]["keep_alive"] != nil {
 		t.Fatalf("agent request lost tools or added keep_alive: %#v", chatRequests)
+	}
+	for _, call := range chatRequests {
+		system := call["messages"].([]any)[0].(map[string]any)["content"].(string)
+		if !strings.Contains(system, agent.WorkspaceInstructions(workspace)) {
+			t.Fatal("agent model request lost workspace instructions")
+		}
 	}
 	firstMessages := chatRequests[0]["messages"].([]any)
 	userInput := firstMessages[len(firstMessages)-1].(map[string]any)
@@ -424,7 +430,7 @@ func TestGenerateChatModeSupportsNonToolModelWithoutAgentPrompt(t *testing.T) {
 		t.Fatal(err)
 	}
 	client := ollama.NewClient(ollamaServer.URL)
-	api := New(database, client, agent.Runner{Chat: client}, RuntimeSettings{}, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	api := New(database, client, agent.Runner{Chat: client}, RuntimeSettings{Workspace: "/custom/工作 space"}, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	request := httptest.NewRequest(http.MethodPost, "/api/conversations/1/messages", strings.NewReader(`{"content":"hello"}`))
 	request.SetPathValue("id", "1")
 	response := httptest.NewRecorder()
@@ -439,7 +445,7 @@ func TestGenerateChatModeSupportsNonToolModelWithoutAgentPrompt(t *testing.T) {
 		t.Fatalf("chat request unexpectedly overrode model lifetime: %#v", captured)
 	}
 	messages := captured["messages"].([]any)
-	if len(messages) != 2 || messages[0].(map[string]any)["content"] != "Keep it concise." || strings.Contains(messages[0].(map[string]any)["content"].(string), "autonomous") {
+	if len(messages) != 2 || messages[0].(map[string]any)["content"] != "Keep it concise."+agent.WorkspaceInstructions("/custom/工作 space") || strings.Contains(messages[0].(map[string]any)["content"].(string), "autonomous") {
 		t.Fatalf("chat request used the wrong system prompt: %#v", captured)
 	}
 	stored, err := database.Messages(context.Background(), conversation.ID)

@@ -172,7 +172,7 @@ func (orchestrator *SubagentOrchestrator) Execute(ctx context.Context, request S
 	childResult, runErr := childRunner.Run(ctx, RunInput{
 		ConversationID: request.ConversationID, Model: model, Mode: "agent", DisableWebSearch: request.DisableWebSearch,
 		Messages: []ollama.Message{
-			{Role: "system", Content: delegatedSystemPrompt},
+			{Role: "system", Content: delegatedSystemPrompt + WorkspaceInstructions(orchestrator.Workspace)},
 			{Role: "user", Content: childPrompt, Images: imageBytes},
 		},
 		Options: &ollama.ChatOptions{NumCtx: &numCtx},

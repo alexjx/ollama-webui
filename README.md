@@ -155,7 +155,10 @@ are not converted to Workspace links. Click the subtly underlined path to open i
 folder or file preview in Workspace. Paths containing spaces should use inline code or a Markdown
 link. Message source and Markdown/code copying stay unchanged; files are checked
 by the server when opened. Workspace links can also be opened in a new tab. Code
-blocks and external links are left unchanged.
+blocks and external links are left unchanged. Built-in instructions tell Chat,
+Agent and child agents to return full absolute workspace paths, using the configured
+root, as inline code or Markdown link targets. These instructions also apply when
+continuing existing or compacted conversations and preserve custom system prompts.
 
 ## Optional shell access: safety boundary
 

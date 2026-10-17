@@ -50,13 +50,7 @@ func (s *Server) compactConversation(response http.ResponseWriter, request *http
 		return
 	}
 	agentMode := conversation.Mode != "chat"
-	systemPrompt := conversation.SystemPrompt
-	if agentMode {
-		systemPrompt = agent.SystemPrompt
-		if conversation.SystemPrompt != "" {
-			systemPrompt += "\n\nAdditional instructions from the user:\n" + conversation.SystemPrompt
-		}
-	}
+	systemPrompt := s.conversationSystemPrompt(conversation)
 	window := s.runtime.ContextTokens
 	if conversation.ContextWindow != nil {
 		window = *conversation.ContextWindow

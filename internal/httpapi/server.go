@@ -549,13 +549,7 @@ func (s *Server) generate(response http.ResponseWriter, request *http.Request) {
 	response.WriteHeader(http.StatusOK)
 	writeEvent(response, flusher, map[string]any{"type": "started", "user_message": userMessage, "assistant_message": assistantMessage})
 
-	systemPrompt := conversation.SystemPrompt
-	if agentMode {
-		systemPrompt = agent.SystemPrompt
-		if conversation.SystemPrompt != "" {
-			systemPrompt += "\n\nAdditional instructions from the user:\n" + conversation.SystemPrompt
-		}
-	}
+	systemPrompt := s.conversationSystemPrompt(conversation)
 	contextWindow := 0
 	if agentMode {
 		contextWindow = s.runtime.ContextTokens

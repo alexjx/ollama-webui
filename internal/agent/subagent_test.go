@@ -66,6 +66,11 @@ func TestSubagentOrchestratorUsesPrivateContextAndPersistsBoundedResult(t *testi
 	if chat.requests[0].Messages[0].Role != "system" || !strings.Contains(chat.requests[0].Messages[1].Content, "Inspect only") {
 		t.Fatalf("child context envelope is wrong: %#v", chat.requests[0].Messages)
 	}
+	for _, request := range chat.requests {
+		if !strings.Contains(request.Messages[0].Content, WorkspaceInstructions(orchestrator.Workspace)) {
+			t.Fatal("child model request lost configured absolute workspace path instruction")
+		}
+	}
 	if len(events) != 2 || events[0].Type != "subagent.started" || events[1].Type != "subagent.done" {
 		t.Fatalf("unexpected lifecycle events: %#v", events)
 	}

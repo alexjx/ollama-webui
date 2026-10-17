@@ -93,7 +93,7 @@ func TestManualCompactionPersistsAndContinuesBothModes(t *testing.T) {
 			if test.configuredPreparer {
 				runner.Context = &agent.ContextPreparer{Chat: client, Store: database}
 			}
-			api := New(database, client, runner, RuntimeSettings{ContextTokens: 32768}, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+			api := New(database, client, runner, RuntimeSettings{ContextTokens: 32768, Workspace: "/custom/工作 space"}, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 			url := fmt.Sprintf("/api/conversations/%d", conversation.ID)
 			response := httptest.NewRecorder()
 			api.ServeHTTP(response, httptest.NewRequest(http.MethodPost, url+"/compact", nil))
@@ -139,6 +139,9 @@ func TestManualCompactionPersistsAndContinuesBothModes(t *testing.T) {
 			defer mu.Unlock()
 			if len(calls) != 2 {
 				t.Fatalf("unexpected summary/generation calls: %d", len(calls))
+			}
+			if !strings.Contains(calls[1].Messages[0].Content, agent.WorkspaceInstructions("/custom/工作 space")) {
+				t.Fatal("continued model lost workspace path instructions after compaction")
 			}
 			continuedJSON, _ := json.Marshal(calls[1])
 			if !strings.Contains(string(continuedJSON), "Preserved decisions") || !strings.Contains(string(continuedJSON), "CUSTOM_SYSTEM") || strings.Contains(string(continuedJSON), "OLD_USER") || !strings.Contains(string(continuedJSON), "continue now") || strings.Contains(string(continuedJSON), "RECENT_FILE_CONTENT") != (mode == "chat") {
