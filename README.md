@@ -148,10 +148,11 @@ and download files. The browser is read-only; text previews show at most 256 KiB
 Links and special files cannot be opened, and files outside the configured
 workspace are not exposed. Workspace files are shared across sessions.
 
-Assistant replies recognize explicit workspace paths (`./reports/result.csv` or an
-absolute path inside the configured workspace), plus paths in inline code and
-local Markdown links. Click the subtly underlined path to open its folder or file
-preview in Workspace. Paths containing spaces should use inline code or a Markdown
+Assistant replies recognize only absolute paths beginning with the configured
+workspace root (for example, `/workspace/reports/result.csv`), including paths in
+inline code and Markdown links. Relative paths and ordinary slash-separated text
+are not converted to Workspace links. Click the subtly underlined path to open its
+folder or file preview in Workspace. Paths containing spaces should use inline code or a Markdown
 link. Message source and Markdown/code copying stay unchanged; files are checked
 by the server when opened. Workspace links can also be opened in a new tab. Code
 blocks and external links are left unchanged.

@@ -2,19 +2,13 @@ import { createContext } from "react";
 
 export const WorkspaceLinkContext = createContext(null);
 
-// Explicit paths only. Bare filenames are accepted inside code spans/links,
-// where the author has already distinguished them from ordinary prose.
-export function resolveWorkspacePath(value, root, explicit = false) {
+// Only absolute paths rooted in the configured workspace become links.
+export function resolveWorkspacePath(value, root) {
   if (!root || typeof value !== "string" || !value || value !== value.trim()) return null;
   if (/[\x00-\x1f\x7f\\?#]/.test(value) || /^[a-z][a-z\d+.-]*:/i.test(value) || value.startsWith("//")) return null;
   const base = root.replace(/\/+$/, "");
-  let path = value;
-  if (path.startsWith("/")) {
-    if (path !== base && !path.startsWith(`${base}/`)) return null;
-    path = path.slice(base.length).replace(/^\//, "");
-  } else if (!path.startsWith("./") && !path.includes("/") && !(explicit && /^[^\s]+\.[\p{L}\p{N}_-]+$/u.test(path))) {
-    return null;
-  }
+  if (!value.startsWith("/") || (value !== base && !value.startsWith(`${base}/`))) return null;
+  const path = value.slice(base.length).replace(/^\//, "");
   const parts = path.split("/");
   if (parts.includes("..")) return null;
   return parts.filter((part) => part && part !== ".").join("/");
@@ -39,11 +33,11 @@ export function remarkWorkspaceLinks({ root }) {
         if (node.type === "link" || node.type === "linkReference") {
           let url = node.url ?? definitions.get(node.identifier);
           try { url = decodeURIComponent(url); } catch { return [node]; }
-          const path = resolveWorkspacePath(url, root, true);
+          const path = resolveWorkspacePath(url, root);
           return [path === null ? node : { ...pathLink(path, node.children), title: node.title }];
         }
         if (node.type === "inlineCode") {
-          const path = resolveWorkspacePath(node.value, root, true);
+          const path = resolveWorkspacePath(node.value, root);
           return [path === null ? node : pathLink(path, [node])];
         }
         if (node.type !== "text") { walk(node); return [node]; }
@@ -54,7 +48,7 @@ export function remarkWorkspaceLinks({ root }) {
         let end = 0;
         for (const match of node.value.matchAll(tokens)) {
           const candidate = match[0].replace(/[.,;!:)\]}]+$/, "");
-          if (!candidate.startsWith("/") && !candidate.startsWith("./")) continue;
+          if (!candidate.startsWith("/")) continue;
           const path = resolveWorkspacePath(candidate, root);
           if (path === null) continue;
           result.push({ type: "text", value: node.value.slice(end, match.index) });

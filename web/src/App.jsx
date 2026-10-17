@@ -1552,7 +1552,7 @@ export function App() {
       let target;
       try { target = decodeURIComponent(window.location.hash.slice(11)); } catch { return; }
       if (target.startsWith("/")) return;
-      const path = resolveWorkspacePath(root.replace(/\/+$/, "") + "/" + target, root, true);
+      const path = resolveWorkspacePath(root.replace(/\/+$/, "") + "/" + target, root);
       if (path === null) return;
       workspaceReturnRef.current = workspaceTriggerRef.current;
       setWorkspacePath(path);
