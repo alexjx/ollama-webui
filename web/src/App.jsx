@@ -15,6 +15,7 @@ import TavilySettings from "./tavily-settings";
 import WebSearchResults from "./web-search-results";
 import { WorkspaceLinkContext, resolveWorkspacePath } from "./workspace-links";
 import WorkspaceBrowser from "./workspace-browser";
+import ContextInspector from "./context-inspector";
 import TemplatesDialog from "./templates-dialog";
 import { insertTemplateMessage, templateDraft, templateSettings } from "./conversation-templates";
 import { createSettingsRequestGuard } from "./web-search";
@@ -815,6 +816,7 @@ function ChatTranscript({
           {message.status === "cancelled" && <p className="message-status">Generation stopped</p>}
           {message.status === "error" && <p className="message-status error">Generation failed</p>}
           {message.role === "assistant" && <ResponseMetrics message={message} />}
+          {message.role === "assistant" && <ContextInspector message={message} />}
           {message.role === "user" && (
             <button className="select-response-button delete-turn-button" type="button"
               disabled={streaming || compacting || generatingTitle || message.id === "pending-user"}
@@ -2186,7 +2188,7 @@ export function App() {
           : message));
       if (!accepted) setModelLoaded(modelLoaded);
       if (!cancelled) setChatError(error.message);
-      if (cancelled && conversationId && generationRef.current === controller) {
+      if (accepted && conversationId && generationRef.current === controller) {
         try {
           const payload = await getConversation(conversationId);
           const refreshedMessages = payload.messages || [];
@@ -2195,7 +2197,7 @@ export function App() {
             setMessages(refreshedMessages);
           }
         } catch {
-          // Keep the visible stopped turn if the refresh is unavailable.
+          // Keep the visible interrupted turn if the refresh is unavailable.
         }
       }
     } finally {

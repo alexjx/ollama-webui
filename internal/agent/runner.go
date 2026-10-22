@@ -151,6 +151,7 @@ func (metrics *runMetrics) add(chunk ollama.ChatChunk) {
 
 func (runner Runner) Run(ctx context.Context, input RunInput, emit func(Event) error) (result RunResult, runErr error) {
 	var activity activityRecorder
+	var exchange *ModelExchange
 	emit = activity.wrap(emit)
 	defer func() {
 		result.Metadata = maps.Clone(result.Metadata)
@@ -158,6 +159,9 @@ func (runner Runner) Run(ctx context.Context, input RunInput, emit func(Event) e
 			result.Metadata = make(map[string]any)
 		}
 		result.Metadata["activity"] = activity.snapshot()
+		if exchange != nil {
+			result.Metadata["model_exchange"] = exchange
+		}
 	}()
 	if err := emit(Event{Type: "activity.started", Metadata: map[string]any{"activity_version": 1}}); err != nil {
 		return RunResult{}, err
@@ -224,9 +228,15 @@ func (runner Runner) Run(ctx context.Context, input RunInput, emit func(Event) e
 		finalAnswerStart := visible.Len()
 		turnStartedContent := false
 		turnStartedThinking := false
-		err = runner.Chat.Chat(ctx, ollama.ChatRequest{
-			Model: input.Model, Messages: messages, Tools: tools, Options: input.Options, Think: input.Think,
-		}, func(chunk ollama.ChatChunk) error {
+		request := ollama.ChatRequest{
+			Model: input.Model, Messages: messages, Tools: tools, Options: input.Options, Think: input.Think, Stream: true,
+		}
+		requestSnapshot, snapshotErr := json.Marshal(request)
+		if snapshotErr != nil {
+			return RunResult{Content: visible.String(), Thinking: thinking.String(), Metadata: metadata}, fmt.Errorf("encode model request: %w", snapshotErr)
+		}
+		exchange = &ModelExchange{Version: 1, Turn: turn, Request: requestSnapshot}
+		err = runner.Chat.Chat(ctx, request, func(chunk ollama.ChatChunk) error {
 			if chunk.Message.Thinking != "" {
 				if timing.start(time.Now()) {
 					if err := emit(Event{Type: "thinking.timing", Turn: turn, Metadata: timing.metadata()}); err != nil {
@@ -275,6 +285,16 @@ func (runner Runner) Run(ctx context.Context, input RunInput, emit func(Event) e
 		// A failed or interrupted stream may never send a final chunk.
 		if timingErr := stopThinking(); err == nil {
 			err = timingErr
+		}
+		assistant.Role = "assistant"
+		exchange.Response = assistant
+		exchange.Status = "complete"
+		if err != nil {
+			exchange.Status = "error"
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
+				exchange.Status = "stopped"
+			}
+			exchange.Error = err.Error()
 		}
 		if err != nil {
 			return RunResult{Content: visible.String(), Thinking: thinking.String(), Metadata: metadata}, err

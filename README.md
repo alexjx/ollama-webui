@@ -15,6 +15,15 @@ bottom and lets you scroll up to read earlier output. The sequence persists
 across reloads and forks, including stopped replies. Older replies retain their
 existing grouped display; historical boundaries are not reconstructed.
 
+Use **Inspect context** below an assistant reply to read the actual messages sent
+to Ollama and the response from that reply's latest model round. Expand system
+instructions, history, tool results, model settings, tool definitions, or raw JSON.
+Captures persist across reloads, including interrupted replies. In Agent mode,
+this shows the latest main-agent call, not every round or child task. Older
+replies without captures say so; Ollama still applies its own model template and
+context limits. Captures include the full request, including image data, so saved
+conversation size increases with context size.
+
 Thinking sections show a live duration and retain **Thought for …** after the
 reply finishes or stops. Time is measured from the first thinking output to the
 answer or end of each reasoning phase, shown per block for new replies;
