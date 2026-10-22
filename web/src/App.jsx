@@ -815,8 +815,12 @@ function ChatTranscript({
             : message.content && <p className="message-content">{message.content}</p>}
           {message.status === "cancelled" && <p className="message-status">Generation stopped</p>}
           {message.status === "error" && <p className="message-status error">Generation failed</p>}
-          {message.role === "assistant" && <ResponseMetrics message={message} />}
-          {message.role === "assistant" && <ContextInspector message={message} />}
+          {message.role === "assistant" && message.status !== "streaming" && (
+            <div className="response-footer">
+              <ResponseMetrics message={message} />
+              <ContextInspector message={message} />
+            </div>
+          )}
           {message.role === "user" && (
             <button className="select-response-button delete-turn-button" type="button"
               disabled={streaming || compacting || generatingTitle || message.id === "pending-user"}
