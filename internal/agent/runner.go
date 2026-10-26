@@ -177,6 +177,7 @@ func (runner Runner) Run(ctx context.Context, input RunInput, emit func(Event) e
 	var metadata map[string]any
 	var metrics runMetrics
 	var timing thinkingTimer
+	toolCallRetries := 0
 	// Also retain timing when streaming, tools, or cancellation end the run early.
 	defer func() {
 		if timing.observed {
@@ -297,6 +298,24 @@ func (runner Runner) Run(ctx context.Context, input RunInput, emit func(Event) e
 			exchange.Error = err.Error()
 		}
 		if err != nil {
+			if agentMode && ctx.Err() == nil && errors.Is(err, ollama.ErrInvalidToolArguments) {
+				if toolCallRetries < 2 && turn < maxTurns {
+					toolCallRetries++
+					// Keep completed rounds, but discard all calls from this failed
+					// stream: none have executed and some may be incomplete.
+					messages = append(messages, ollama.Message{Role: "user", Content: "Your last tool call could not be parsed because its arguments were invalid or incomplete JSON. No tools from that response were executed. Continue from the previous results and regenerate the needed call with complete, valid JSON arguments. Keep the call short; split large commands into smaller calls."})
+					notice := "The model produced an incomplete tool call. Retrying…"
+					if visible.Len() > 0 {
+						notice = "\n\n" + notice
+					}
+					visible.WriteString(notice)
+					if emitErr := emit(Event{Type: "delta", Content: notice, Turn: turn}); emitErr != nil {
+						return RunResult{Content: visible.String(), Thinking: thinking.String(), Metadata: metadata}, emitErr
+					}
+					continue
+				}
+				err = fmt.Errorf("The model could not generate a valid tool call. You can send another message to continue this conversation. Details: %w", err)
+			}
 			return RunResult{Content: visible.String(), Thinking: thinking.String(), Metadata: metadata}, err
 		}
 		assistant.Role = "assistant"

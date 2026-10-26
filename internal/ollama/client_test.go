@@ -203,3 +203,19 @@ func TestChatPropagatesCancellation(t *testing.T) {
 	}
 	<-requestCancelled
 }
+
+func TestChatClassifiesMalformedToolArguments(t *testing.T) {
+	for _, status := range []int{http.StatusOK, http.StatusInternalServerError} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(status)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": `llama-server returned invalid tool call arguments for "shell": unexpected end of JSON input`})
+			}))
+			defer server.Close()
+			err := NewClient(server.URL).Chat(context.Background(), ChatRequest{Model: "test"}, func(ChatChunk) error { return nil })
+			if !errors.Is(err, ErrInvalidToolArguments) {
+				t.Fatalf("expected recoverable tool error, got %v", err)
+			}
+		})
+	}
+}

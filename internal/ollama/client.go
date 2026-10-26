@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -145,6 +146,17 @@ type ChatChunk struct {
 	EvalDuration       int64   `json:"eval_duration,omitempty"`
 }
 
+// ErrInvalidToolArguments identifies a model generation failure that can be
+// retried without executing the incomplete tool call.
+var ErrInvalidToolArguments = errors.New("model returned invalid tool call arguments")
+
+func upstreamError(message string) error {
+	if strings.Contains(message, "invalid tool call arguments") {
+		return fmt.Errorf("%w: %s", ErrInvalidToolArguments, message)
+	}
+	return errors.New(message)
+}
+
 func (c *Client) Chat(ctx context.Context, input ChatRequest, onChunk func(ChatChunk) error) error {
 	input.Stream = true
 	body, err := json.Marshal(input)
@@ -177,7 +189,7 @@ func (c *Client) Chat(ctx context.Context, input ChatRequest, onChunk func(ChatC
 			return fmt.Errorf("decode Ollama stream: %w", err)
 		}
 		if chunk.Error != "" {
-			return errors.New(chunk.Error)
+			return upstreamError(chunk.Error)
 		}
 		if err := onChunk(chunk); err != nil {
 			return err
@@ -194,7 +206,7 @@ func responseError(response *http.Response) error {
 		Error string `json:"error"`
 	}
 	if json.Unmarshal(body, &payload) == nil && payload.Error != "" {
-		return fmt.Errorf("Ollama returned %s: %s", response.Status, payload.Error)
+		return fmt.Errorf("Ollama returned %s: %w", response.Status, upstreamError(payload.Error))
 	}
 	return fmt.Errorf("Ollama returned %s", response.Status)
 }
