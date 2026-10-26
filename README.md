@@ -153,7 +153,12 @@ shared; forking does not snapshot or undo shell side effects.
 
 Open **Workspace** in the top bar to browse the shared Agent workspace from the
 web. Navigate folders, preview text and raster images, refresh after Agent changes,
-and download files. The browser is read-only; text previews show at most 256 KiB.
+and download files. Upload files (up to 32 MiB each) into the current folder, create
+folders, or use each row’s Rename and Move actions. The move picker supports
+subfolders and the Workspace root. Existing names are never overwritten.
+Workspace modifications require Linux 5.6+ and a filesystem supporting atomic
+no-overwrite renames; unsupported systems return an explicit error.
+Text previews show at most 256 KiB.
 Links and special files cannot be opened, and files outside the configured
 workspace are not exposed. Workspace files are shared across sessions.
 

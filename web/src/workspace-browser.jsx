@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowLeft, ArrowClockwise, Check, Copy, DownloadSimple, File, Folder, FolderOpen, LinkSimple, X } from "@phosphor-icons/react";
+import { ArrowLeft, ArrowClockwise, Check, Copy, DownloadSimple, File, Folder, FolderOpen, LinkSimple, PencilSimple, ArrowRight, X } from "@phosphor-icons/react";
 import { copyText } from "./copy-text";
-import { listWorkspace, previewWorkspaceFile } from "./api";
+import { listWorkspace, previewWorkspaceFile, uploadWorkspaceFile } from "./api";
 import { formatFileSize, workspaceBreadcrumbs, workspaceFileURL } from "./workspace";
+
+import WorkspaceAction, { workspaceChildPath } from "./workspace-actions";
 
 function CopyPreview({ preview }) {
   const [status, setStatus] = useState("");
@@ -23,6 +25,11 @@ function CopyPreview({ preview }) {
 
 export default function WorkspaceBrowser({ onClose, initialPath = "" }) {
   const dialogRef = useRef(null);
+  const uploadRef = useRef(null);
+  const [action, setAction] = useState(null);
+  const [uploading, setUploading] = useState(false);
+  const [operationStatus, setOperationStatus] = useState("");
+  const [operationError, setOperationError] = useState("");
   const closeRef = useRef(null);
   const selectedTriggerRef = useRef(null);
   const listRequest = useRef(null);
@@ -112,24 +119,50 @@ export default function WorkspaceBrowser({ onClose, initialPath = "" }) {
     });
   }
 
+  async function uploadFiles(files) {
+    if (!files.length || uploading) return;
+    setUploading(true); setOperationError("");
+    let uploaded = 0;
+    try {
+      for (const file of files) {
+        setOperationStatus(`Uploading ${file.name} (${uploaded + 1}/${files.length})…`);
+        if (file.size > 32 * 1024 * 1024) throw new Error(`${file.name} exceeds the 32 MiB upload limit.`);
+        await uploadWorkspaceFile(workspaceChildPath(path, file.name), file);
+        uploaded++;
+      }
+      setOperationStatus(`Uploaded ${uploaded} file${uploaded === 1 ? "" : "s"}.`);
+    } catch (error) {
+      setOperationStatus(`Uploaded ${uploaded} of ${files.length} files.`);
+      setOperationError(error.message + " Remaining files were not uploaded.");
+    } finally { setUploading(false); setRevision((value) => value + 1); }
+  }
+
   const selectedSize = preview?.path === selected?.path ? preview?.size : selected?.size;
 
   return (
-    <dialog ref={dialogRef} className="workspace-dialog" aria-labelledby="workspace-title" aria-describedby="workspace-description" onClose={onClose}>
+    <dialog ref={dialogRef} className="workspace-dialog" aria-labelledby="workspace-title" aria-describedby="workspace-description" onClose={onClose} onCancel={(event) => { if (uploading) event.preventDefault(); }}>
       <div className="workspace-browser">
         <header className="workspace-heading">
-          <div><h2 id="workspace-title"><FolderOpen size={23} aria-hidden="true" />Workspace</h2><p id="workspace-description">Files shared by Agent sessions · Read-only</p></div>
-          <button type="button" className="icon-button" aria-label="Close workspace" ref={closeRef} onClick={() => dialogRef.current.close()}><X size={23} /></button>
+          <div><h2 id="workspace-title"><FolderOpen size={23} aria-hidden="true" />Workspace</h2><p id="workspace-description">Files shared by Agent sessions</p></div>
+          <button type="button" className="icon-button" aria-label="Close workspace" disabled={uploading} ref={closeRef} onClick={() => dialogRef.current.close()}><X size={23} /></button>
         </header>
         <div className="workspace-toolbar">
           <nav aria-label="Workspace folders" className="workspace-breadcrumbs">
             {workspaceBreadcrumbs(path).map((part, index, parts) => <span key={part.path}>
               {index > 0 && <span aria-hidden="true">/</span>}
-              <button type="button" aria-current={index === parts.length - 1 ? "page" : undefined} onClick={() => navigate(part.path)}>{part.name}</button>
+              <button type="button" aria-current={index === parts.length - 1 ? "page" : undefined} disabled={uploading} onClick={() => navigate(part.path)}>{part.name}</button>
             </span>)}
           </nav>
-          <button type="button" className="icon-button" aria-label="Refresh workspace" title="Refresh files and preview" disabled={loading || previewLoading} onClick={() => setRevision((value) => value + 1)}><ArrowClockwise size={21} /></button>
+          <button type="button" className="icon-button" aria-label="Refresh workspace" title="Refresh files and preview" disabled={loading || previewLoading || uploading} onClick={() => setRevision((value) => value + 1)}><ArrowClockwise size={21} /></button>
         </div>
+        <div className="workspace-mutations">
+          <input ref={uploadRef} type="file" multiple hidden onChange={(event) => { const files = Array.from(event.target.files || []); event.target.value = ""; uploadFiles(files); }} />
+          <button type="button" className="workspace-download" disabled={uploading || loading || !listing} onClick={() => uploadRef.current.click()}>Upload files</button>
+          <button type="button" className="workspace-download" disabled={uploading || loading || !listing} onClick={() => setAction({ kind: "folder" })}>New folder</button>
+          <span>Up to 32 MiB per file</span>
+        </div>
+        {operationStatus && <p className="workspace-operation-status" role="status">{operationStatus}</p>}
+        {operationError && <p className="workspace-operation-status error" role="alert">{operationError}</p>}
         <div className={`workspace-body ${selected ? "has-selection" : ""}`}>
           <section className="workspace-list-pane" aria-label="Workspace files" aria-busy={loading}>
             {listError && <div className="workspace-feedback" role="alert"><p>{listError}</p><button type="button" onClick={() => loadDirectory(path)}>Try again</button></div>}
@@ -139,7 +172,7 @@ export default function WorkspaceBrowser({ onClose, initialPath = "" }) {
                 const readable = entry.type === "file" || entry.type === "directory";
                 const EntryIcon = entry.type === "directory" ? Folder : entry.type === "symlink" ? LinkSimple : File;
                 return <li key={entry.path}>
-                  <button type="button" className={`workspace-entry ${selected?.path === entry.path ? "selected" : ""}`} disabled={!readable || loading}
+                  <button type="button" className={`workspace-entry ${selected?.path === entry.path ? "selected" : ""}`} disabled={!readable || loading || uploading}
                     title={readable ? entry.name : "Links and special files cannot be opened"}
                     aria-label={`${entry.type === "directory" ? "Open folder" : "Preview file"}: ${entry.name}`}
                     aria-current={selected?.path === entry.path ? "true" : undefined}
@@ -151,11 +184,15 @@ export default function WorkspaceBrowser({ onClose, initialPath = "" }) {
                     <span className="workspace-entry-name">{entry.name}</span>
                     <span className="workspace-entry-size">{entry.type === "file" ? formatFileSize(entry.size) : entry.type === "directory" ? "Folder" : entry.type === "symlink" ? "Link" : "Special"}</span>
                   </button>
+                  {readable && <div className="workspace-entry-actions">
+                    <button type="button" className="icon-button" aria-label={`Rename ${entry.name}`} title="Rename" disabled={loading || uploading} onClick={() => setAction({ kind: "rename", entry })}><PencilSimple size={17} /></button>
+                    <button type="button" className="icon-button" aria-label={`Move ${entry.name}`} title="Move" disabled={loading || uploading} onClick={() => setAction({ kind: "move", entry })}><ArrowRight size={17} /></button>
+                  </div>}
                 </li>;
               })}
             </ul>}
             {listing?.entries.length === 0 && !loading && <p className="workspace-feedback">This folder is empty.</p>}
-            {listing?.nextOffset != null && <button type="button" className="workspace-more" disabled={loading} onClick={() => loadDirectory(path, listing.nextOffset)}>Load more files</button>}
+            {listing?.nextOffset != null && <button type="button" className="workspace-more" disabled={loading || uploading} onClick={() => loadDirectory(path, listing.nextOffset)}>Load more files</button>}
           </section>
           <section className="workspace-preview" aria-label="File preview" aria-busy={previewLoading && !!selected}>
             {!selected ? <div className="workspace-preview-empty"><File size={36} aria-hidden="true" /><p>Select a file to preview it.</p><span>Text and images open here. Other files can be downloaded.</span></div> : <>
@@ -178,6 +215,7 @@ export default function WorkspaceBrowser({ onClose, initialPath = "" }) {
           </section>
         </div>
       </div>
+      {action && <WorkspaceAction action={action} folder={path} onClose={() => { setAction(null); window.requestAnimationFrame(() => { if (!dialogRef.current?.contains(document.activeElement)) closeRef.current?.focus(); }); }} onSuccess={(message) => { setSelected(null); setOperationError(""); setOperationStatus(message); setRevision((value) => value + 1); }} />}
     </dialog>
   );
 }

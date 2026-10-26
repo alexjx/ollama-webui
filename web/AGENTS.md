@@ -10,7 +10,7 @@ When implementing from a selected generated mock, treat that image as the source
 
 - Workspace text previews offer Copy beside Download, preserving raw text, whitespace and Unicode (including Markdown). Support the local HTTP deployment inside the modal, report success only after copying, and label bounded content Copy preview.
 
-- A Workspace button opens a read-only browser of the shared Agent workspace: folder breadcrumbs, refresh, text/raster-image previews and downloads. Keep file access within the configured workspace, do not open symlinks or special files, and never execute HTML/SVG previews. Bound previews and listings; preserve responsive navigation, Escape/close focus restoration and stale-request isolation.
+- A Workspace button opens a browser of the shared Agent workspace: folder breadcrumbs, refresh, text/raster-image previews and downloads. Keep file access within the configured workspace, do not open symlinks or special files, and never execute HTML/SVG previews. Bound previews and listings; preserve responsive navigation, Escape/close focus restoration and stale-request isolation.
 
 - Session row and header menus offer Fork conversation: copy saved history, settings, attachments and compacted/agent context into an independent session, then open it. Keep the original intact; block forks during active source operations and show progress/errors. A delayed fork must not replace a different session the user has opened. Shared workspace files are not snapshotted.
 
@@ -58,3 +58,5 @@ Build app UI in `src/`. Keep `.openai/hosting.json`, `worker/index.js`, `scripts
 
 - Completed or interrupted assistant replies offer Inspect context: show the actual captured latest main-agent/Chat model request and response in a readable dialog, including sent system/history/tool messages and expandable settings, tools and raw JSON. Distinguish this from all agent rounds or child tasks; historical replies without captures must say so. Preserve Escape/close focus restoration and narrow-screen usability.
 - Reply footers stay compact: put Inspect context beside the performance stats in one wrapping row, use tight spacing below copy/selection actions, and avoid separate tall rows. Keep larger touch targets on touchscreens.
+
+- Workspace supports uploads into the current folder (32 MiB per file), folder creation, and row-level rename/move actions with a destination folder picker. Reject name collisions, preserve workspace confinement, and show pending/error/success feedback.

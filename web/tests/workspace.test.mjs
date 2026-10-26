@@ -43,3 +43,23 @@ test("workspace navigation distinguishes a file target from other directory erro
     fetch.mock.restore();
   }
 });
+
+test("workspace mutations preserve exact paths, upload bytes and conflict errors", async (t) => {
+  const { createWorkspaceFolder, moveWorkspaceItem, uploadWorkspaceFile } = await import("../src/api.js");
+  const calls = [];
+  const bytes = new Blob([new Uint8Array([0, 255, 13, 10])]);
+  t.mock.method(globalThis, "fetch", async (url, options) => {
+    calls.push({ url, options });
+    return Response.json({ path: "中文 #?.bin" });
+  });
+  await createWorkspaceFolder("中文 #?");
+  await moveWorkspaceItem("中文 #?.bin", "中文 #?/中文 #?.bin");
+  await uploadWorkspaceFile("中文 #?.bin", bytes);
+  assert.deepEqual(JSON.parse(calls[0].options.body), { path: "中文 #?" });
+  assert.deepEqual(JSON.parse(calls[1].options.body), { path: "中文 #?.bin", destination: "中文 #?/中文 #?.bin" });
+  assert.equal(new URL(calls[2].url, "http://local").searchParams.get("path"), "中文 #?.bin");
+  assert.equal(calls[2].options.body, bytes);
+  assert.ok(calls.every(({ options }) => options.method === "POST"));
+  t.mock.method(globalThis, "fetch", async () => Response.json({ error: { code: "workspace_conflict", message: "An item already exists." } }, { status: 409 }));
+  await assert.rejects(moveWorkspaceItem("a", "b"), (error) => error.status === 409 && error.message === "An item already exists.");
+});

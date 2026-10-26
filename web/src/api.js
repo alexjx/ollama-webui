@@ -206,3 +206,15 @@ export function updateTemplate(id, input) {
 export function deleteTemplate(id) {
   return request(`/api/templates/${id}`, { method: "DELETE" });
 }
+
+export function createWorkspaceFolder(path) {
+  return request("/api/workspace/folder", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path }) });
+}
+
+export function moveWorkspaceItem(path, destination) {
+  return request("/api/workspace/move", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path, destination }) });
+}
+
+export function uploadWorkspaceFile(path, file) {
+  return request(`/api/workspace/upload?${new URLSearchParams({ path })}`, { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: file });
+}
