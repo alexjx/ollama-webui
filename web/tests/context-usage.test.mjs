@@ -83,3 +83,9 @@ test("ignores automatic, missing, and stale checkpoint estimates after history d
   assert.equal(contextUsage(messages.slice(2), "4096", manualCheckpoint).estimated, undefined);
   assert.equal(contextUsage(messages.slice(0, 2), "4096", manualCheckpoint).estimated, undefined);
 });
+
+test("retains a valid compaction estimate when its older boundary is outside the loaded page", () => {
+  assert.equal(contextUsage(checkpointMessages().slice(2), "4096", manualCheckpoint, false).usedTokens, 512);
+  const messages = [...checkpointMessages().slice(2), { id: 6, role: 'assistant', metadata: { prompt_eval_count: 600, eval_count: 40 } }];
+  assert.equal(contextUsage(messages, "4096", manualCheckpoint, false).usedTokens, 640);
+});

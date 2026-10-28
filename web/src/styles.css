@@ -994,3 +994,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .workspace-name-label input { width: 100%; min-height: 44px; padding: 8px; border: 1px solid var(--line-strong); border-radius: 6px; background: #fff; color: var(--ink); }
 .workspace-destinations { min-height: 100px; max-height: 240px; overflow: auto; margin-top: 8px; border: 1px solid var(--line); border-radius: 6px; padding: 8px; background: #fff; }
 @media (pointer: coarse) { .workspace-entry-actions .icon-button { width: 44px; min-width: 44px; } }
+
+.history-loader { min-height: 42px; margin-bottom: 16px; text-align: center; }
+.history-loader button { padding: 8px 12px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.history-loader button:disabled { cursor: default; opacity: .6; }
+.history-loader p { font-size: 13px; color: #b42318; }

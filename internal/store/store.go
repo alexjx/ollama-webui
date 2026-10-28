@@ -1285,12 +1285,94 @@ func (s *Store) MessagesWithAttachmentData(ctx context.Context, conversationID i
 }
 
 func (s *Store) messages(ctx context.Context, conversationID int64, includeAttachmentData bool) ([]Message, error) {
+	return s.selectedMessages(ctx, conversationID, includeAttachmentData, nil)
+}
+
+// MessageModelExchange reads a saved inspection capture only when requested.
+// The conversation predicate prevents looking up a message through another session.
+func (s *Store) MessageModelExchange(ctx context.Context, conversationID, messageID int64) (json.RawMessage, error) {
+	var encoded string
+	err := s.db.QueryRowContext(ctx, `SELECT json_quote(json_extract(metadata_json, '$.model_exchange'))
+FROM messages WHERE conversation_id = ? AND id = ?`, conversationID, messageID).Scan(&encoded)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read message model exchange: %w", err)
+	}
+	return json.RawMessage(encoded), nil
+}
+
+// MessagesPage reads only the requested messages and their associated activity.
+// The cursor uses the same timestamp/id ordering as the complete transcript.
+func (s *Store) MessagesPage(ctx context.Context, conversationID int64, limit int, before int64) ([]Message, bool, error) {
+	if limit < 1 || limit > 100 || before < 0 {
+		return nil, false, fmt.Errorf("invalid history page")
+	}
+	where := "conversation_id = ?"
+	args := []any{conversationID}
+	if before != 0 {
+		var createdAt string
+		err := s.db.QueryRowContext(ctx, "SELECT created_at FROM messages WHERE conversation_id = ? AND id = ?", conversationID, before).Scan(&createdAt)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, false, ErrNotFound
+		}
+		if err != nil {
+			return nil, false, err
+		}
+		where += " AND (created_at, id) < (?, ?)"
+		args = append(args, createdAt, before)
+	}
+	args = append(args, limit+1)
+	rows, err := s.db.QueryContext(ctx, "SELECT id FROM messages WHERE "+where+" ORDER BY created_at DESC, id DESC LIMIT ?", args...)
+	if err != nil {
+		return nil, false, err
+	}
+	ids := make([]int64, 0, limit+1)
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, false, err
+		}
+		ids = append(ids, id)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return nil, false, err
+	}
+	hasMore := len(ids) > limit
+	if hasMore {
+		ids = ids[:limit]
+	}
+	if len(ids) == 0 {
+		return []Message{}, false, nil
+	}
+	messages, err := s.selectedMessages(ctx, conversationID, false, ids)
+	return messages, hasMore, err
+}
+
+func (s *Store) selectedMessages(ctx context.Context, conversationID int64, includeAttachmentData bool, ids []int64) ([]Message, error) {
+	selection := "SELECT id FROM messages WHERE conversation_id = ?"
+	args := []any{conversationID}
+	metadataSelection := "metadata_json"
+	if ids != nil {
+		// Inspection captures can contain megabytes of model context. Keep them
+		// out of page decoding and transfer; full-history/model reads retain them.
+		metadataSelection = "json_remove(metadata_json, '$.model_exchange')"
+		selection += " AND id IN (" + strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",") + ")"
+		for _, id := range ids {
+			args = append(args, id)
+		}
+	}
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, conversation_id, role, content, thinking, status, metadata_json, created_at
-FROM messages WHERE conversation_id = ? ORDER BY created_at, id`, conversationID)
+SELECT id, conversation_id, role, content, thinking, status, `+metadataSelection+`, created_at
+FROM messages WHERE id IN (`+selection+`) ORDER BY created_at, id`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list messages: %w", err)
 	}
+	defer rows.Close()
 	messages := make([]Message, 0)
 	messageIndexes := make(map[int64]int)
 	for rows.Next() {
@@ -1322,7 +1404,7 @@ SELECT a.id, a.message_id, a.file_name, a.media_type, length(a.data),
        CASE WHEN ? THEN a.data ELSE NULL END
 FROM message_attachments a
 JOIN messages m ON m.id = a.message_id
-WHERE m.conversation_id = ? ORDER BY a.message_id, a.id`, includeAttachmentData, conversationID)
+WHERE m.id IN (`+selection+`) ORDER BY a.message_id, a.id`, append([]any{includeAttachmentData}, args...)...)
 	if err != nil {
 		return nil, fmt.Errorf("list attachments: %w", err)
 	}
@@ -1348,7 +1430,7 @@ WHERE m.conversation_id = ? ORDER BY a.message_id, a.id`, includeAttachmentData,
 SELECT s.id, s.message_id, s.turn_number, s.tool_name, s.input_json, s.output,
        s.exit_code, s.status, s.started_at, s.completed_at
 FROM agent_steps s JOIN messages m ON m.id = s.message_id
-WHERE m.conversation_id = ? ORDER BY s.id`, conversationID)
+WHERE m.id IN (`+selection+`) ORDER BY s.id`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list agent steps: %w", err)
 	}
@@ -1388,7 +1470,7 @@ WHERE m.conversation_id = ? ORDER BY s.id`, conversationID)
 		return nil, err
 	}
 	runRows, err := s.db.QueryContext(ctx, agentRunSelect+`
-WHERE j.conversation_id = ? ORDER BY r.created_at, r.id`, conversationID)
+WHERE j.requesting_message_id IN (`+selection+`) ORDER BY r.created_at, r.id`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list message subagent runs: %w", err)
 	}

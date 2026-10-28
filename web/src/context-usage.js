@@ -14,14 +14,14 @@ export function latestContextTokens(messages) {
   return 0;
 }
 
-export function contextUsage(messages, contextWindow, checkpoint = null) {
+export function contextUsage(messages, contextWindow, checkpoint = null, historyComplete = true) {
   let usedTokens = latestContextTokens(messages);
   const compactedAfter = checkpoint?.state?.compacted_after_message_id;
   const estimatedTokens = tokenCount(checkpoint?.estimated_tokens);
   const hasSnapshot = Number.isSafeInteger(compactedAfter) && compactedAfter > 0
     && estimatedTokens != null && checkpoint.summary?.trim()
     && messages.some((message) => message.id === compactedAfter)
-    && messages.some((message) => message.id === checkpoint.through_message_id && message.role === "assistant" && message.status === "complete");
+    && (!historyComplete || messages.some((message) => message.id === checkpoint.through_message_id && message.role === "assistant" && message.status === "complete"));
   const hasNewerMeasurement = hasSnapshot && messages.some((message) => message.role === "assistant"
     && message.id > compactedAfter && (tokenCount(message.metadata?.prompt_eval_count) != null || tokenCount(message.metadata?.eval_count) != null));
   const estimated = hasSnapshot && !hasNewerMeasurement;

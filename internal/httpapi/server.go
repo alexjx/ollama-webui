@@ -106,6 +106,7 @@ func New(database *store.Store, ollamaClient *ollama.Client, runner agent.Runner
 	mux.HandleFunc("POST /api/conversations/{id}/fork", server.forkConversation)
 	mux.HandleFunc("POST /api/conversations/{id}/title", server.generateLatestTitle)
 	mux.HandleFunc("DELETE /api/conversations/{id}/messages/{messageID}", server.deleteMessagesFrom)
+	mux.HandleFunc("GET /api/conversations/{id}/messages/{messageID}/context", server.messageContext)
 	mux.HandleFunc("GET /api/attachments/{id}", server.attachment)
 	mux.HandleFunc("/", server.frontend)
 	server.handler = requestLogger(logger, mux)
@@ -257,9 +258,34 @@ func (s *Server) getConversation(response http.ResponseWriter, request *http.Req
 		s.storeError(response, err)
 		return
 	}
-	messages, err := s.store.Messages(request.Context(), id)
+	var messages []store.Message
+	var page map[string]any
+	query := request.URL.Query()
+	if query.Has("limit") || query.Has("before") {
+		limit, parseErr := strconv.Atoi(query.Get("limit"))
+		if parseErr != nil || limit < 1 || limit > 100 {
+			writeError(response, http.StatusBadRequest, "invalid_request", "limit must be between 1 and 100")
+			return
+		}
+		var before int64
+		if query.Has("before") {
+			before, parseErr = strconv.ParseInt(query.Get("before"), 10, 64)
+			if parseErr != nil || before <= 0 {
+				writeError(response, http.StatusBadRequest, "invalid_request", "before must be a positive message ID")
+				return
+			}
+		}
+		var hasMore bool
+		messages, hasMore, err = s.store.MessagesPage(request.Context(), id, limit, before)
+		page = map[string]any{"has_more": hasMore, "before": nil}
+		if hasMore && len(messages) > 0 {
+			page["before"] = messages[0].ID
+		}
+	} else {
+		messages, err = s.store.Messages(request.Context(), id)
+	}
 	if err != nil {
-		s.internalError(response, err)
+		s.storeError(response, err)
 		return
 	}
 	checkpoint, err := s.contextCheckpoint(request.Context(), id)
@@ -267,7 +293,30 @@ func (s *Server) getConversation(response http.ResponseWriter, request *http.Req
 		s.internalError(response, err)
 		return
 	}
-	writeJSON(response, http.StatusOK, map[string]any{"conversation": conversation, "messages": messages, "context_checkpoint": checkpoint})
+	payload := map[string]any{"conversation": conversation, "messages": messages, "context_checkpoint": checkpoint}
+	if page != nil {
+		payload["history_page"] = page
+	}
+	writeJSON(response, http.StatusOK, payload)
+}
+
+func (s *Server) messageContext(response http.ResponseWriter, request *http.Request) {
+	id, ok := pathID(response, request)
+	if !ok {
+		return
+	}
+	messageID, err := strconv.ParseInt(request.PathValue("messageID"), 10, 64)
+	if err != nil || messageID <= 0 {
+		writeError(response, http.StatusBadRequest, "invalid_request", "message ID must be a positive integer")
+		return
+	}
+	exchange, err := s.store.MessageModelExchange(request.Context(), id, messageID)
+	if err != nil {
+		s.storeError(response, err)
+		return
+	}
+	response.Header().Set("Cache-Control", "no-store")
+	writeJSON(response, http.StatusOK, map[string]any{"model_exchange": exchange})
 }
 
 func (s *Server) updateConversation(response http.ResponseWriter, request *http.Request) {

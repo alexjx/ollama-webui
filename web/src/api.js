@@ -61,8 +61,15 @@ export async function listConversations(query = "", signal) {
   return payload.items || [];
 }
 
-export function getConversation(id, signal) {
-  return request(`/api/conversations/${id}`, { signal });
+export function getConversation(id, signal, page) {
+  const params = new URLSearchParams();
+  if (page?.limit != null) params.set("limit", page.limit);
+  if (page?.before != null) params.set("before", page.before);
+  return request(`/api/conversations/${id}${params.size ? `?${params}` : ""}`, { signal });
+}
+
+export function getMessageContext(conversationId, messageId, signal) {
+  return request(`/api/conversations/${conversationId}/messages/${messageId}/context`, { signal });
 }
 
 export function forkConversation(id) {

@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { MagnifyingGlass, X } from "@phosphor-icons/react";
 import "./context-inspector.css";
+import { getMessageContext } from "./api";
 
 function JSONDetails({ label, value }) {
   const [open, setOpen] = useState(false);
@@ -24,7 +25,26 @@ function ModelMessage({ message, index, open = false }) {
   </details>;
 }
 
-function InspectorDialog({ exchange, onClose }) {
+function InspectorDialog({ message, onClose }) {
+  const embeddedExchange = message.metadata?.model_exchange;
+  const fetchSaved = !embeddedExchange && Number.isSafeInteger(message.id) && Number.isSafeInteger(message.conversation_id);
+  const [revision, setRevision] = useState(0);
+  const [capture, setCapture] = useState({ loading: fetchSaved, exchange: embeddedExchange, error: "" });
+  useEffect(() => {
+    if (!fetchSaved) {
+      setCapture({ loading: false, exchange: embeddedExchange, error: "" });
+      return;
+    }
+    const controller = new AbortController();
+    setCapture({ loading: true, exchange: null, error: "" });
+    getMessageContext(message.conversation_id, message.id, controller.signal).then((payload) => {
+      if (!controller.signal.aborted) setCapture({ loading: false, exchange: payload.model_exchange, error: "" });
+    }).catch((error) => {
+      if (!controller.signal.aborted) setCapture({ loading: false, exchange: null, error: error.message });
+    });
+    return () => controller.abort();
+  }, [message.conversation_id, message.id, embeddedExchange, fetchSaved, revision]);
+  const exchange = capture.exchange;
   const dialogRef = useRef(null);
   const headingId = useId();
   useEffect(() => {
@@ -44,7 +64,10 @@ function InspectorDialog({ exchange, onClose }) {
       <button type="button" aria-label="Close context inspector" onClick={close} autoFocus><X size={22} aria-hidden="true" /></button>
     </header>
     <div className="context-inspector-body">
-      {!request ? <p>No model request was captured for this reply. Send a new message to inspect its actual context.</p> : <>
+      {capture.loading ? <p role="status">Loading model context…</p> : capture.error ? <div>
+        <p className="context-inspector-error" role="alert">{capture.error}</p>
+        <button type="button" onClick={() => setRevision((current) => current + 1)}>Retry loading context</button>
+      </div> : !request ? <p>No model request was captured for this reply. Send a new message to inspect its actual context.</p> : <>
         <p className="context-inspector-meta">{request.model} · Round {exchange.turn} · {exchange.status}</p>
         <p>The messages below are the context sent to Ollama, including system instructions and any retained history or tool results. In Agent mode, this is the latest main-agent call, not every round or child task. Ollama applies its own model template and context limits.</p>
         {exchange.error && <p className="context-inspector-error">{exchange.error}</p>}
@@ -77,6 +100,6 @@ export default function ContextInspector({ message }) {
     <button ref={triggerRef} className="select-response-button context-inspector-trigger" type="button" onClick={() => setOpen(true)}>
       <MagnifyingGlass size={16} aria-hidden="true" />Inspect context
     </button>
-    {open && <InspectorDialog exchange={message.metadata?.model_exchange} onClose={close} />}
+    {open && <InspectorDialog message={message} onClose={close} />}
   </>;
 }

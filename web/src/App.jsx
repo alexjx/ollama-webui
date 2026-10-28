@@ -5,6 +5,7 @@ import { cancelRunningSubagents, reduceSubagentEvent } from "./agent-events";
 import { finalizeActivity, readActivityBlocks, recordActivityEvent } from "./activity-timeline";
 import { formatDuration, formatRate, responseMetrics } from "./response-metrics";
 import { isNearTranscriptEnd, scrollToEnd } from "./scroll-position";
+import { HISTORY_PAGE_SIZE, prependHistory, captureHistoryAnchor, restoreHistoryAnchor } from "./conversation-history";
 import { clampInputHeight } from "./input-resize";
 import { selectElementText } from "./select-text";
 import { fileFromLargePaste, isImageAttachment, readAttachment, splitAttachments, validateAttachmentFiles } from "./text-attachments";
@@ -776,6 +777,7 @@ function ChatTranscript({
   onDeleteTurn,
   empty,
   messages,
+  historyControl,
   conversationMode,
   error,
 }) {
@@ -792,8 +794,9 @@ function ChatTranscript({
 
   return (
     <div className="transcript-inner">
+      {historyControl}
       {messages.map((message, index) => (
-        <article className={`message ${message.role === "user" ? "user-message" : "assistant-message"}`} key={message.id || `${message.role}-${index}`}>
+        <article data-message-id={message.id} className={`message ${message.role === "user" ? "user-message" : "assistant-message"}`} key={message.id || `${message.role}-${index}`}>
           <header>
             <strong>{message.role === "user" ? "You" : "Ollama"}</strong>
             <time>{message.created_at ? new Date(message.created_at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "Now"}</time>
@@ -1184,6 +1187,11 @@ export function App() {
   const queryRef = useRef(query);
   queryRef.current = query;
   const [messages, setMessages] = useState([]);
+  const [historyPage, setHistoryPage] = useState(null);
+  const [loadingHistory, setLoadingHistory] = useState(false);
+  const [historyError, setHistoryError] = useState("");
+  const historyRequestRef = useRef(null);
+  const historyAnchorRef = useRef(null);
   const [scrollRequest, setScrollRequest] = useState(0);
   const [connected, setConnected] = useState(false);
   const [chatError, setChatError] = useState("");
@@ -1250,7 +1258,7 @@ export function App() {
   const actionReturnRef = useRef(null);
   const transcriptRef = useRef(null);
   const followProgressRef = useRef(true);
-  const currentContextUsage = useMemo(() => contextUsage(messages, contextWindow, contextCheckpoint), [messages, contextWindow, contextCheckpoint]);
+  const currentContextUsage = useMemo(() => contextUsage(messages, contextWindow, contextCheckpoint, !historyPage?.has_more), [messages, contextWindow, contextCheckpoint, historyPage]);
   const activeTitleGenerating = !!titleRequests[activeId];
 
   function setConversationMode(value) {
@@ -1283,6 +1291,7 @@ export function App() {
 
   useEffect(() => () => {
     for (const controller of titleRequestRef.current.values()) controller.abort();
+    historyRequestRef.current?.abort();
   }, []);
 
   useLayoutEffect(() => {
@@ -1291,6 +1300,11 @@ export function App() {
   }, [activeId, scrollRequest]);
 
   useLayoutEffect(() => {
+    if (historyAnchorRef.current) {
+      restoreHistoryAnchor(transcriptRef.current, historyAnchorRef.current);
+      historyAnchorRef.current = null;
+      return;
+    }
     const latest = messages.at(-1);
     if (followProgressRef.current && (latest?.activity?.version === 1 || latest?.metadata?.activity?.version === 1)) {
       scrollToEnd(transcriptRef.current);
@@ -1759,7 +1773,40 @@ export function App() {
     }
   }
 
+  function cancelHistoryLoad() {
+    historyRequestRef.current?.abort();
+    historyRequestRef.current = null;
+    historyAnchorRef.current = null;
+    setLoadingHistory(false);
+    setHistoryError("");
+  }
+
+  async function loadOlderMessages() {
+    if (!historyPage?.has_more || historyRequestRef.current || loadingConversation || deletingTurns) return;
+    const view = conversationViewRef.current;
+    const controller = new AbortController();
+    historyRequestRef.current = controller;
+    setLoadingHistory(true);
+    setHistoryError("");
+    try {
+      const payload = await getConversation(activeId, controller.signal, { limit: HISTORY_PAGE_SIZE, before: historyPage.before });
+      if (view !== conversationViewRef.current || historyRequestRef.current !== controller) return;
+      historyAnchorRef.current = captureHistoryAnchor(transcriptRef.current);
+      followProgressRef.current = false;
+      setMessages((current) => prependHistory(current, payload.messages || []));
+      setHistoryPage(payload.history_page || null);
+    } catch (error) {
+      if (error.name !== "AbortError" && view === conversationViewRef.current && historyRequestRef.current === controller) setHistoryError(error.message);
+    } finally {
+      if (historyRequestRef.current === controller) {
+        historyRequestRef.current = null;
+        setLoadingHistory(false);
+      }
+    }
+  }
+
   async function chooseConversation(id) {
+    cancelHistoryLoad();
     templateDraftRef.current = false;
     setTemplatesDialog(null);
     const view = ++conversationViewRef.current;
@@ -1779,7 +1826,7 @@ export function App() {
       await modelChangeRef.current?.catch(() => {});
       await webSearchChangeRef.current?.catch(() => {});
       if (view !== conversationViewRef.current) return;
-      const payload = await getConversation(id, controller.signal);
+      const payload = await getConversation(id, controller.signal, { limit: HISTORY_PAGE_SIZE });
       if (view !== conversationViewRef.current) return;
       setActiveId(payload.conversation.id);
       const recentTitle = recentTitlesRef.current.get(id);
@@ -1800,6 +1847,8 @@ export function App() {
       });
       setModelLoaded(payload.conversation.message_count > 0);
       setMessages(payload.messages);
+      setHistoryPage(payload.history_page || null);
+      setScrollRequest((current) => current + 1);
       setContextCheckpoint(payload.context_checkpoint || null);
     } catch (error) {
       if (error.name !== "AbortError") setChatError(error.message);
@@ -1809,6 +1858,8 @@ export function App() {
   }
 
   function resetConversation(closeNavigation = true) {
+    cancelHistoryLoad();
+    setHistoryPage(null);
     templateDraftRef.current = false;
     setTemplatesDialog(null);
     ++conversationViewRef.current;
@@ -1839,10 +1890,22 @@ export function App() {
     refreshModelChoices();
   }
 
-  function openTemplates(trigger, fromConversation = false) {
+  async function openTemplates(trigger, fromConversation = false) {
     templatesTriggerRef.current = trigger;
     setMenuOpen(false);
-    const sourceMessages = messages.filter((message) => message.role === "user" && message.status === "complete");
+    const view = conversationViewRef.current;
+    let sourceHistory = messages;
+    if (fromConversation && historyPage?.has_more) {
+      try {
+        const payload = await getConversation(activeId);
+        if (view !== conversationViewRef.current) return;
+        sourceHistory = payload.messages || [];
+      } catch (error) {
+        if (view === conversationViewRef.current) setChatError(error.message);
+        return;
+      }
+    }
+    const sourceMessages = sourceHistory.filter((message) => message.role === "user" && message.status === "complete");
     setTemplatesDialog({
       view: conversationViewRef.current,
       sourceMessages: fromConversation ? sourceMessages : [],
@@ -2032,11 +2095,13 @@ export function App() {
 
   async function confirmTurnDelete() {
     if (!turnDeleteTarget || deletingTurns || streaming) return;
+    cancelHistoryLoad();
     setDeletingTurns(true);
     setTurnDeleteError("");
     try {
       const payload = await deleteTurns(turnDeleteTarget.conversationId, turnDeleteTarget.id);
       setMessages(payload.messages || []);
+      setHistoryPage(null);
       setContextCheckpoint(payload.context_checkpoint || null);
       setModelLoaded(payload.conversation.message_count > 0);
       setChatError("");
@@ -2194,11 +2259,12 @@ export function App() {
       if (!cancelled) setChatError(error.message);
       if (accepted && conversationId && generationRef.current === controller) {
         try {
-          const payload = await getConversation(conversationId);
+          const payload = await getConversation(conversationId, undefined, { limit: HISTORY_PAGE_SIZE });
           const refreshedMessages = payload.messages || [];
           // Cancellation may still be saving; keep the local stopped response and its measured usage.
           if (generationRef.current === controller && refreshedMessages.at(-1)?.status !== "streaming") {
-            setMessages(refreshedMessages);
+            // Refresh only the recent tail; preserve any older pages already loaded.
+            setMessages((current) => [...current.filter((message) => typeof message.id === "number" && message.id < (refreshedMessages[0]?.id ?? Infinity)), ...refreshedMessages]);
           }
         } catch {
           // Keep the visible interrupted turn if the refresh is unavailable.
@@ -2346,7 +2412,10 @@ export function App() {
           </div>
         )}
 
-        <section className="transcript" aria-label="Conversation" ref={transcriptRef} onScroll={(event) => { followProgressRef.current = isNearTranscriptEnd(event.currentTarget); }}>
+        <section className="transcript" aria-label="Conversation" ref={transcriptRef} onScroll={(event) => {
+          followProgressRef.current = isNearTranscriptEnd(event.currentTarget);
+          if (event.currentTarget.scrollTop <= 80 && !historyError) loadOlderMessages();
+        }}>
           <WorkspaceLinkContext.Provider value={{ root: runtimeSettings?.agent?.workspace, open: (path, trigger) => { workspaceReturnRef.current = trigger; setWorkspacePath(path); setWorkspaceOpen(true); } }}>
           <ChatTranscript
             streaming={streaming}
@@ -2355,6 +2424,13 @@ export function App() {
             onDeleteTurn={openTurnDelete}
             empty={!activeId}
             messages={messages}
+            historyControl={historyPage?.has_more && <div className="history-loader">
+              <button type="button" onClick={loadOlderMessages} disabled={loadingHistory || loadingConversation || deletingTurns}>
+                {loadingHistory ? "Loading earlier messages…" : historyError ? "Retry loading earlier messages" : "Load earlier messages"}
+              </button>
+              {historyError && <p role="alert">{historyError}</p>}
+              <span className="sr-only" role="status">{loadingHistory ? "Loading earlier messages" : ""}</span>
+            </div>}
             conversationMode={conversationMode}
             error={chatError}
           />

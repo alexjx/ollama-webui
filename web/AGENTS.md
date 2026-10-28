@@ -60,3 +60,5 @@ Build app UI in `src/`. Keep `.openai/hosting.json`, `worker/index.js`, `scripts
 - Reply footers stay compact: put Inspect context beside the performance stats in one wrapping row, use tight spacing below copy/selection actions, and avoid separate tall rows. Keep larger touch targets on touchscreens.
 
 - Workspace supports uploads into the current folder (32 MiB per file), folder creation, and row-level rename/move actions with a destination folder picker. Reject name collisions, preserve workspace confinement, and show pending/error/success feedback.
+
+- Existing conversations initially load the latest five messages. Load earlier messages in bounded pages when the reader scrolls to the top, with a keyboard-accessible load/retry button. Preserve the visible message position when prepending history and isolate delayed requests across conversation switches. The model's context remains independent of the visible history page. Saved model request/response captures load only when Inspect context is opened, with loading, retry, and cancellation on close.
