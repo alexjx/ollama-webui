@@ -1,7 +1,53 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { getConversation, getMessageContext } from '../src/api.js';
-import { HISTORY_PAGE_SIZE, prependHistory, captureHistoryAnchor, restoreHistoryAnchor } from '../src/conversation-history.js';
+import { HISTORY_PAGE_SIZE, HISTORY_RETAIN_MESSAGES, releaseHistory, prependHistory, captureHistoryAnchor, restoreHistoryAnchor } from '../src/conversation-history.js';
+
+const savedMessages = (count) => Array.from({ length: count }, (_, index) => ({ id: index + 1, status: 'complete' }));
+
+test('a long-running conversation releases complete old pages while retaining the live tail', () => {
+  let messages = [];
+  for (let id = 1; id <= 600; id++) {
+    const latest = { id, status: 'streaming', content: 'live reply' };
+    messages.push(latest);
+    messages = releaseHistory(messages, id);
+    assert.ok(messages.length < HISTORY_RETAIN_MESSAGES + HISTORY_PAGE_SIZE);
+    assert.equal(messages.at(-1), latest);
+    latest.status = 'complete';
+  }
+  assert.equal(messages.length, HISTORY_RETAIN_MESSAGES);
+  assert.equal(messages[0].id, 571);
+});
+
+test('reading older history protects the viewport and a page of scroll-back buffer', () => {
+  const messages = savedMessages(100);
+  assert.equal(releaseHistory(messages, 1), messages);
+  assert.equal(releaseHistory(messages, 6), messages);
+  const retained = releaseHistory(messages, 21);
+  assert.equal(retained[0].id, 16);
+  assert.equal(retained.find((message) => message.id === 21), messages[20]);
+  assert.equal(releaseHistory(messages, 'missing'), messages);
+});
+
+test('focused, selected, streaming and unsaved messages cannot be evicted', () => {
+  const messages = savedMessages(80);
+  assert.equal(releaseHistory(messages, 80, ['4']), messages);
+  assert.equal(releaseHistory(messages, 80, ['12', '24'])[0].id, 11);
+  messages[3] = { id: 'pending-user', status: 'complete' };
+  assert.equal(releaseHistory(messages, 80), messages);
+  messages[3] = { id: 4, status: 'streaming' };
+  assert.equal(releaseHistory(messages, 80), messages);
+});
+
+test('released pages reload without gaps or replacing the retained messages', () => {
+  const saved = savedMessages(100);
+  const retained = releaseHistory(saved, 100);
+  const before = retained[0].id;
+  const older = saved.filter((message) => message.id < before).slice(-HISTORY_PAGE_SIZE);
+  const restored = prependHistory(retained, older);
+  assert.deepEqual(restored.map((message) => message.id), saved.slice(-35).map((message) => message.id));
+  assert.equal(restored.at(-1), retained.at(-1));
+});
 
 test('requests bounded history and an exclusive cursor while preserving legacy reads', async (t) => {
   const calls = [];

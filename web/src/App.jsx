@@ -5,7 +5,7 @@ import { cancelRunningSubagents, reduceSubagentEvent } from "./agent-events";
 import { finalizeActivity, readActivityBlocks, recordActivityEvent } from "./activity-timeline";
 import { formatDuration, formatRate, responseMetrics } from "./response-metrics";
 import { isNearTranscriptEnd, scrollToEnd } from "./scroll-position";
-import { HISTORY_PAGE_SIZE, prependHistory, captureHistoryAnchor, restoreHistoryAnchor } from "./conversation-history";
+import { HISTORY_PAGE_SIZE, HISTORY_RETAIN_MESSAGES, releaseHistory, prependHistory, captureHistoryAnchor, restoreHistoryAnchor } from "./conversation-history";
 import { clampInputHeight } from "./input-resize";
 import { selectElementText } from "./select-text";
 import { fileFromLargePaste, isImageAttachment, readAttachment, splitAttachments, validateAttachmentFiles } from "./text-attachments";
@@ -1309,6 +1309,7 @@ export function App() {
     if (followProgressRef.current && (latest?.activity?.version === 1 || latest?.metadata?.activity?.version === 1)) {
       scrollToEnd(transcriptRef.current);
     }
+    releaseOlderMessages();
   }, [messages]);
 
   async function refreshConversations(search = query, signal) {
@@ -1779,6 +1780,25 @@ export function App() {
     historyAnchorRef.current = null;
     setLoadingHistory(false);
     setHistoryError("");
+  }
+
+  function releaseOlderMessages() {
+    if (messages.length <= HISTORY_RETAIN_MESSAGES || historyRequestRef.current || loadingConversation || deletingTurns) return;
+    const transcript = transcriptRef.current;
+    if (!transcript?.clientHeight) return;
+    const anchor = captureHistoryAnchor(transcript);
+    if (!anchor) return;
+    const selection = window.getSelection();
+    const protectedIds = [document.activeElement, selection?.anchorNode, selection?.focusNode]
+      .map((node) => (node?.nodeType === 1 ? node : node?.parentElement)?.closest('[data-message-id]')?.dataset.messageId)
+      .filter(Boolean);
+    const retained = releaseHistory(messages, anchor.message.dataset.messageId, protectedIds);
+    if (retained === messages) return;
+    historyAnchorRef.current = anchor;
+    setMessages(retained);
+    // Evicted messages remain on the server and use the same exclusive cursor
+    // as unloaded history. No second in-memory cache keeps their payloads alive.
+    setHistoryPage({ has_more: true, before: retained[0].id });
   }
 
   async function loadOlderMessages() {
@@ -2414,6 +2434,7 @@ export function App() {
 
         <section className="transcript" aria-label="Conversation" ref={transcriptRef} onScroll={(event) => {
           followProgressRef.current = isNearTranscriptEnd(event.currentTarget);
+          releaseOlderMessages();
           if (event.currentTarget.scrollTop <= 80 && !historyError) loadOlderMessages();
         }}>
           <WorkspaceLinkContext.Provider value={{ root: runtimeSettings?.agent?.workspace, open: (path, trigger) => { workspaceReturnRef.current = trigger; setWorkspacePath(path); setWorkspaceOpen(true); } }}>
