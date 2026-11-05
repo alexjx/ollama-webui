@@ -4,7 +4,7 @@ import { applyKnownConversationTitles, mergeConversationTitles, newestConversati
 import { cancelRunningSubagents, reduceSubagentEvent } from "./agent-events";
 import { finalizeActivity, readActivityBlocks, recordActivityEvent } from "./activity-timeline";
 import { formatDuration, formatRate, responseMetrics } from "./response-metrics";
-import { isNearTranscriptEnd, scrollToEnd } from "./scroll-position";
+import { shouldFollowTranscript, scrollToEnd } from "./scroll-position";
 import { HISTORY_PAGE_SIZE, HISTORY_RETAIN_MESSAGES, releaseHistory, prependHistory, captureHistoryAnchor, restoreHistoryAnchor } from "./conversation-history";
 import { clampInputHeight } from "./input-resize";
 import { selectElementText } from "./select-text";
@@ -1258,6 +1258,8 @@ export function App() {
   const actionReturnRef = useRef(null);
   const transcriptRef = useRef(null);
   const followProgressRef = useRef(true);
+  const transcriptScrollTopRef = useRef(0);
+  const transcriptTouchYRef = useRef(null);
   const currentContextUsage = useMemo(() => contextUsage(messages, contextWindow, contextCheckpoint, !historyPage?.has_more), [messages, contextWindow, contextCheckpoint, historyPage]);
   const activeTitleGenerating = !!titleRequests[activeId];
 
@@ -1297,18 +1299,24 @@ export function App() {
   useLayoutEffect(() => {
     followProgressRef.current = true;
     if (activeId) scrollToEnd(transcriptRef.current);
+    transcriptScrollTopRef.current = transcriptRef.current?.scrollTop ?? 0;
   }, [activeId, scrollRequest]);
 
   useLayoutEffect(() => {
     if (historyAnchorRef.current) {
       restoreHistoryAnchor(transcriptRef.current, historyAnchorRef.current);
+      transcriptScrollTopRef.current = transcriptRef.current?.scrollTop ?? 0;
       historyAnchorRef.current = null;
       return;
     }
     const latest = messages.at(-1);
+    // Read the position before following: streaming can render before the
+    // browser delivers the reader's scroll event.
+    followProgressRef.current = shouldFollowTranscript(transcriptRef.current, transcriptScrollTopRef.current, followProgressRef.current);
     if (followProgressRef.current && (latest?.activity?.version === 1 || latest?.metadata?.activity?.version === 1)) {
       scrollToEnd(transcriptRef.current);
     }
+    transcriptScrollTopRef.current = transcriptRef.current?.scrollTop ?? 0;
     releaseOlderMessages();
   }, [messages]);
 
@@ -2432,8 +2440,21 @@ export function App() {
           </div>
         )}
 
-        <section className="transcript" aria-label="Conversation" ref={transcriptRef} onScroll={(event) => {
-          followProgressRef.current = isNearTranscriptEnd(event.currentTarget);
+        <section className="transcript" aria-label="Conversation" ref={transcriptRef} onWheel={(event) => {
+          // Pause before smooth wheel scrolling starts, so a streaming render
+          // cannot cancel the gesture before the first scroll event arrives.
+          if (event.deltaY < 0) followProgressRef.current = false;
+        }} onTouchStart={(event) => {
+          transcriptTouchYRef.current = event.touches[0]?.clientY ?? null;
+        }} onTouchMove={(event) => {
+          const y = event.touches[0]?.clientY;
+          if (y != null && transcriptTouchYRef.current != null && y > transcriptTouchYRef.current) followProgressRef.current = false;
+          transcriptTouchYRef.current = y ?? null;
+        }} onKeyDown={(event) => {
+          if (["ArrowUp", "PageUp", "Home"].includes(event.key) || (event.key === " " && event.shiftKey)) followProgressRef.current = false;
+        }} onScroll={(event) => {
+          followProgressRef.current = shouldFollowTranscript(event.currentTarget, transcriptScrollTopRef.current, followProgressRef.current);
+          transcriptScrollTopRef.current = event.currentTarget.scrollTop;
           releaseOlderMessages();
           if (event.currentTarget.scrollTop <= 80 && !historyError) loadOlderMessages();
         }}>
