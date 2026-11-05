@@ -50,7 +50,19 @@ func (s *Server) compactConversation(response http.ResponseWriter, request *http
 		return
 	}
 	agentMode := conversation.Mode != "chat"
+	attachmentTools := false
+	if !agentMode && hasTextAttachments(history) {
+		model, err := s.installedModel(request.Context(), conversation.Model)
+		if err != nil {
+			writeError(response, http.StatusBadGateway, "ollama_unavailable", err.Error())
+			return
+		}
+		attachmentTools = containsCapability(model.Capabilities, "tools")
+	}
 	systemPrompt := s.conversationSystemPrompt(conversation)
+	if attachmentTools {
+		systemPrompt += "\n\n" + agent.ChatAttachmentInstructions
+	}
 	window := s.runtime.ContextTokens
 	if conversation.ContextWindow != nil {
 		window = *conversation.ContextWindow
@@ -65,7 +77,7 @@ func (s *Server) compactConversation(response http.ResponseWriter, request *http
 	}
 	prepared, err := preparer.Prepare(request.Context(), agent.ContextPrepareInput{
 		ConversationID: id, Model: conversation.Model, SystemPrompt: systemPrompt,
-		History: history, ContextWindow: window, Force: true, IncludeTextAttachments: !agentMode,
+		History: history, ContextWindow: window, Force: true, IncludeTextAttachments: !agentMode && !attachmentTools,
 	})
 	if err != nil {
 		writeError(response, http.StatusBadGateway, "context_compaction_failed", err.Error())

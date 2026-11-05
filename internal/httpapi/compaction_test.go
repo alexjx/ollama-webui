@@ -62,14 +62,20 @@ func TestManualCompactionPersistsAndContinuesBothModes(t *testing.T) {
 	for _, test := range []struct {
 		mode               string
 		configuredPreparer bool
-	}{{"agent", true}, {"chat", true}, {"agent", false}, {"chat", false}} {
-		t.Run(fmt.Sprintf("%s/preparer=%t", test.mode, test.configuredPreparer), func(t *testing.T) {
+		tools              bool
+	}{{"agent", true, true}, {"chat", true, true}, {"agent", false, true}, {"chat", false, true}, {"chat", true, false}, {"chat", false, false}} {
+		t.Run(fmt.Sprintf("%s/preparer=%t/tools=%t", test.mode, test.configuredPreparer, test.tools), func(t *testing.T) {
 			mode := test.mode
+			includeText := mode == "chat" && !test.tools
 			var mu sync.Mutex
 			var calls []ollama.ChatRequest
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == "/api/tags" {
-					io.WriteString(w, `{"models":[{"name":"model","capabilities":["completion","tools","vision"]}]}`)
+					capabilities := []string{"completion", "vision"}
+					if test.tools {
+						capabilities = append(capabilities, "tools")
+					}
+					json.NewEncoder(w).Encode(map[string]any{"models": []map[string]any{{"name": "model", "capabilities": capabilities}}})
 					return
 				}
 				var request ollama.ChatRequest
@@ -108,7 +114,7 @@ func TestManualCompactionPersistsAndContinuesBothModes(t *testing.T) {
 			summaryCall := calls[0]
 			mu.Unlock()
 			summaryJSON, _ := json.Marshal(summaryCall)
-			if strings.Contains(string(summaryJSON), "OLD_FILE_CONTENT") != (mode == "chat") || len(summaryCall.Messages[2].Images) != 1 || len(summaryCall.Tools) != 0 {
+			if strings.Contains(string(summaryJSON), "OLD_FILE_CONTENT") != includeText || len(summaryCall.Messages[2].Images) != 1 || len(summaryCall.Tools) != 0 {
 				t.Fatalf("summary attachment policy changed for %s: %s", mode, summaryJSON)
 			}
 			history, err := database.MessagesWithAttachmentData(context.Background(), conversation.ID)
@@ -144,8 +150,11 @@ func TestManualCompactionPersistsAndContinuesBothModes(t *testing.T) {
 				t.Fatal("continued model lost workspace path instructions after compaction")
 			}
 			continuedJSON, _ := json.Marshal(calls[1])
-			if !strings.Contains(string(continuedJSON), "Preserved decisions") || !strings.Contains(string(continuedJSON), "CUSTOM_SYSTEM") || strings.Contains(string(continuedJSON), "OLD_USER") || !strings.Contains(string(continuedJSON), "continue now") || strings.Contains(string(continuedJSON), "RECENT_FILE_CONTENT") != (mode == "chat") {
+			if !strings.Contains(string(continuedJSON), "Preserved decisions") || !strings.Contains(string(continuedJSON), "CUSTOM_SYSTEM") || strings.Contains(string(continuedJSON), "OLD_USER") || !strings.Contains(string(continuedJSON), "continue now") || strings.Contains(string(continuedJSON), "RECENT_FILE_CONTENT") != includeText {
 				t.Fatalf("continued model got wrong context: %s", continuedJSON)
+			}
+			if mode == "chat" && ((len(calls[1].Tools) == 2) != test.tools || (!test.tools && len(calls[1].Tools) != 0)) {
+				t.Fatalf("continued Chat got wrong attachment tools: %#v", calls[1].Tools)
 			}
 			if len(calls[1].Messages[1].Images) != 1 {
 				t.Fatal("recent image was dropped")
@@ -279,7 +288,15 @@ func (failedCompactionChat) Chat(context.Context, ollama.ChatRequest, func(ollam
 
 func TestManualCompactionFailureAndShortHistory(t *testing.T) {
 	database, conversation := compactionDatabase(t, "chat", "model")
-	client := ollama.NewClient("http://unused.invalid")
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/tags" {
+			io.WriteString(w, `{"models":[{"name":"model","capabilities":["completion","tools"]}]}`)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer upstream.Close()
+	client := ollama.NewClient(upstream.URL)
 	api := New(database, client, agent.Runner{Context: &agent.ContextPreparer{Chat: failedCompactionChat{}, Store: database}}, RuntimeSettings{}, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	url := fmt.Sprintf("/api/conversations/%d/compact", conversation.ID)
 	response := httptest.NewRecorder()

@@ -7,7 +7,7 @@ export function conversationWebSearchEnabled(conversation) {
 
 export default function ConversationWebSearch({ mode, enabled, disabled, saving, provider, providerError, error, onChange }) {
   const agent = mode === "agent";
-  const hint = !agent ? "Chat talks to the model without tools. Web search is available in Agent mode."
+  const hint = !agent ? "Web search is available in Agent mode. Chat can only read attached text with tool-capable models."
     : providerError ? "Could not refresh Tavily status. Check System settings before using web search."
       : !provider ? "Checking Tavily availability…"
         : !provider.configured ? "Add a Tavily API token and enable web search in System settings. Your choice is saved for this session."

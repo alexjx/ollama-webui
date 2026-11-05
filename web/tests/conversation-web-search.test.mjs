@@ -54,11 +54,12 @@ test("Agent setting is keyboard-labelled, editable between replies, and disabled
   assert.match(render({ disabled: true }), /disabled=""/);
 });
 
-test("Chat stays unchecked and tool-free even when session and provider permit search", () => {
+test("Chat keeps search disabled even when session and provider permit search", () => {
   const html = render({ mode: "chat" });
   assert.match(html, /disabled=""/);
   assert.doesNotMatch(html, /aria-pressed="true"/);
-  assert.match(html, /Chat talks to the model without tools/);
+  assert.match(html, /Web search is available in Agent mode/);
+  assert.match(html, /Chat can only read attached text with tool-capable models/);
 });
 
 test("provider prerequisites, disabled sessions, and save errors have honest inline feedback", () => {

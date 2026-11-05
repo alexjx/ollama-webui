@@ -574,9 +574,22 @@ func (s *Server) generate(response http.ResponseWriter, request *http.Request) {
 			return
 		}
 	}
+	if len(files) > 0 {
+		if s.runtime.Workspace == "" {
+			writeError(response, http.StatusServiceUnavailable, "workspace_unavailable", "Workspace is not configured; text files could not be saved.")
+			return
+		}
+		if err := s.persistPastedFiles(id, attachments); err != nil {
+			workspaceMutationError(response, err)
+			return
+		}
+	}
 	userMessage, err := s.store.AddMessageWithAttachments(request.Context(), id, "user",
 		input.Content, "complete", attachments)
 	if err != nil {
+		if len(files) > 0 {
+			s.removePastedFiles(attachments)
+		}
 		s.internalError(response, err)
 		return
 	}
@@ -601,7 +614,11 @@ func (s *Server) generate(response http.ResponseWriter, request *http.Request) {
 	response.WriteHeader(http.StatusOK)
 	writeEvent(response, flusher, map[string]any{"type": "started", "user_message": userMessage, "assistant_message": assistantMessage})
 
+	attachmentTools := !agentMode && containsCapability(modelInfo.Capabilities, "tools") && hasTextAttachments(history)
 	systemPrompt := s.conversationSystemPrompt(conversation)
+	if attachmentTools {
+		systemPrompt += "\n\n" + agent.ChatAttachmentInstructions
+	}
 	contextWindow := 0
 	if agentMode {
 		contextWindow = s.runtime.ContextTokens
@@ -616,7 +633,7 @@ func (s *Server) generate(response http.ResponseWriter, request *http.Request) {
 	preparedContext, prepareErr := preparer.Prepare(request.Context(), agent.ContextPrepareInput{
 		ConversationID: conversation.ID, Model: conversation.Model, SystemPrompt: systemPrompt,
 		History: history, ContextWindow: contextWindow,
-		SkipAutomaticCompaction: !agentMode || s.agent.Context == nil, IncludeTextAttachments: !agentMode,
+		SkipAutomaticCompaction: !agentMode || s.agent.Context == nil, IncludeTextAttachments: !agentMode && !attachmentTools,
 	})
 	if prepareErr != nil {
 		status := "error"
@@ -652,6 +669,7 @@ func (s *Server) generate(response http.ResponseWriter, request *http.Request) {
 	result, err := s.agent.Run(request.Context(), agent.RunInput{
 		ConversationID: conversation.ID, Model: conversation.Model, Mode: conversation.Mode, Messages: upstreamMessages, Options: options,
 		Think:              think,
+		AttachmentTools:    attachmentTools,
 		DisableWebSearch:   !conversation.WebSearchEnabled,
 		Vision:             containsCapability(modelInfo.Capabilities, "vision"),
 		AssistantMessageID: assistantMessage.ID,

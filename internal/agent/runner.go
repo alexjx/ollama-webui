@@ -114,6 +114,7 @@ type RunInput struct {
 	AssistantMessageID int64
 	Vision             bool
 	DisableWebSearch   bool
+	AttachmentTools    bool
 }
 
 type Event struct {
@@ -167,6 +168,8 @@ func (runner Runner) Run(ctx context.Context, input RunInput, emit func(Event) e
 		return RunResult{}, err
 	}
 	agentMode := input.Mode != "chat"
+	attachmentTools := runner.Attachments != nil && input.ConversationID > 0 && (agentMode || input.AttachmentTools)
+	toolMode := agentMode || attachmentTools
 	if agentMode && runner.MaxTurns <= 0 {
 		return RunResult{}, errors.New("agent max turns must be positive")
 	}
@@ -197,13 +200,6 @@ func (runner Runner) Run(ctx context.Context, input RunInput, emit func(Event) e
 		if !input.DisableWebSearch && runner.WebSearch != nil && runner.WebSearch.Enabled(ctx) {
 			tools = append(tools, webSearchTool)
 		}
-		if runner.Attachments != nil && input.ConversationID > 0 {
-			readTool := attachmentReadTool
-			if input.Options != nil && input.Options.NumCtx != nil && *input.Options.NumCtx > 0 {
-				readTool.Function.Description += fmt.Sprintf(" Your configured context window is %d tokens; existing messages also use this space.", *input.Options.NumCtx)
-			}
-			tools = append(tools, attachmentListTool, readTool)
-		}
 		if runner.Artifacts != nil && input.ConversationID > 0 {
 			tools = append(tools, contextListTool, contextReadTool, contextWriteTool)
 		}
@@ -213,6 +209,19 @@ func (runner Runner) Run(ctx context.Context, input RunInput, emit func(Event) e
 				tools = append(tools, labelImageDirectoryTool)
 			}
 		}
+	}
+	if attachmentTools {
+		if !agentMode {
+			maxTurns = runner.MaxTurns
+			if maxTurns <= 0 {
+				maxTurns = 8
+			}
+		}
+		readTool := attachmentReadTool
+		if input.Options != nil && input.Options.NumCtx != nil && *input.Options.NumCtx > 0 {
+			readTool.Function.Description += fmt.Sprintf(" Your configured context window is %d tokens; existing messages also use this space.", *input.Options.NumCtx)
+		}
+		tools = append(tools, attachmentListTool, readTool)
 	}
 	for turn := 1; turn <= maxTurns; turn++ {
 		stopThinking := func() error {
@@ -298,7 +307,7 @@ func (runner Runner) Run(ctx context.Context, input RunInput, emit func(Event) e
 			exchange.Error = err.Error()
 		}
 		if err != nil {
-			if agentMode && ctx.Err() == nil && errors.Is(err, ollama.ErrInvalidToolArguments) {
+			if toolMode && ctx.Err() == nil && errors.Is(err, ollama.ErrInvalidToolArguments) {
 				if toolCallRetries < 2 && turn < maxTurns {
 					toolCallRetries++
 					// Keep completed rounds, but discard all calls from this failed
@@ -327,17 +336,26 @@ func (runner Runner) Run(ctx context.Context, input RunInput, emit func(Event) e
 			metadata["thinking_duration_ms"] = timing.duration.Milliseconds()
 		}
 		metadata["response_model"] = input.Model
-		if !agentMode || len(assistant.ToolCalls) == 0 {
+		if !toolMode || len(assistant.ToolCalls) == 0 {
 			metadata["final_answer_start"] = finalAnswerStart
 		}
 		if err := emit(Event{Type: "turn.done", Turn: turn, Metadata: metadata}); err != nil {
 			return RunResult{Content: visible.String(), Thinking: thinking.String(), Metadata: metadata}, err
 		}
-		if !agentMode || len(assistant.ToolCalls) == 0 {
+		if !toolMode || len(assistant.ToolCalls) == 0 {
 			return RunResult{Content: visible.String(), Thinking: thinking.String(), Metadata: metadata}, nil
 		}
 
 		for _, call := range assistant.ToolCalls {
+			if !agentMode && call.Function.Name != "attachment_list" && call.Function.Name != "attachment_read" {
+				// Chat never grants shell, search, delegation, or context writes,
+				// including when the model requests a tool it was not offered.
+				messages = append(messages, ollama.Message{
+					Role: "tool", ToolName: call.Function.Name, ToolCallID: call.ID,
+					Content: `{"output":"Only attachment_list and attachment_read are available in Chat mode.","exit_code":-1}`,
+				})
+				continue
+			}
 			resultContent, err := runner.executeTool(ctx, input.ConversationID, input.AssistantMessageID, input.Model, input.Vision, input.DisableWebSearch, turn, call, emit)
 			if err != nil {
 				return RunResult{Content: visible.String(), Thinking: thinking.String(), Metadata: metadata}, err
@@ -734,7 +752,7 @@ func chunkMetadata(chunk ollama.ChatChunk, turn int, metrics runMetrics, mode st
 		"prompt_eval_duration": chunk.PromptEvalDuration, "eval_count": chunk.EvalCount,
 		"eval_duration": chunk.EvalDuration, "run_mode": mode,
 	}
-	if mode == "agent" {
+	if mode == "agent" || turn > 1 {
 		metadata["agent_prompt_eval_count"] = metrics.promptEvalCount
 		metadata["agent_prompt_eval_duration"] = metrics.promptEvalDuration
 		metadata["agent_eval_count"] = metrics.evalCount

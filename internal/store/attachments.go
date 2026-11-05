@@ -10,7 +10,7 @@ import (
 // ListTextAttachments returns metadata only, scoped to a conversation.
 func (s *Store) ListTextAttachments(ctx context.Context, conversationID int64) ([]Attachment, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT a.id, a.message_id, a.file_name, a.media_type, LENGTH(a.data)
+SELECT a.id, a.message_id, a.file_name, a.media_type, a.workspace_path, LENGTH(a.data)
 FROM message_attachments a JOIN messages m ON m.id = a.message_id
 WHERE m.conversation_id = ? AND a.media_type = 'text/plain'
 ORDER BY a.id`, conversationID)
@@ -21,7 +21,7 @@ ORDER BY a.id`, conversationID)
 	attachments := make([]Attachment, 0)
 	for rows.Next() {
 		var attachment Attachment
-		if err := rows.Scan(&attachment.ID, &attachment.MessageID, &attachment.FileName, &attachment.MediaType, &attachment.Size); err != nil {
+		if err := rows.Scan(&attachment.ID, &attachment.MessageID, &attachment.FileName, &attachment.MediaType, &attachment.WorkspacePath, &attachment.Size); err != nil {
 			return nil, fmt.Errorf("scan text attachment: %w", err)
 		}
 		attachments = append(attachments, attachment)
@@ -38,10 +38,10 @@ func (s *Store) ReadTextAttachment(ctx context.Context, conversationID, attachme
 	}
 	var attachment Attachment
 	err := s.db.QueryRowContext(ctx, `
-SELECT a.id, a.message_id, a.file_name, a.media_type, LENGTH(a.data), SUBSTR(a.data, ? + 1, CASE WHEN ? = 0 THEN LENGTH(a.data) ELSE ? END)
+SELECT a.id, a.message_id, a.file_name, a.media_type, a.workspace_path, LENGTH(a.data), SUBSTR(a.data, ? + 1, CASE WHEN ? = 0 THEN LENGTH(a.data) ELSE ? END)
 FROM message_attachments a JOIN messages m ON m.id = a.message_id
 WHERE m.conversation_id = ? AND a.id = ? AND a.media_type = 'text/plain'`, offset, limit, limit, conversationID, attachmentID).Scan(
-		&attachment.ID, &attachment.MessageID, &attachment.FileName, &attachment.MediaType, &attachment.Size, &attachment.Data)
+		&attachment.ID, &attachment.MessageID, &attachment.FileName, &attachment.MediaType, &attachment.WorkspacePath, &attachment.Size, &attachment.Data)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Attachment{}, ErrNotFound
 	}

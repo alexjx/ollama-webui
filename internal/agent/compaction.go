@@ -69,6 +69,11 @@ func (preparer ContextPreparer) Prepare(ctx context.Context, input ContextPrepar
 	if input.Force && checkpointErr != nil {
 		return PreparedContext{}, fmt.Errorf("read context checkpoint: %w", checkpointErr)
 	}
+	if inline, known := checkpoint.State["text_attachments_inline"].(bool); checkpointOK && input.IncludeTextAttachments && known && !inline {
+		// A model without file tools needs the original attachment text. A
+		// reference-only checkpoint cannot provide it, so rebuild from history.
+		checkpointOK = false
+	}
 	base := preparedMessagesWithText(input.SystemPrompt, checkpointSummary(checkpoint, checkpointOK), messagesAfter(history, checkpoint, checkpointOK), input.IncludeTextAttachments)
 	result := PreparedContext{
 		Messages: base, EstimatedTokens: estimateContextTokens(base), ContextWindow: input.ContextWindow,
@@ -154,7 +159,20 @@ func (preparer ContextPreparer) Prepare(ctx context.Context, input ContextPrepar
 		if err := ctx.Err(); err != nil {
 			return PreparedContext{}, err
 		}
-		var state map[string]any
+		state := map[string]any{}
+		if inline, known := checkpoint.State["text_attachments_inline"].(bool); checkpointOK && known {
+			state["text_attachments_inline"] = inline
+		}
+		for _, message := range history {
+			for _, attachment := range message.Attachments {
+				if attachment.MediaType == "text/plain" {
+					state["text_attachments_inline"] = input.IncludeTextAttachments
+				}
+			}
+			if message.ID == throughID {
+				break
+			}
+		}
 		if input.Force {
 			var latestID int64
 			for _, message := range input.History {
@@ -162,7 +180,7 @@ func (preparer ContextPreparer) Prepare(ctx context.Context, input ContextPrepar
 					latestID = message.ID
 				}
 			}
-			state = map[string]any{"compacted_after_message_id": latestID}
+			state["compacted_after_message_id"] = latestID
 		}
 		_, persistErr := preparer.Store.UpsertCheckpoint(ctx, store.UpsertCheckpointParams{
 			ConversationID: input.ConversationID, ThroughMessageID: throughID,

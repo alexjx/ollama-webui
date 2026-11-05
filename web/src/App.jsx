@@ -335,7 +335,7 @@ function ConversationSettings({
           {modelLoaded ? (
             <p className="locked-setting"><span className="lock-dot" />Mode is fixed for this conversation.</p>
           ) : supportsTools ? (
-            <p>Agent can use the shell; Chat talks to the model without tools.</p>
+            <p>Agent can use the shell; Chat can read attached text with tool-capable models.</p>
           ) : (
             <p>This model uses Chat because it does not advertise tool support.</p>
           )}
@@ -663,7 +663,7 @@ function ResponseMetrics({ message }) {
           <div key={label}><dt>{label}</dt><dd>{value}</dd></div>
         ))}
       </dl>
-      <p>{metrics.mode === "chat" ? "Single Chat model call." : metrics.aggregate ? "Across the complete agent run." : "Final model call; older conversation metadata."}</p>
+      <p>{metrics.mode === "chat" ? metrics.turns > 1 ? "Across the Chat reply and file reads." : "Single Chat model call." : metrics.aggregate ? "Across the complete agent run." : "Final model call; older conversation metadata."}</p>
     </details>
   );
 }
@@ -1039,7 +1039,7 @@ function Composer({ message, setMessage, onTemplates, webSearchEnabled, onChange
         )}
         {conversationMode === "chat" && model && !empty && (
           <div className="mode-notice" role="status">
-            Chat mode · {supportsTools ? "tools are off for this conversation" : "this model does not support tools"}
+            Chat mode · {supportsTools ? "attached text is read on demand" : "attached text is included in context"}
           </div>
         )}
         {attachments.length > 0 && (
@@ -2735,7 +2735,7 @@ export function App() {
             </IconButton>
           </header>
           <dl className="about-facts">
-            <div><dt>Chat</dt><dd>Talk directly to any completion-capable model without tools.</dd></div>
+            <div><dt>Chat</dt><dd>Talk directly to any completion-capable model. Tool-capable models can read attached text on demand.</dd></div>
             <div><dt>Agent</dt><dd>Let a tool-capable model continue working and use the configured shell when needed.</dd></div>
             <div><dt>Your data</dt><dd>Conversations and activity are stored locally in SQLite.</dd></div>
           </dl>

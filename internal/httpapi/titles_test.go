@@ -376,6 +376,7 @@ func TestTitleSourceUsesBoundedUTF8TextAttachmentWithoutImages(t *testing.T) {
 		}
 		titleTestReply(w, "Report summary: "+strings.Repeat("结果", 2000))
 	})
+	fixture.api.runtime.Workspace = t.TempDir()
 	conversation := createTitleTestConversation(t, fixture, "chat")
 	content := "Report begins: " + strings.Repeat("世界", 5000)
 	body, _ := json.Marshal(map[string]any{"content": "Summarize this report", "files": []imageInput{{Name: "report.txt", MediaType: "text/plain", Data: base64.StdEncoding.EncodeToString([]byte(content))}}})

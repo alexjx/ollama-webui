@@ -68,14 +68,22 @@ func TestDecodeTextFilesRejectsInvalidInputAndBudgets(t *testing.T) {
 }
 
 func TestGenerateTextFilesWithNonvisionChatAndAgentModels(t *testing.T) {
-	for _, mode := range []string{"chat", "agent"} {
-		t.Run(mode, func(t *testing.T) {
+	for _, test := range []struct {
+		mode  string
+		tools bool
+	}{{"chat", false}, {"chat", true}, {"agent", true}} {
+		t.Run(fmt.Sprintf("%s/tools=%v", test.mode, test.tools), func(t *testing.T) {
+			mode := test.mode
 			ctx := context.Background()
 			content := "  file start\r\n" + strings.Repeat("世界\n", 5000) + "  file end\n"
 			var captured ollama.ChatRequest
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == "/api/tags" {
-					io.WriteString(w, `{"models":[{"name":"text","capabilities":["completion","tools"]}]}`)
+					capabilities := []string{"completion"}
+					if test.tools {
+						capabilities = append(capabilities, "tools")
+					}
+					json.NewEncoder(w).Encode(map[string]any{"models": []map[string]any{{"name": "text", "capabilities": capabilities}}})
 					return
 				}
 				if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
@@ -95,7 +103,7 @@ func TestGenerateTextFilesWithNonvisionChatAndAgentModels(t *testing.T) {
 			}
 			client := ollama.NewClient(upstream.URL)
 			workspace := t.TempDir()
-			api := New(database, client, agent.Runner{Chat: client, Steps: database, Shell: agent.ShellExecutor{Workspace: workspace}, MaxTurns: 3, Context: &agent.ContextPreparer{Chat: client, Store: database}}, RuntimeSettings{ContextTokens: 4096}, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+			api := New(database, client, agent.Runner{Chat: client, Steps: database, Shell: agent.ShellExecutor{Workspace: workspace}, MaxTurns: 3, Context: &agent.ContextPreparer{Chat: client, Store: database}}, RuntimeSettings{Workspace: workspace, ContextTokens: 4096}, t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 			body, _ := json.Marshal(map[string]any{"content": "", "files": []imageInput{{Name: "pasted.txt", MediaType: "text/plain", Data: base64.StdEncoding.EncodeToString([]byte(content))}}})
 			response := httptest.NewRecorder()
 			api.ServeHTTP(response, httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/conversations/%d/messages", conversation.ID), strings.NewReader(string(body))))
@@ -110,19 +118,23 @@ func TestGenerateTextFilesWithNonvisionChatAndAgentModels(t *testing.T) {
 			if len(user.Images) != 0 || !strings.Contains(user.Content, "pasted.txt") || !strings.Contains(user.Content, "attachment_id=") {
 				t.Fatalf("file wrongly treated as image or lost: %#v", user)
 			}
-			if strings.Contains(user.Content, content) != (mode == "chat") {
+			if strings.Contains(user.Content, content) != !test.tools {
 				t.Fatalf("wrong model file content for %s: %q", mode, user.Content)
 			}
 			tools := make(map[string]bool)
 			for _, tool := range captured.Tools {
 				tools[tool.Function.Name] = true
 			}
-			if mode == "chat" && len(tools) != 0 || mode == "agent" && (!tools["attachment_list"] || !tools["attachment_read"]) {
+			if !test.tools && len(tools) != 0 || test.tools && (!tools["attachment_list"] || !tools["attachment_read"]) || mode == "chat" && tools["shell"] {
 				t.Fatalf("wrong attachment tool availability: %#v", tools)
 			}
-			entries, err := os.ReadDir(workspace)
-			if err != nil || len(entries) != 0 {
-				t.Fatalf("explicit upload was staged to workspace: %#v, %v", entries, err)
+			attachment := history[0].Attachments[0]
+			if !strings.HasPrefix(attachment.WorkspacePath, fmt.Sprintf("pasted/conversation-%d-", conversation.ID)) || !strings.Contains(user.Content, attachment.WorkspacePath) {
+				t.Fatalf("missing saved workspace reference: %#v / %q", attachment, user.Content)
+			}
+			saved, err := os.ReadFile(filepath.Join(workspace, attachment.WorkspacePath))
+			if err != nil || string(saved) != content {
+				t.Fatalf("workspace paste differs: %v", err)
 			}
 			download := httptest.NewRecorder()
 			api.ServeHTTP(download, httptest.NewRequest(http.MethodGet, history[0].Attachments[0].URL, nil))

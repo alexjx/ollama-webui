@@ -18,6 +18,8 @@ type AttachmentStore interface {
 	ReadTextAttachment(context.Context, int64, int64, int64, int64) (store.Attachment, error)
 }
 
+const ChatAttachmentInstructions = `Text attachments are provided as file references to keep your context focused. Use attachment_read with the attachment ID to read only the bytes needed for the task; attachment_list can rediscover files from older messages. Choose ranges that leave room for your answer. These are your only tools; shell commands and other agent capabilities are unavailable. Do not infer file contents from a path or filename.`
+
 var attachmentListTool = ollama.Tool{
 	Type: "function",
 	Function: ollama.ToolFunction{
@@ -37,7 +39,7 @@ var attachmentReadTool = ollama.Tool{
 }
 
 // ModelMessage is the single translation boundary for stored attachments.
-// Chat models receive file text; agents and summaries receive stable references.
+// Tool-free Chat models receive file text; tool-capable models receive references.
 func ModelMessage(message store.Message, includeText bool) ollama.Message {
 	result := ollama.Message{Role: message.Role, Content: message.Content}
 	for _, attachment := range message.Attachments {
@@ -50,6 +52,9 @@ func ModelMessage(message store.Message, includeText bool) ollama.Message {
 		}
 		if result.Content != "" {
 			result.Content += "\n\n"
+		}
+		if attachment.WorkspacePath != "" {
+			result.Content += fmt.Sprintf("[Saved in workspace at %q]\n", attachment.WorkspacePath)
 		}
 		if includeText {
 			result.Content += fmt.Sprintf("[Attached text file %q, attachment_id=%d]\n%s\n[End attached text file]", attachment.FileName, attachment.ID, string(attachment.Data))
@@ -115,7 +120,11 @@ func (runner Runner) executeAttachmentTool(ctx context.Context, conversationID i
 		for {
 			items := make([]map[string]any, 0, end-start)
 			for _, attachment := range attachments[start:end] {
-				items = append(items, map[string]any{"attachment_id": attachment.ID, "message_id": attachment.MessageID, "name": attachment.FileName, "bytes": attachment.Size})
+				item := map[string]any{"attachment_id": attachment.ID, "message_id": attachment.MessageID, "name": attachment.FileName, "bytes": attachment.Size}
+				if attachment.WorkspacePath != "" {
+					item["workspace_path"] = attachment.WorkspacePath
+				}
+				items = append(items, item)
 			}
 			value := map[string]any{"items": items, "total": len(attachments), "cursor": start, "next_cursor": end, "has_more": end < len(attachments)}
 			result, status := encode(value)

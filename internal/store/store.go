@@ -69,19 +69,21 @@ type AgentStep struct {
 }
 
 type Attachment struct {
-	ID        int64  `json:"id"`
-	MessageID int64  `json:"message_id"`
-	FileName  string `json:"file_name"`
-	MediaType string `json:"media_type"`
-	Size      int    `json:"size"`
-	URL       string `json:"url"`
-	Data      []byte `json:"-"`
+	ID            int64  `json:"id"`
+	MessageID     int64  `json:"message_id"`
+	FileName      string `json:"file_name"`
+	MediaType     string `json:"media_type"`
+	Size          int    `json:"size"`
+	URL           string `json:"url"`
+	WorkspacePath string `json:"workspace_path,omitempty"`
+	Data          []byte `json:"-"`
 }
 
 type NewAttachment struct {
-	FileName  string
-	MediaType string
-	Data      []byte
+	FileName      string
+	MediaType     string
+	Data          []byte
+	WorkspacePath string
 }
 
 type ConversationContext struct {
@@ -298,6 +300,7 @@ CREATE TABLE IF NOT EXISTS message_attachments (
   message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
   file_name TEXT NOT NULL,
   media_type TEXT NOT NULL,
+  workspace_path TEXT NOT NULL DEFAULT '',
   data BLOB NOT NULL,
   created_at TEXT NOT NULL
 );
@@ -391,6 +394,9 @@ CREATE INDEX IF NOT EXISTS agent_runs_parent_idx ON agent_runs(parent_run_id, id
 		return fmt.Errorf("migrate database: %w", err)
 	}
 	if err := s.ensureColumn(ctx, "messages", "thinking", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "message_attachments", "workspace_path", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
 	if err := s.ensureColumn(ctx, "conversations", "thinking_enabled", "INTEGER CHECK (thinking_enabled IN (0, 1))"); err != nil {
@@ -1244,8 +1250,8 @@ VALUES (?, ?, ?, ?, ?)`, conversationID, role, content, status, formatTime(now))
 	storedAttachments := make([]Attachment, 0, len(attachments))
 	for _, attachment := range attachments {
 		attachmentResult, err := tx.ExecContext(ctx, `
-INSERT INTO message_attachments (message_id, file_name, media_type, data, created_at)
-VALUES (?, ?, ?, ?, ?)`, id, attachment.FileName, attachment.MediaType, attachment.Data, formatTime(now))
+INSERT INTO message_attachments (message_id, file_name, media_type, data, workspace_path, created_at)
+VALUES (?, ?, ?, ?, ?, ?)`, id, attachment.FileName, attachment.MediaType, attachment.Data, attachment.WorkspacePath, formatTime(now))
 		if err != nil {
 			return Message{}, fmt.Errorf("create attachment: %w", err)
 		}
@@ -1253,7 +1259,8 @@ VALUES (?, ?, ?, ?, ?)`, id, attachment.FileName, attachment.MediaType, attachme
 		storedAttachments = append(storedAttachments, Attachment{
 			ID: attachmentID, MessageID: id, FileName: attachment.FileName,
 			MediaType: attachment.MediaType, Size: len(attachment.Data),
-			URL: fmt.Sprintf("/api/attachments/%d", attachmentID),
+			URL:           fmt.Sprintf("/api/attachments/%d", attachmentID),
+			WorkspacePath: attachment.WorkspacePath,
 		})
 	}
 	if err := tx.Commit(); err != nil {
@@ -1400,7 +1407,7 @@ FROM messages WHERE id IN (`+selection+`) ORDER BY created_at, id`, args...)
 		return nil, err
 	}
 	attachmentRows, err := s.db.QueryContext(ctx, `
-SELECT a.id, a.message_id, a.file_name, a.media_type, length(a.data),
+SELECT a.id, a.message_id, a.file_name, a.media_type, a.workspace_path, length(a.data),
        CASE WHEN ? THEN a.data ELSE NULL END
 FROM message_attachments a
 JOIN messages m ON m.id = a.message_id
@@ -1412,7 +1419,7 @@ WHERE m.id IN (`+selection+`) ORDER BY a.message_id, a.id`, append([]any{include
 	for attachmentRows.Next() {
 		var attachment Attachment
 		if err := attachmentRows.Scan(&attachment.ID, &attachment.MessageID, &attachment.FileName,
-			&attachment.MediaType, &attachment.Size, &attachment.Data); err != nil {
+			&attachment.MediaType, &attachment.WorkspacePath, &attachment.Size, &attachment.Data); err != nil {
 			return nil, fmt.Errorf("scan attachment: %w", err)
 		}
 		attachment.URL = fmt.Sprintf("/api/attachments/%d", attachment.ID)
@@ -1517,9 +1524,9 @@ UPDATE agent_steps SET output = ?, exit_code = ?, status = ?, completed_at = ? W
 func (s *Store) GetAttachment(ctx context.Context, id int64) (Attachment, error) {
 	var attachment Attachment
 	err := s.db.QueryRowContext(ctx, `
-SELECT id, message_id, file_name, media_type, data
+SELECT id, message_id, file_name, media_type, workspace_path, data
 FROM message_attachments WHERE id = ?`, id).Scan(&attachment.ID, &attachment.MessageID,
-		&attachment.FileName, &attachment.MediaType, &attachment.Data)
+		&attachment.FileName, &attachment.MediaType, &attachment.WorkspacePath, &attachment.Data)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Attachment{}, ErrNotFound
 	}

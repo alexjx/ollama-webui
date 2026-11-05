@@ -1,7 +1,8 @@
 # Ollama WebUI
 
 A lightweight Chat and Agent interface for Ollama. Chat mode works with any
-completion-capable model and never sends tools. Agent mode can use a shell for
+completion-capable model. Tool-capable Chat models can read attached text on demand;
+other Chat models receive attachment contents inline. Agent mode can use a shell for
 calculation, search, inspection, execution, or verification when useful and
 continues until the task is complete. The Go service streams both modes to a
 responsive React interface and stores chats, model thinking, image and text attachments,
@@ -61,7 +62,7 @@ checks the saved token with one basic search. Agent models can then call
 `web_search` and use result titles, links and snippets to cite their sources.
 The integration uses only Tavily's [Search API](https://docs.tavily.com/documentation/api-reference/endpoint/search)
 with Bearer authentication; generated answers, raw page content, images and
-automatic advanced search are disabled. Chat stays tool-free.
+automatic advanced search are disabled. Web search remains exclusive to Agent mode.
 
 **Conversation settings → Web search** controls search separately for each Agent
 session, including between replies. The switch is saved with the session and
@@ -104,9 +105,16 @@ Large captured shell outputs are stored under the managed context directory and
 represented in later model turns by a bounded excerpt plus a conversation-scoped
 artifact ID; the Agent can list and page through those artifacts when needed.
 Pasted text above 16 KiB becomes a UTF-8 text attachment in the browser before
-sending. Existing composer text stays inline. Chat mode sends labelled file text
-to the model; Agent mode receives file references and reads relevant ranges with
-conversation-scoped attachment tools. Attachment reads have no fixed byte cap:
+sending. Explicit text attachments are saved under `AGENT_WORKSPACE/pasted/` when
+sent, using names such as `conversation-12-<random>.txt` so repeated filenames never
+overwrite each other. The original name and exact bytes remain downloadable from
+the conversation. These shared workspace files survive conversation deletion and
+are shared by forks, like other workspace files. Existing composer text stays
+inline, and older attachments remain readable from their saved database records.
+Agent mode and tool-capable Chat models receive compact file references and read
+relevant ranges with conversation-scoped attachment tools. Chat exposes only
+attachment list/read tools, with no shell, web search, or delegation. Models without
+tool support continue receiving labelled file text inline. Attachment reads have no fixed byte cap:
 the Agent chooses a range to fit its available context, or omits the limit to
 read the remaining file. Requested text reaches the model without tool-feedback
 clipping. Raw inline messages are never staged to
