@@ -12,7 +12,7 @@ func (s *Server) conversationSystemPrompt(conversation store.Conversation) strin
 	if conversation.Mode != "chat" {
 		prompt = agent.SystemPrompt
 		if conversation.SystemPrompt != "" {
-			prompt += "\n\nAdditional instructions from the user:\n" + conversation.SystemPrompt
+			prompt += "\n\n## Additional instructions from the user:\n" + conversation.SystemPrompt
 		}
 	}
 	return prompt + agent.WorkspaceInstructions(s.runtime.Workspace)

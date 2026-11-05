@@ -128,6 +128,9 @@ four most recent completed messages and the original saved transcript and files.
 uses the saved summary; context usage shows an estimate until the next model call
 reports measured tokens. Short histories need no compaction, and summarization
 errors keep the previous context available.
+The summary is sent as a separate user message labeled as historical context,
+after the current system instructions and before recent conversation messages.
+Existing saved summaries use this format automatically.
 
 Agent mode uses child agents to keep file inspection, research, and other detailed
 work out of the main conversation's small context. Children inherit the parent's
@@ -245,11 +248,13 @@ stages. The final Alpine image includes Python 3, pip, uv and the shell toolkit 
 but contains neither compiler nor frontend source. If `./workspace` is bind-mounted,
 it must be writable by container UID 1000 so shell tasks work.
 
-Agent mode can run Python through its existing shell tool. Prefer `uv run script.py`
-or create a workspace-local environment with `uv venv .venv` and install packages
-with `uv pip install --python .venv/bin/python PACKAGE`. Without uv, use
-`python3 -m venv .venv`, `.venv/bin/python -m pip install PACKAGE`, then
-`.venv/bin/python script.py`. Reuse an existing project environment when present.
+Agent mode encourages Python for calculations, data processing and file transformations
+through its existing shell tool. Reuse a project's uv-managed `.venv`, or create
+one inside the workspace with `uv venv .venv`. Run scripts with
+`uv run --python .venv/bin/python python script.py` and install packages with
+`uv pip install --python .venv/bin/python PACKAGE`; use `uv add PACKAGE` when
+updating project dependencies in `pyproject.toml`. If uv is unavailable, the agent
+reports that instead of falling back to system Python or pip.
 Keep scripts, environments and outputs inside the workspace; caches and temporary
 files also stay there through the agent shell's existing environment settings.
 Workspace files persist across container replacement when mounted. Package downloads

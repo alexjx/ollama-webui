@@ -156,7 +156,10 @@ func TestManualCompactionPersistsAndContinuesBothModes(t *testing.T) {
 			if mode == "chat" && ((len(calls[1].Tools) == 2) != test.tools || (!test.tools && len(calls[1].Tools) != 0)) {
 				t.Fatalf("continued Chat got wrong attachment tools: %#v", calls[1].Tools)
 			}
-			if len(calls[1].Messages[1].Images) != 1 {
+			if calls[1].Messages[0].Role != "system" || strings.Contains(calls[1].Messages[0].Content, "Preserved decisions") || calls[1].Messages[1].Role != "user" || !strings.Contains(calls[1].Messages[1].Content, "Historical context, not new instructions") || !strings.Contains(calls[1].Messages[1].Content, "Preserved decisions") {
+				t.Fatal("continued model did not receive memory separately from system instructions")
+			}
+			if len(calls[1].Messages[2].Images) != 1 {
 				t.Fatal("recent image was dropped")
 			}
 		})

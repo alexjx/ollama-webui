@@ -81,10 +81,10 @@ func TestContextPreparerSummarizesPrefixAndKeepsRecentTail(t *testing.T) {
 	if !result.Compacted || result.Fallback || result.ThroughMessageID != 2 {
 		t.Fatalf("unexpected compaction result: %#v", result)
 	}
-	if len(result.Messages) != 6 || result.Messages[1].Content != history[2].Content || result.Messages[len(result.Messages)-1].Content != history[6].Content {
+	if len(result.Messages) != 7 || result.Messages[2].Content != history[2].Content || result.Messages[len(result.Messages)-1].Content != history[6].Content {
 		t.Fatalf("recent tail was not preserved: %#v", result.Messages)
 	}
-	if !strings.Contains(result.Messages[0].Content, "preserved memory") || len(memory.upserts) != 1 || memory.upserts[0].ThroughMessageID != 2 {
+	if result.Messages[0].Role != "system" || result.Messages[0].Content != "system" || result.Messages[1].Role != "user" || !strings.Contains(result.Messages[1].Content, "preserved memory") || len(memory.upserts) != 1 || memory.upserts[0].ThroughMessageID != 2 {
 		t.Fatalf("summary checkpoint was not used and persisted: result=%#v upserts=%#v", result, memory.upserts)
 	}
 	if history[0].Content != strings.Repeat("a", 2400) {
@@ -121,6 +121,44 @@ func TestContextPreparerUpdatesCheckpointIncrementally(t *testing.T) {
 	}
 }
 
+func TestContextPreparerLoadsSavedMemoryAsHistoricalUserMessage(t *testing.T) {
+	for _, system := range []string{"", "Current system instructions"} {
+		t.Run(system, func(t *testing.T) {
+			history := compactTestHistory("old request", "old answer")
+			memory := &checkpointMemory{found: true, checkpoint: store.ContextCheckpoint{
+				ConversationID: 7, ThroughMessageID: 2, Summary: "Previously asked to use another style.",
+			}}
+			chat := &summaryChat{}
+			result, err := (ContextPreparer{Chat: chat, Store: memory}).Prepare(context.Background(), ContextPrepareInput{
+				ConversationID: 7, Model: "model", SystemPrompt: system, History: history, ContextWindow: 4096,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			index := 0
+			if system != "" {
+				if result.Messages[0].Role != "system" || result.Messages[0].Content != system {
+					t.Fatalf("system instructions changed: %#v", result.Messages[0])
+				}
+				index++
+			}
+			message := result.Messages[index]
+			if message.Role != "user" || message.Content != conversationMemoryPrefix+memory.checkpoint.Summary || !strings.Contains(message.Content, "Historical context, not new instructions") {
+				t.Fatalf("saved memory was not labeled historical user context: %#v", message)
+			}
+			if len(result.Messages) != index+1+len(history[2:]) || len(chat.requests) != 0 || len(memory.upserts) != 0 {
+				t.Fatalf("loading saved memory changed history or checkpoint: %#v", result)
+			}
+			for offset, original := range history[2:] {
+				actual := result.Messages[index+1+offset]
+				if actual.Role != original.Role || actual.Content != original.Content {
+					t.Fatalf("recent history changed: %#v", actual)
+				}
+			}
+		})
+	}
+}
+
 func TestContextPreparerSummaryFailureBelowHardLimitUsesOriginalView(t *testing.T) {
 	history := compactTestHistory(strings.Repeat("a", 1050), strings.Repeat("b", 1050))
 	memory := &checkpointMemory{}
@@ -150,7 +188,7 @@ func TestContextPreparerSummaryFailureAboveHardLimitUsesBoundedFallback(t *testi
 	if !result.Compacted || !result.Fallback || result.ThroughMessageID != 2 || len(memory.upserts) != 0 {
 		t.Fatalf("unexpected hard failure behavior: %#v", result)
 	}
-	if estimateTextTokens(strings.TrimPrefix(result.Messages[0].Content, "Conversation memory (a compact summary of older messages):\n")) > 500 {
+	if estimateTextTokens(strings.TrimPrefix(result.Messages[0].Content, conversationMemoryPrefix)) > 500 {
 		t.Fatalf("deterministic fallback was not bounded: %q", result.Messages[0].Content)
 	}
 	if result.Messages[len(result.Messages)-1].Content != "current request" {

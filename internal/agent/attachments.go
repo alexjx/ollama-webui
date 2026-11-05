@@ -18,7 +18,12 @@ type AttachmentStore interface {
 	ReadTextAttachment(context.Context, int64, int64, int64, int64) (store.Attachment, error)
 }
 
-const ChatAttachmentInstructions = `Text attachments are provided as file references to keep your context focused. Use attachment_read with the attachment ID to read only the bytes needed for the task; attachment_list can rediscover files from older messages. Choose ranges that leave room for your answer. These are your only tools; shell commands and other agent capabilities are unavailable. Do not infer file contents from a path or filename.`
+const ChatAttachmentInstructions = `## Text attachments
+Text attachments are provided as file references to keep your context focused.
+- attachment_list: Rediscover attached files from older messages.
+- attachment_read: Read by attachment_id with offset and limit in bytes. Read only what the task needs, leaving room for your answer. Omit limit only when the remaining file fits your context.
+- These are your only tools; shell commands and other agent capabilities are unavailable.
+- Do not infer file contents from a path or filename.`
 
 var attachmentListTool = ollama.Tool{
 	Type: "function",

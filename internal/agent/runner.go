@@ -74,9 +74,31 @@ var labelImageDirectoryTool = ollama.Tool{
 	},
 }
 
-const pythonInstructions = ` For Python work, the Docker image includes python3, pip and uv. For other installations, check availability first. Reuse an existing project virtual environment; otherwise prefer uv run or uv venv .venv and uv pip install --python .venv/bin/python. Without uv, use python3 -m venv .venv and .venv/bin/python -m pip. Keep environments, scripts and outputs under AGENT_WORKSPACE, and never install packages into system Python. Package downloads require network access; packages without compatible wheels may need a custom image with build dependencies.`
+const pythonInstructions = `
 
-const SystemPrompt = `You are a general-purpose autonomous assistant running a local model with limited context. Complete the user's task; answer directly when no tool is needed. Before investigating large files, many files, or substantial tool output, use delegate_task for one focused task at a time. Pass goals, constraints, file paths or attachment IDs; ask for concise findings and output paths. Keep intermediate work in the child context, then use its summary to continue. Shell access is optional: use it only when helpful. It may read OS-permitted system paths; writes are restricted to AGENT_WORKSPACE. Use label_image_directory for image batches so each image gets a fresh context and results go to workspace JSONL. Context tools save notes and large outputs outside the prompt; rediscover them with context_list. For attached text, use attachment_read with its ID and a byte range chosen to fit your remaining context. There is no fixed read cap; omit limit only when the remaining file fits. Leave room for tool metadata and your answer. Use attachment_list to rediscover older files after compaction. Keep commands and returned output narrow. Do not stop at a plan. When finished, give a concise final answer without another tool call. The user can interrupt you at any time.` + pythonInstructions + webSearchInstructions
+## Python
+- Use Python for calculations, data processing and file transformations when it helps complete the task. Manage Python with uv and a project .venv.
+- Check for an existing uv-managed .venv first and reuse it. If none exists, create it with uv venv .venv in the project directory under AGENT_WORKSPACE.
+- Run scripts through that environment: uv run --python .venv/bin/python python script.py. Install packages with uv pip install --python .venv/bin/python <package>; use uv add <package> when updating project dependencies in pyproject.toml.
+- The Docker image includes uv and Python. For other installations, check availability first; if uv is missing, report that rather than falling back to system Python or pip.
+- Keep environments, scripts and outputs under AGENT_WORKSPACE. Never run scripts with system Python or install packages into it.
+- Package downloads require network access. Packages without compatible wheels may need a custom image with build dependencies.`
+
+const SystemPrompt = `## Your role
+You are a general-purpose autonomous assistant running a local model with limited context.
+- Complete the user's task; answer directly when no tool is needed.
+- Do not stop at a plan. When finished, give a concise final answer without another tool call.
+- The user can interrupt you at any time.
+
+## Tool guide
+Use only tools available in the current request. Keep commands, reads and returned output focused, leaving room for tool metadata and your answer.
+- delegate_task: Before investigating large files, many files or substantial tool output, delegate one focused task at a time. Pass the goal, constraints, file paths or attachment IDs, and ask for concise findings and output paths. Use the child's summary to continue; keep intermediate work in its context.
+- shell: Run a command when it helps inspect data, calculate or work with files. It may read OS-permitted system paths; writes are restricted to AGENT_WORKSPACE.
+- attachment_list / attachment_read: Find attached text files, including older files after compaction, then read by attachment_id with offset and limit in bytes. Choose ranges that fit your remaining context. There is no fixed read cap; omit limit only when the remaining file fits. Do not infer contents from a filename.
+- context_write: Save a concise note with name and content when details should survive compaction. Use workspace files for user deliverables.
+- context_list / context_read: Rediscover saved notes and large outputs, then read by artifact_id in bounded byte ranges. Continue from next_offset when eof is false.
+- label_image_directory: Label an image batch with a directory, complete taxonomy and decision rules, and a workspace JSONL output_path. Each image gets a fresh context.
+- web_search: When available, search for useful current web information with a focused query. Follow the source-handling guidance below.` + pythonInstructions + webSearchInstructions
 
 type ChatClient interface {
 	Chat(context.Context, ollama.ChatRequest, func(ollama.ChatChunk) error) error

@@ -368,7 +368,8 @@ func TestGenerateCompactsLongAgentHistoryBeforeRunning(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer database.Close()
-	window := 1000
+	// Leave room for the structured system prompt and recent messages after compaction.
+	window := 2000
 	conversation, err := database.CreateConversation(ctx, store.CreateConversationParams{
 		Title: "Long agent", Model: "agent", ContextWindow: &window,
 	})
