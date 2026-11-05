@@ -225,3 +225,7 @@ export function moveWorkspaceItem(path, destination) {
 export function uploadWorkspaceFile(path, file) {
   return request(`/api/workspace/upload?${new URLSearchParams({ path })}`, { method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: file });
 }
+
+export function deleteWorkspaceItem(path) {
+  return request(`/api/workspace/file?${new URLSearchParams({ path })}`, { method: "DELETE" });
+}

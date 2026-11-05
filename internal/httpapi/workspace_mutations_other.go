@@ -3,6 +3,7 @@
 package httpapi
 
 import (
+	"context"
 	"io"
 	"os"
 	"syscall"
@@ -13,3 +14,6 @@ import (
 func createWorkspaceFolder(*os.Root, string) error          { return syscall.ENOSYS }
 func moveWorkspaceItem(*os.Root, string, string) error      { return syscall.ENOSYS }
 func uploadWorkspaceFile(*os.Root, string, io.Reader) error { return syscall.ENOSYS }
+func deleteWorkspaceItem(context.Context, *os.Root, string) (bool, error) {
+	return false, syscall.ENOSYS
+}

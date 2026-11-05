@@ -80,6 +80,7 @@ func New(database *store.Store, ollamaClient *ollama.Client, runner agent.Runner
 	mux.HandleFunc("GET /api/workspace", server.workspaceList)
 	mux.HandleFunc("GET /api/workspace/preview", server.workspacePreview)
 	mux.HandleFunc("GET /api/workspace/file", server.workspaceFile)
+	mux.HandleFunc("DELETE /api/workspace/file", server.workspaceDelete)
 	mux.HandleFunc("POST /api/workspace/folder", server.workspaceCreateFolder)
 	mux.HandleFunc("POST /api/workspace/move", server.workspaceMove)
 	mux.HandleFunc("POST /api/workspace/upload", server.workspaceUpload)

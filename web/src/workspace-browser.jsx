@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowLeft, ArrowClockwise, Check, Copy, DownloadSimple, File, Folder, FolderOpen, LinkSimple, PencilSimple, ArrowRight, X } from "@phosphor-icons/react";
+import { ArrowLeft, ArrowClockwise, Check, Copy, DownloadSimple, File, Folder, FolderOpen, LinkSimple, PencilSimple, ArrowRight, Trash, X } from "@phosphor-icons/react";
 import { copyText } from "./copy-text";
 import { listWorkspace, previewWorkspaceFile, uploadWorkspaceFile } from "./api";
 import { formatFileSize, workspaceBreadcrumbs, workspaceFileURL } from "./workspace";
@@ -86,7 +86,12 @@ export default function WorkspaceBrowser({ onClose, initialPath = "" }) {
   }, [path, revision]);
 
   useEffect(() => {
-    if (!selected) return;
+    if (!selected) {
+      setPreview(null);
+      setPreviewError("");
+      setPreviewLoading(false);
+      return;
+    }
     const controller = new AbortController();
     setPreview(null);
     setPreviewError("");
@@ -187,6 +192,7 @@ export default function WorkspaceBrowser({ onClose, initialPath = "" }) {
                   {readable && <div className="workspace-entry-actions">
                     <button type="button" className="icon-button" aria-label={`Rename ${entry.name}`} title="Rename" disabled={loading || uploading} onClick={() => setAction({ kind: "rename", entry })}><PencilSimple size={17} /></button>
                     <button type="button" className="icon-button" aria-label={`Move ${entry.name}`} title="Move" disabled={loading || uploading} onClick={() => setAction({ kind: "move", entry })}><ArrowRight size={17} /></button>
+                    <button type="button" className="icon-button workspace-delete-action" aria-label={`Delete ${entry.name}`} title="Delete" disabled={loading || uploading} onClick={() => setAction({ kind: "delete", entry })}><Trash size={17} /></button>
                   </div>}
                 </li>;
               })}
@@ -215,7 +221,10 @@ export default function WorkspaceBrowser({ onClose, initialPath = "" }) {
           </section>
         </div>
       </div>
-      {action && <WorkspaceAction action={action} folder={path} onClose={() => { setAction(null); window.requestAnimationFrame(() => { if (!dialogRef.current?.contains(document.activeElement)) closeRef.current?.focus(); }); }} onSuccess={(message) => { setSelected(null); setOperationError(""); setOperationStatus(message); setRevision((value) => value + 1); }} />}
+      {action && <WorkspaceAction action={action} folder={path} onClose={() => { setAction(null); window.requestAnimationFrame(() => { if (!dialogRef.current?.contains(document.activeElement)) closeRef.current?.focus(); }); }} onSuccess={(message) => {
+        if (action.kind !== "delete" || selected?.path === action.entry.path || selected?.path.startsWith(`${action.entry.path}/`)) setSelected(null);
+        setOperationError(""); setOperationStatus(message); setRevision((value) => value + 1);
+      }} />}
     </dialog>
   );
 }

@@ -63,3 +63,18 @@ test("workspace mutations preserve exact paths, upload bytes and conflict errors
   t.mock.method(globalThis, "fetch", async () => Response.json({ error: { code: "workspace_conflict", message: "An item already exists." } }, { status: 409 }));
   await assert.rejects(moveWorkspaceItem("a", "b"), (error) => error.status === 409 && error.message === "An item already exists.");
 });
+
+test("workspace deletion preserves the exact path and handles an empty success response", async (t) => {
+  const { deleteWorkspaceItem } = await import("../src/api.js");
+  const path = "资料/中文 #1 & final?.txt";
+  const mock = t.mock.method(globalThis, "fetch", async (url, options) => {
+    const target = new URL(url, "http://local");
+    assert.equal(target.pathname, "/api/workspace/file");
+    assert.equal(target.searchParams.get("path"), path);
+    assert.equal(options.method, "DELETE");
+    return new Response(null, { status: 204 });
+  });
+  assert.equal(await deleteWorkspaceItem(path), null);
+  mock.mock.mockImplementation(async () => Response.json({ error: { code: "workspace_not_found", message: "Workspace item no longer exists." } }, { status: 404 }));
+  await assert.rejects(deleteWorkspaceItem(path), (error) => error.status === 404 && error.code === "workspace_not_found");
+});
