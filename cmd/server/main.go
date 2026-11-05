@@ -74,7 +74,7 @@ func main() {
 	}
 	if cfg.SubagentsEnabled {
 		subagents, err := agent.NewSubagentOrchestrator(database, ollamaClient, shellExecutor, artifacts,
-			workspace, "", cfg.SubagentContextTokens, cfg.SubagentMaxTurns, cfg.SubagentConcurrency,
+			workspace, cfg.ContextTokens, cfg.AgentMaxTurns,
 			cfg.SubagentResultBytes, cfg.ToolFeedbackMax)
 		if err != nil {
 			logger.Error("initialize subagent orchestrator", "error", err)
@@ -87,8 +87,7 @@ func main() {
 		ShellMaxOutput: cfg.ShellMaxOutput, ToolFeedbackLimit: cfg.ToolFeedbackMax,
 		ContextDirectory: contextDirectory, ContextTokens: cfg.ContextTokens,
 		SubagentsEnabled:    cfg.SubagentsEnabled,
-		SubagentConcurrency: cfg.SubagentConcurrency, SubagentContextTokens: cfg.SubagentContextTokens,
-		SubagentMaxTurns: cfg.SubagentMaxTurns, SubagentResultBytes: cfg.SubagentResultBytes,
+		SubagentResultBytes: cfg.SubagentResultBytes,
 	}, cfg.WebDistDir, logger)
 	defer handler.Close()
 	server := &http.Server{

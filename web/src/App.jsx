@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { contextUsage } from "./context-usage";
 import { applyKnownConversationTitles, mergeConversationTitles, newestConversationTitle } from "./conversation-titles";
-import { cancelRunningSubagents, reduceSubagentEvent } from "./agent-events";
+import { activeSubagent, cancelRunningSubagents, reduceSubagentEvent, subagentProgressLabel } from "./agent-events";
 import { finalizeActivity, readActivityBlocks, recordActivityEvent } from "./activity-timeline";
 import { formatDuration, formatRate, responseMetrics } from "./response-metrics";
 import { shouldFollowTranscript, scrollToEnd } from "./scroll-position";
@@ -478,8 +478,8 @@ function SystemSettings({ open, connected, modelCount, runtime, loading, error, 
             <div><dt>Writable workspace</dt><dd title={agent?.workspace}>{agent?.workspace || "—"}</dd></div>
             <div><dt>Managed context</dt><dd title={agent?.context_path}>{agent?.context_path || "—"}</dd></div>
             <div><dt>Context budget</dt><dd>{agent ? `${agent.context_budget_tokens?.toLocaleString() || "—"} tokens` : "—"}</dd></div>
-            <div><dt>Child agents</dt><dd>{agent ? agent.subagents_enabled ? `Enabled · ${agent.subagent_concurrency} concurrent` : "Disabled" : "—"}</dd></div>
-            <div><dt>Child context</dt><dd>{agent?.subagents_enabled ? `${agent.subagent_context_tokens?.toLocaleString()} tokens · ${agent.subagent_max_turns} turns` : "—"}</dd></div>
+            <div><dt>Child agents</dt><dd>{agent ? agent.subagents_enabled ? "Enabled · one at a time" : "Disabled" : "—"}</dd></div>
+            <div><dt>Child settings</dt><dd>{agent?.subagents_enabled ? "Inherited from the parent" : "—"}</dd></div>
             <div><dt>Shell output limit</dt><dd>{agent ? formatBytes(agent.shell_max_output_bytes) : "—"}</dd></div>
             <div><dt>Tool feedback limit</dt><dd>{agent ? formatBytes(agent.tool_feedback_bytes) : "—"}</dd></div>
             <div><dt>Child result limit</dt><dd>{agent ? formatBytes(agent.subagent_result_bytes) : "—"}</dd></div>
@@ -518,6 +518,7 @@ function AgentActivity({ message, mode, showProgress = true, progressOnly = fals
   const thinkingRef = useRef(null);
   const steps = message.agent_steps || [];
   const subagentRuns = message.subagent_runs || [];
+  const child = activeSubagent(message);
   const hasActivity = progressOnly || message.status === "streaming" || Boolean(message.thinking) || steps.length > 0 || subagentRuns.length > 0;
 
   const phaseLabels = {
@@ -525,13 +526,14 @@ function AgentActivity({ message, mode, showProgress = true, progressOnly = fals
     thinking: "Thinking",
     shell: "Running shell",
     web_search: "Searching the web",
+    subagent: child?.status === "queued" ? "Subagent waiting" : "Subagent running",
     reviewing: "Reviewing result",
     responding: "Writing answer",
     finished: "Finished",
     stopped: "Stopped",
     error: "Failed",
   };
-  const phase = message.agent_phase || (message.status === "complete" ? "finished" : message.status === "cancelled" ? "stopped" : message.status === "error" ? "error" : "thinking");
+  const phase = child ? "subagent" : message.agent_phase || (message.status === "complete" ? "finished" : message.status === "cancelled" ? "stopped" : message.status === "error" ? "error" : "thinking");
   const turn = mode === "agent" ? message.agent_turn || message.metadata?.agent_turns : null;
   const active = message.status === "streaming";
   const liveThinking = thinkingDuration(message)?.live ?? (active && phase === "thinking");
@@ -603,13 +605,18 @@ function AgentActivity({ message, mode, showProgress = true, progressOnly = fals
             const statusLabel = run.status === "running" ? "Running" : run.status === "complete" ? "Complete" : run.status === "cancelled" ? "Stopped" : run.status === "failed" ? "Failed" : "Queued";
             const RunIcon = run.status === "running" || run.status === "queued" ? CircleNotch : run.status === "complete" ? CheckCircle : Stop;
             return (
-              <details className={`subagent-run ${run.status}`} key={run.id} open={run.status === "running"}>
+              <details className={`subagent-run ${run.status}`} key={run.id} open={run.status === "running" || run.status === "queued"}>
                 <summary>
                   <span className="subagent-run-icon" aria-hidden="true"><RunIcon size={17} /></span>
-                  <span className="subagent-run-task">{run.task || "Child task"}</span>
+                  <span className="subagent-run-task">Subagent · {run.task || "Child task"}</span>
                   <span className="subagent-run-status">{statusLabel}</span>
                 </summary>
                 <div className="subagent-run-result">
+                  {(run.status === "running" || run.status === "queued") && <>
+                    <p className="subagent-live-progress" role="status" aria-live="polite">{subagentProgressLabel(run)}</p>
+                    <p>{run.task || "Working on the delegated task."}</p>
+                    <p>{run.model}{run.context_window > 0 ? ` · ${run.context_window.toLocaleString()} token context` : ""} · Parent settings</p>
+                  </>}
                   {run.result_summary && <p>{run.result_summary}</p>}
                   {run.error && <p className="subagent-run-error">{run.error}</p>}
                   {run.progress?.total > 0 && <p>{run.progress.processed} of {run.progress.total} processed · {run.progress.failed || 0} failed · {run.progress.needs_review || 0} need review</p>}
@@ -619,7 +626,7 @@ function AgentActivity({ message, mode, showProgress = true, progressOnly = fals
                       <ul>{run.output_refs.map((path) => <li key={path}><code>{path}</code></li>)}</ul>
                     </div>
                   )}
-                  {!run.result_summary && !run.error && !run.output_refs?.length && <p>{statusLabel}.</p>}
+                  {!run.result_summary && !run.error && !run.output_refs?.length && run.status !== "running" && run.status !== "queued" && <p>{statusLabel}.</p>}
                 </div>
               </details>
             );
@@ -1262,6 +1269,7 @@ export function App() {
   const transcriptTouchYRef = useRef(null);
   const currentContextUsage = useMemo(() => contextUsage(messages, contextWindow, contextCheckpoint, !historyPage?.has_more), [messages, contextWindow, contextCheckpoint, historyPage]);
   const activeTitleGenerating = !!titleRequests[activeId];
+  const activeChild = streaming ? activeSubagent(messages.at(-1)) : null;
 
   function setConversationMode(value) {
     setModelSettings((current) => ({ ...current, conversationMode: value }));
@@ -2371,7 +2379,7 @@ export function App() {
             <button ref={workspaceTriggerRef} type="button" className="workspace-trigger" aria-label="Open workspace" title="Browse workspace files" onClick={(event) => { workspaceReturnRef.current = event.currentTarget; setWorkspacePath(""); setWorkspaceOpen(true); }}><FolderOpen size={21} aria-hidden="true" /><span>Workspace</span></button>
             <div className={`agent-status ${streaming || compacting ? "working" : ""}`} role="status" aria-live="polite">
               {streaming || compacting ? <CircleNotch size={16} /> : <ChatCircle size={16} />}
-              <span>{compacting ? "Compacting context" : conversationMode === "agent" ? (streaming ? "Agent working" : "Agent ready") : (streaming ? "Chat responding" : "Chat ready")}</span>
+              <span>{compacting ? "Compacting context" : activeChild ? activeChild.status === "queued" ? "Subagent waiting" : "Subagent running" : conversationMode === "agent" ? (streaming ? "Agent working" : "Agent ready") : (streaming ? "Chat responding" : "Chat ready")}</span>
             </div>
             <div className={`connected-status ${connected ? "" : "disconnected"}`}><span /> <span className="connected-text">{connected ? "Connected" : "Ollama unavailable"}</span></div>
             <div

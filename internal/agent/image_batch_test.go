@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"ollama-webui/internal/ollama"
@@ -47,14 +48,18 @@ func TestImageBatchUsesOneImagePerContextAndWritesAtomicJSONL(t *testing.T) {
 		{{Message: ollama.Message{Content: `not-json`}, Done: true}},
 	}}
 	orchestrator, err := NewSubagentOrchestrator(database, chat, &recordingShell{}, nil,
-		workspace, "", 2048, 2, 1, 1024, 1024)
+		workspace, 2048, 2, 1024, 1024)
 	if err != nil {
 		t.Fatal(err)
 	}
 	events := make([]Event, 0)
+	contextWindow, temperature, predict := 1536, 0.3, 200
+	think := ollama.ThinkValue("off")
+	options := &ollama.ChatOptions{NumCtx: &contextWindow, Temperature: &temperature, NumPredict: &predict}
 	result, err := orchestrator.LabelImageDirectory(ctx, ImageBatchRequest{
 		ConversationID: conversation.ID, RequestingMessageID: assistant.ID, Model: "vision-tools", SupportsVision: true,
 		Directory: inputDirectory, Instructions: "Use only the label cat.", OutputPath: "labels/all.jsonl",
+		Options: options, Think: &think, SystemPrompt: "PARENT_CUSTOM_INSTRUCTIONS",
 	}, func(event Event) error { events = append(events, event); return nil })
 	if err != nil {
 		t.Fatal(err)
@@ -65,6 +70,12 @@ func TestImageBatchUsesOneImagePerContextAndWritesAtomicJSONL(t *testing.T) {
 	for _, request := range chat.requests {
 		if len(request.Messages) != 2 || len(request.Messages[1].Images) != 1 {
 			t.Fatalf("image calls accumulated context: %#v", request.Messages)
+		}
+		if request.Options == options || request.Options.NumCtx == &contextWindow || *request.Options.NumCtx != contextWindow || *request.Options.Temperature != temperature || *request.Options.NumPredict != predict || request.Think == nil || *request.Think != think || request.Think == &think {
+			t.Fatalf("image batch dropped inherited settings: %#v", request)
+		}
+		if !strings.Contains(request.Messages[0].Content, "PARENT_CUSTOM_INSTRUCTIONS") {
+			t.Fatal("image batch dropped parent instructions")
 		}
 	}
 	file, err := os.Open(filepath.Join(workspace, "labels", "all.jsonl"))
@@ -87,12 +98,15 @@ func TestImageBatchUsesOneImagePerContextAndWritesAtomicJSONL(t *testing.T) {
 	if len(rows) != 2 || rows[0].Path != "a.png" || rows[0].Labels[0] != "cat" || rows[1].Path != "b.png" || rows[1].Error == "" || !rows[1].NeedsReview {
 		t.Fatalf("unexpected label rows: %#v", rows)
 	}
-	if len(events) != 3 || events[0].Type != "subagent.started" || events[1].Type != "subagent.progress" || events[2].Type != "subagent.done" {
+	if len(events) != 4 || events[0].Type != "subagent.queued" || events[1].Type != "subagent.started" || events[2].Type != "subagent.progress" || events[3].Type != "subagent.done" {
 		t.Fatalf("unexpected batch events: %#v", events)
 	}
 	runs, err := database.ListAgentRunsByRequestingMessage(ctx, assistant.ID)
 	if err != nil || len(runs) != 1 || runs[0].Status != store.AgentStatusComplete || len(runs[0].OutputRefs) != 1 || runs[0].OutputRefs[0] != "labels/all.jsonl" {
 		t.Fatalf("batch run was not persisted: %#v, %v", runs, err)
+	}
+	if runs[0].ContextWindow != contextWindow {
+		t.Fatalf("image batch persisted a separate context limit: %#v", runs[0])
 	}
 }
 

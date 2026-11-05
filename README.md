@@ -129,9 +129,16 @@ uses the saved summary; context usage shows an estimate until the next model cal
 reports measured tokens. Short histories need no compaction, and summarization
 errors keep the previous context available.
 
-Agent mode can delegate focused work to child agents. Each child starts with a
-private system-and-task context instead of inheriting the full conversation, and
-only a bounded summary plus verified workspace output paths returns to the parent.
+Agent mode uses child agents to keep file inspection, research, and other detailed
+work out of the main conversation's small context. Children inherit the parent's
+model, context window, temperature, thinking, system instructions, tool settings,
+and turn limit. They receive the focused task and referenced files in a private
+context; only a bounded result summary and verified output paths return to the
+parent. One child runs at a time across conversations, and children cannot spawn
+more children. The header shows when a child is waiting or running; its expandable
+task card shows the current phase and turn, then completion, failure, or Stop.
+Child context, turn-limit, and concurrency overrides from earlier versions no
+longer apply; the parent settings and single-child queue always take precedence.
 For directory image labeling, the dedicated batch tool performs one stateless
 vision request per image and atomically writes JSONL under the workspace, so prior
 images and raw per-image reasoning never accumulate in the main prompt.
@@ -322,9 +329,6 @@ Configuration is provided with environment variables:
 | `AGENT_CONTEXT_BUDGET_TOKENS` | `32768` | Conservative prompt budget when a conversation does not set an explicit context window; compaction starts near 70% |
 | `AGENT_TOOL_FEEDBACK_BYTES` | `8192` | Maximum shell-output excerpt returned to later model turns |
 | `AGENT_SUBAGENTS_ENABLED` | `true` | Expose isolated child-agent and image-batch tools |
-| `AGENT_SUBAGENT_CONCURRENCY` | `1` | Maximum child jobs running across conversations; increase only when Ollama and available memory can sustain it |
-| `AGENT_SUBAGENT_CONTEXT_TOKENS` | `8192` | Context window used by each isolated child |
-| `AGENT_SUBAGENT_MAX_TURNS` | `20` | Emergency model-turn ceiling for each child |
 | `AGENT_SUBAGENT_RESULT_BYTES` | `4096` | Maximum child summary returned to the parent prompt |
 | `SHELL_TIMEOUT_SECONDS` | `600` | Maximum time for each shell command |
 | `SHELL_MAX_OUTPUT_BYTES` | `65536` | Combined stdout/stderr retained per command |

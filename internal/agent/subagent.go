@@ -28,6 +28,10 @@ type SubagentRequest struct {
 	ImagePaths          []string
 	OutputPaths         []string
 	DisableWebSearch    bool
+	Options             *ollama.ChatOptions
+	Think               *ollama.ThinkValue
+	SystemPrompt        string
+	MaxTurns            int
 }
 
 type SubagentResult struct {
@@ -62,7 +66,6 @@ type SubagentOrchestrator struct {
 	WebSearch         WebSearcher
 	Artifacts         *ArtifactManager
 	Workspace         string
-	Model             string
 	ContextTokens     int
 	MaxTurns          int
 	ToolFeedbackLimit int
@@ -71,11 +74,11 @@ type SubagentOrchestrator struct {
 }
 
 func NewSubagentOrchestrator(store SubagentStore, chat ChatClient, shell CommandExecutor, artifacts *ArtifactManager,
-	workspace, model string, contextTokens, maxTurns, concurrency, resultBytes, toolFeedbackLimit int) (*SubagentOrchestrator, error) {
+	workspace string, contextTokens, maxTurns, resultBytes, toolFeedbackLimit int) (*SubagentOrchestrator, error) {
 	if store == nil || chat == nil || shell == nil {
 		return nil, errors.New("subagent store, chat client, and shell executor are required")
 	}
-	if contextTokens <= 0 || maxTurns <= 0 || concurrency <= 0 || resultBytes <= 0 {
+	if contextTokens <= 0 || maxTurns <= 0 || resultBytes <= 0 {
 		return nil, errors.New("subagent limits must be positive")
 	}
 	workspace, err := filepath.Abs(workspace)
@@ -83,9 +86,9 @@ func NewSubagentOrchestrator(store SubagentStore, chat ChatClient, shell Command
 		return nil, fmt.Errorf("resolve subagent workspace: %w", err)
 	}
 	return &SubagentOrchestrator{
-		Store: store, Chat: chat, Shell: shell, Artifacts: artifacts, Workspace: workspace, Model: model,
+		Store: store, Chat: chat, Shell: shell, Artifacts: artifacts, Workspace: workspace,
 		ContextTokens: contextTokens, MaxTurns: maxTurns, ResultBytes: resultBytes,
-		ToolFeedbackLimit: toolFeedbackLimit, semaphore: make(chan struct{}, concurrency),
+		ToolFeedbackLimit: toolFeedbackLimit, semaphore: make(chan struct{}, 1),
 	}, nil
 }
 
@@ -106,9 +109,6 @@ func (orchestrator *SubagentOrchestrator) Execute(ctx context.Context, request S
 	}
 	model := strings.TrimSpace(request.Model)
 	if model == "" {
-		model = orchestrator.Model
-	}
-	if model == "" {
 		return SubagentResult{ExitCode: -1}, errors.New("subagent model is required")
 	}
 	images, err := loadImages(orchestrator.Workspace, request.ImagePaths)
@@ -124,28 +124,31 @@ func (orchestrator *SubagentOrchestrator) Execute(ctx context.Context, request S
 	}
 	run, err := orchestrator.Store.CreateAgentRun(ctx, store.CreateAgentRunParams{
 		JobID: job.ID, Task: request.Task, Model: model,
-		ContextWindow: orchestrator.ContextTokens, Depth: 0,
+		ContextWindow: orchestrator.contextWindow(request.Options), Depth: 0,
 	})
 	if err != nil {
 		_, _ = orchestrator.Store.FailAgentJob(context.Background(), job.ID, err.Error())
 		return SubagentResult{ExitCode: -1}, err
+	}
+	if err := emit(Event{Type: "subagent.queued", Run: &run}); err != nil {
+		orchestrator.cancel(job.ID, run.ID, err)
+		return SubagentResult{ExitCode: -1, Duration: time.Since(started)}, err
 	}
 
 	select {
 	case orchestrator.semaphore <- struct{}{}:
 		defer func() { <-orchestrator.semaphore }()
 	case <-ctx.Done():
-		orchestrator.cancel(job.ID, run.ID, ctx.Err())
+		cancelled := orchestrator.cancel(job.ID, run.ID, ctx.Err())
+		_ = emit(Event{Type: "subagent.cancelled", Run: &cancelled})
 		return SubagentResult{ExitCode: -1, Duration: time.Since(started)}, ctx.Err()
 	}
 	if _, err = orchestrator.Store.StartAgentJob(ctx, job.ID); err != nil {
-		orchestrator.cancel(job.ID, run.ID, err)
-		return SubagentResult{ExitCode: -1, Duration: time.Since(started)}, err
+		return orchestrator.failSubagent(job.ID, run.ID, started, err, emit)
 	}
 	run, err = orchestrator.Store.StartAgentRun(ctx, run.ID)
 	if err != nil {
-		_, _ = orchestrator.Store.FailAgentJob(context.Background(), job.ID, err.Error())
-		return SubagentResult{ExitCode: -1, Duration: time.Since(started)}, err
+		return orchestrator.failSubagent(job.ID, run.ID, started, err, emit)
 	}
 	if err := emit(Event{Type: "subagent.started", Run: &run}); err != nil {
 		orchestrator.cancel(job.ID, run.ID, err)
@@ -159,12 +162,15 @@ func (orchestrator *SubagentOrchestrator) Execute(ctx context.Context, request S
 		imageNames = append(imageNames, item.Path)
 	}
 	childPrompt := delegatedPrompt(request.Task, imageNames, request.OutputPaths)
-	numCtx := orchestrator.ContextTokens
+	maxTurns := request.MaxTurns
+	if maxTurns <= 0 {
+		maxTurns = orchestrator.MaxTurns
+	}
 	childSteps := &transientStepStore{}
 	attachments, _ := orchestrator.Store.(AttachmentStore)
 	childRunner := Runner{
 		Chat: orchestrator.Chat, Steps: childSteps, Shell: orchestrator.Shell,
-		MaxTurns: orchestrator.MaxTurns, ToolFeedbackLimit: orchestrator.ToolFeedbackLimit,
+		MaxTurns: maxTurns, ToolFeedbackLimit: orchestrator.ToolFeedbackLimit,
 		Artifacts:   orchestrator.Artifacts,
 		Attachments: attachments,
 		WebSearch:   orchestrator.WebSearch,
@@ -172,11 +178,11 @@ func (orchestrator *SubagentOrchestrator) Execute(ctx context.Context, request S
 	childResult, runErr := childRunner.Run(ctx, RunInput{
 		ConversationID: request.ConversationID, Model: model, Mode: "agent", DisableWebSearch: request.DisableWebSearch,
 		Messages: []ollama.Message{
-			{Role: "system", Content: delegatedSystemPrompt + WorkspaceInstructions(orchestrator.Workspace)},
+			{Role: "system", Content: childSystemPrompt(request.SystemPrompt, orchestrator.Workspace)},
 			{Role: "user", Content: childPrompt, Images: imageBytes},
 		},
-		Options: &ollama.ChatOptions{NumCtx: &numCtx},
-	}, func(Event) error { return nil })
+		Options: cloneChatOptions(request.Options), Think: cloneThink(request.Think),
+	}, childProgressEmitter(&run, emit))
 	if runErr != nil {
 		if errors.Is(runErr, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
 			cancelled := orchestrator.cancel(job.ID, run.ID, runErr)
@@ -189,7 +195,11 @@ func (orchestrator *SubagentOrchestrator) Execute(ctx context.Context, request S
 		return SubagentResult{Feedback: runErr.Error(), ExitCode: -1, Duration: time.Since(started)}, runErr
 	}
 
-	summary := boundedSubagentResult(strings.TrimSpace(childResult.Content), orchestrator.ResultBytes)
+	finalContent := childResult.Content
+	if start, ok := childResult.Metadata["final_answer_start"].(int); ok && start >= 0 && start <= len(finalContent) {
+		finalContent = finalContent[start:]
+	}
+	summary := boundedSubagentResult(strings.TrimSpace(finalContent), orchestrator.ResultBytes)
 	outputs, err := verifiedOutputPaths(orchestrator.Workspace, request.OutputPaths)
 	if err != nil {
 		failed, _ := orchestrator.Store.FailAgentRun(context.Background(), run.ID, err.Error())
@@ -218,7 +228,93 @@ func (orchestrator *SubagentOrchestrator) Execute(ctx context.Context, request S
 	return SubagentResult{Feedback: string(payload), ExitCode: 0, Duration: time.Since(started)}, nil
 }
 
-const delegatedSystemPrompt = `You are a focused child agent. Work only on the delegated task. You have a private context, so do not assume access to the parent conversation. Read any referenced paths directly. For user-attached text files named by attachment ID, use attachment_read and choose the byte range to fit your available context, allowing room for existing messages, tool metadata and your answer. There is no fixed byte cap; omitting limit reads the remaining file. You may read system paths, but the shell enforces that writes are only possible under AGENT_WORKSPACE. Put requested deliverables at the declared workspace paths. Keep your final response concise: state what was completed, verified output paths, failures, and items needing review. Do not include raw logs or per-item reasoning.` + webSearchInstructions
+const delegatedSystemPrompt = `You are a focused child agent with a private working context. Inherit the parent's settings and instructions; work only on the delegated task. Read referenced files or attachment IDs in relevant ranges. Keep large intermediate results in workspace files. Do not delegate further. Your final answer is the concise summary returned to the parent: include findings, verified output paths, failures and unresolved questions, without raw logs or intermediate narration.`
+
+func childSystemPrompt(parent, workspace string) string {
+	if parent == "" {
+		return delegatedSystemPrompt + WorkspaceInstructions(workspace) + webSearchInstructions
+	}
+	return parent + "\n\n" + delegatedSystemPrompt
+}
+
+func (orchestrator *SubagentOrchestrator) contextWindow(options *ollama.ChatOptions) int {
+	if options != nil && options.NumCtx != nil && *options.NumCtx > 0 {
+		return *options.NumCtx
+	}
+	return orchestrator.ContextTokens
+}
+
+func cloneChatOptions(options *ollama.ChatOptions) *ollama.ChatOptions {
+	if options == nil {
+		return nil
+	}
+	copy := *options
+	if options.NumCtx != nil {
+		value := *options.NumCtx
+		copy.NumCtx = &value
+	}
+	if options.NumPredict != nil {
+		value := *options.NumPredict
+		copy.NumPredict = &value
+	}
+	if options.Temperature != nil {
+		value := *options.Temperature
+		copy.Temperature = &value
+	}
+	return &copy
+}
+
+func cloneThink(think *ollama.ThinkValue) *ollama.ThinkValue {
+	if think == nil {
+		return nil
+	}
+	copy := *think
+	return &copy
+}
+
+// Progress describes observable phases without sending private child content or
+// tool arguments back into the parent's transcript or model context.
+func childProgressEmitter(run *store.AgentRun, emit func(Event) error) func(Event) error {
+	lastPhase, lastTurn := "", 0
+	return func(event Event) error {
+		phase := ""
+		switch event.Type {
+		case "turn.started":
+			phase = "starting"
+		case "thinking.delta":
+			phase = "thinking"
+		case "delta":
+			phase = "responding"
+		case "tool.started":
+			phase = "tool"
+			if event.Step != nil {
+				switch event.Step.ToolName {
+				case "shell":
+					phase = "shell"
+				case "web_search":
+					phase = "web_search"
+				case "attachment_read", "attachment_list", "context_read", "context_list":
+					phase = "reading"
+				}
+			}
+		case "tool.done":
+			phase = "reviewing"
+		}
+		if phase == "" {
+			return nil
+		}
+		turn := event.Turn
+		if turn == 0 {
+			turn = lastTurn
+		}
+		if phase == lastPhase && turn == lastTurn {
+			return nil
+		}
+		lastPhase, lastTurn = phase, turn
+		progress, _ := json.Marshal(map[string]any{"phase": phase, "turn": turn})
+		return emit(Event{Type: "subagent.progress", Run: run, Content: string(progress)})
+	}
+}
 
 func delegatedPrompt(task string, imagePaths, outputPaths []string) string {
 	var prompt strings.Builder

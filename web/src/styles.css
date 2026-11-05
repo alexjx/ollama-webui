@@ -518,6 +518,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .agent-step pre { max-height: 280px; margin: 0; padding: 10px 12px; overflow: auto; border-top: 1px solid var(--line); color: #2e3539; background: #fff; font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 11.5px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
 .subagent-run { overflow: hidden; border: 1px solid #d4dde1; border-radius: 8px; background: #fafbfa; }
 .subagent-run.running { border-color: #a9c8d8; background: #f2f8fa; }
+.subagent-run.queued { border-color: #a9c8d8; }
 .subagent-run.failed, .subagent-run.cancelled { border-color: #dec2b6; background: #fff8f4; }
 .subagent-run summary { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; align-items: center; gap: 7px; min-height: 44px; padding: 6px 10px; cursor: pointer; list-style: none; }
 .subagent-run summary::-webkit-details-marker { display: none; }
@@ -530,6 +531,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .subagent-run.running .subagent-run-status { color: var(--blue-dark); }
 .subagent-run-result { padding: 9px 12px 10px; border-top: 1px solid var(--line); color: #566169; background: #fff; font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
 .subagent-run-result p { margin: 0; white-space: pre-wrap; }
+.subagent-run-result p + p { margin-top: 5px; }
+.subagent-live-progress { color: var(--blue-dark); font-weight: 650; }
 .subagent-run-error { color: #954b2d; }
 .subagent-output-refs { margin-top: 8px; }
 .subagent-output-refs strong { color: #657078; font-size: 11px; }

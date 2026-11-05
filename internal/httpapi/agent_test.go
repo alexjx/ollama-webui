@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -180,7 +181,7 @@ func TestGenerateStreamsAndPersistsSuccessfulSubagentRun(t *testing.T) {
 	ollamaServer := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
 		case "/api/tags":
-			_, _ = response.Write([]byte(`{"models":[{"name":"agent","modified_at":"2026-01-01T00:00:00Z","capabilities":["completion","tools"]}]}`))
+			_, _ = response.Write([]byte(`{"models":[{"name":"agent","modified_at":"2026-01-01T00:00:00Z","capabilities":["completion","tools","thinking"]}]}`))
 		case "/api/chat":
 			var payload map[string]any
 			if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
@@ -217,14 +218,18 @@ func TestGenerateStreamsAndPersistsSuccessfulSubagentRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer database.Close()
-	conversation, err := database.CreateConversation(ctx, store.CreateConversationParams{Title: "Delegation", Model: "agent"})
+	window, temperature, thinking := 4096, 0.2, "off"
+	conversation, err := database.CreateConversation(ctx, store.CreateConversationParams{
+		Title: "Delegation", Model: "agent", ContextWindow: &window, Temperature: &temperature,
+		ThinkingMode: &thinking, SystemPrompt: "Keep all findings in Chinese.",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	client := ollama.NewClient(ollamaServer.URL)
 	workspace := t.TempDir()
 	shell := agent.ShellExecutor{Workspace: workspace, Timeout: time.Second, MaxOutput: 4096}
-	subagents, err := agent.NewSubagentOrchestrator(database, client, shell, nil, workspace, "agent", 4096, 4, 1, 4096, 4096)
+	subagents, err := agent.NewSubagentOrchestrator(database, client, shell, nil, workspace, 4096, 4, 4096, 4096)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,7 +259,7 @@ func TestGenerateStreamsAndPersistsSuccessfulSubagentRun(t *testing.T) {
 	if err := scanner.Err(); err != nil {
 		t.Fatal(err)
 	}
-	wantEvents := "started,activity.started,turn.started,turn.done,tool.started,subagent.started,subagent.done,tool.done,turn.started,delta,turn.done,done"
+	wantEvents := "started,activity.started,turn.started,turn.done,tool.started,subagent.queued,subagent.started,subagent.progress,subagent.progress,subagent.done,tool.done,turn.started,delta,turn.done,done"
 	if joined := strings.Join(eventTypes, ","); joined != wantEvents {
 		t.Fatalf("unexpected subagent event flow: %s\n%s", joined, response.Body.String())
 	}
@@ -267,7 +272,7 @@ func TestGenerateStreamsAndPersistsSuccessfulSubagentRun(t *testing.T) {
 		t.Fatalf("subagent run attached to wrong message: %#v", messages)
 	}
 	run := messages[1].SubagentRuns[0]
-	if run.Status != store.AgentStatusComplete || run.Task != "Inspect the named input and report the result." || run.ResultSummary != "Child task completed." {
+	if run.Status != store.AgentStatusComplete || run.Task != "Inspect the named input and report the result." || run.ResultSummary != "Child task completed." || run.ContextWindow != window {
 		t.Fatalf("unexpected persisted subagent run: %#v", run)
 	}
 	getRequest := httptest.NewRequest(http.MethodGet, "/api/conversations/1", nil)
@@ -298,6 +303,11 @@ func TestGenerateStreamsAndPersistsSuccessfulSubagentRun(t *testing.T) {
 	if len(requests) != 3 {
 		t.Fatalf("expected parent, child, parent calls; got %d: %#v", len(requests), requests)
 	}
+	for _, payload := range requests {
+		if payload["model"] != "agent" || payload["think"] != false || !reflect.DeepEqual(payload["options"], requests[0]["options"]) {
+			t.Fatalf("parent settings were not inherited: %#v", payload)
+		}
+	}
 	var childMessages []any
 	for _, payload := range requests {
 		candidate, _ := payload["messages"].([]any)
@@ -312,6 +322,9 @@ func TestGenerateStreamsAndPersistsSuccessfulSubagentRun(t *testing.T) {
 	}
 	if len(childMessages) != 2 {
 		t.Fatalf("child request should contain only system and task messages: %#v", childMessages)
+	}
+	if !strings.Contains(childMessages[0].(map[string]any)["content"].(string), "Keep all findings in Chinese.") {
+		t.Fatal("child lost custom parent instructions")
 	}
 	if childMessages[0].(map[string]any)["role"] != "system" || childMessages[1].(map[string]any)["role"] != "user" {
 		t.Fatalf("unexpected child message roles: %#v", childMessages)

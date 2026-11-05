@@ -1,5 +1,6 @@
 const terminalStatuses = new Set(["complete", "failed", "cancelled"]);
 const subagentEventTypes = new Set([
+  "subagent.queued",
   "subagent.started",
   "subagent.done",
   "subagent.failed",
@@ -54,7 +55,26 @@ export function reduceSubagentEvent(runs = [], event) {
 }
 
 export function cancelRunningSubagents(runs = [], completedAt = new Date().toISOString()) {
-  return runs.map((run) => run.status === "running"
+  return runs.map((run) => run.status === "running" || run.status === "queued"
     ? { ...run, status: "cancelled", error: run.error || "Parent response stopped", completed_at: completedAt, updated_at: completedAt }
     : run);
+}
+
+export function activeSubagent(message) {
+  if (message?.status !== "streaming") return null;
+  return message.subagent_runs?.find((run) => run.status === "running")
+    || message.subagent_runs?.find((run) => run.status === "queued") || null;
+}
+
+export function subagentProgressLabel(run) {
+  if (run.status === "queued") return "Waiting for the current subagent to finish";
+  const labels = {
+    starting: "Starting model turn",
+    thinking: "Thinking", responding: "Writing result", shell: "Running shell",
+    web_search: "Searching the web", reading: "Reading files", tool: "Using a tool",
+    reviewing: "Reviewing result",
+  };
+  const phase = labels[run.progress?.phase] || "Working on the delegated task";
+  const turn = run.progress?.turn;
+  return Number.isSafeInteger(turn) && turn > 0 ? `${phase} · Turn ${turn}` : phase;
 }

@@ -319,11 +319,12 @@ func TestSubagentReturnsLargeAttachmentReadIntactToModel(t *testing.T) {
 		{{Message: ollama.Message{ToolCalls: []ollama.ToolCall{call}}, Done: true}},
 		{{Message: ollama.Message{Content: "done"}, Done: true}},
 	}}
-	orchestrator, err := NewSubagentOrchestrator(database, chat, &recordingShell{}, nil, t.TempDir(), "", 32768, 2, 1, 1024, 256)
+	orchestrator, err := NewSubagentOrchestrator(database, chat, &recordingShell{}, nil, t.TempDir(), 32768, 2, 1024, 256)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = orchestrator.Execute(ctx, SubagentRequest{ConversationID: conversationID, RequestingMessageID: assistant.ID, Model: "tools", Task: "Read the attached file."}, func(Event) error { return nil })
+	contextWindow := 32768
+	_, err = orchestrator.Execute(ctx, SubagentRequest{ConversationID: conversationID, RequestingMessageID: assistant.ID, Model: "tools", Task: "Read the attached file.", Options: &ollama.ChatOptions{NumCtx: &contextWindow}}, func(Event) error { return nil })
 	if err != nil || len(chat.requests) != 2 {
 		t.Fatalf("child run failed: %v", err)
 	}

@@ -62,7 +62,7 @@ func TestWebSearchToolAvailableOnlyToEnabledAgents(t *testing.T) {
 			t.Fatalf("mode=%s enabled=%v disabled=%v advertised=%v", test.mode, test.enabled, test.disabled, found)
 		}
 	}
-	for _, prompt := range []string{SystemPrompt, delegatedSystemPrompt} {
+	for _, prompt := range []string{SystemPrompt, childSystemPrompt(SystemPrompt, "/workspace"), childSystemPrompt("", "/workspace")} {
 		if !strings.Contains(prompt, "untrusted") || !strings.Contains(prompt, "Markdown links") {
 			t.Fatal("agent instructions omit trust or citation rules")
 		}
@@ -218,12 +218,12 @@ func TestSubagentInheritsSearchWithoutParentHistory(t *testing.T) {
 		{{Message: ollama.Message{ToolCalls: []ollama.ToolCall{searchCall(`{"query":"current facts"}`)}}, Done: true}},
 		{{Message: ollama.Message{Content: "[Source](https://example.com/source)"}, Done: true}},
 	}}
-	orchestrator, err := NewSubagentOrchestrator(database, chat, &recordingShell{}, nil, t.TempDir(), "tools", 4096, 3, 1, 1024, 4096)
+	orchestrator, err := NewSubagentOrchestrator(database, chat, &recordingShell{}, nil, t.TempDir(), 4096, 3, 1024, 4096)
 	if err != nil {
 		t.Fatal(err)
 	}
 	orchestrator.WebSearch = search
-	offResult, err := orchestrator.Execute(ctx, SubagentRequest{ConversationID: conversation.ID, RequestingMessageID: assistant.ID, Task: "Search current facts", DisableWebSearch: true}, func(Event) error { return nil })
+	offResult, err := orchestrator.Execute(ctx, SubagentRequest{ConversationID: conversation.ID, RequestingMessageID: assistant.ID, Model: "tools", Task: "Search current facts", DisableWebSearch: true}, func(Event) error { return nil })
 	if err != nil || search.calls != 0 || !strings.Contains(offResult.Feedback, "disabled") || len(chat.requests) != 2 {
 		t.Fatalf("disabled child executed a search: %#v, %v", offResult, err)
 	}
@@ -232,7 +232,7 @@ func TestSubagentInheritsSearchWithoutParentHistory(t *testing.T) {
 			t.Fatal("disabled child was offered web_search")
 		}
 	}
-	result, err := orchestrator.Execute(ctx, SubagentRequest{ConversationID: conversation.ID, RequestingMessageID: assistant.ID, Task: "Search current facts"}, func(Event) error { return nil })
+	result, err := orchestrator.Execute(ctx, SubagentRequest{ConversationID: conversation.ID, RequestingMessageID: assistant.ID, Model: "tools", Task: "Search current facts"}, func(Event) error { return nil })
 	if err != nil || search.calls != 1 || !strings.Contains(result.Feedback, "https://example.com/source") || len(chat.requests[2].Messages) != 2 {
 		t.Fatalf("child search failed: %#v, %v", result, err)
 	}

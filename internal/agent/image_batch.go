@@ -30,6 +30,9 @@ type ImageBatchRequest struct {
 	OutputPath          string
 	Recursive           bool
 	MaxImages           int
+	Options             *ollama.ChatOptions
+	Think               *ollama.ThinkValue
+	SystemPrompt        string
 }
 
 type ImageBatchExecutor interface {
@@ -74,9 +77,6 @@ func (orchestrator *SubagentOrchestrator) LabelImageDirectory(ctx context.Contex
 	}
 	model := strings.TrimSpace(request.Model)
 	if model == "" {
-		model = orchestrator.Model
-	}
-	if model == "" {
 		return SubagentResult{ExitCode: -1}, errors.New("subagent model is required")
 	}
 	directory := request.Directory
@@ -104,27 +104,30 @@ func (orchestrator *SubagentOrchestrator) LabelImageDirectory(ctx context.Contex
 		return SubagentResult{ExitCode: -1}, err
 	}
 	run, err := orchestrator.Store.CreateAgentRun(ctx, store.CreateAgentRunParams{
-		JobID: job.ID, Task: task, Model: model, ContextWindow: orchestrator.ContextTokens, Depth: 0,
+		JobID: job.ID, Task: task, Model: model, ContextWindow: orchestrator.contextWindow(request.Options), Depth: 0,
 	})
 	if err != nil {
 		_, _ = orchestrator.Store.FailAgentJob(context.Background(), job.ID, err.Error())
 		return SubagentResult{ExitCode: -1}, err
 	}
+	if err := emit(Event{Type: "subagent.queued", Run: &run}); err != nil {
+		orchestrator.cancel(job.ID, run.ID, err)
+		return SubagentResult{ExitCode: -1, Duration: time.Since(started)}, err
+	}
 	select {
 	case orchestrator.semaphore <- struct{}{}:
 		defer func() { <-orchestrator.semaphore }()
 	case <-ctx.Done():
-		orchestrator.cancel(job.ID, run.ID, ctx.Err())
+		cancelled := orchestrator.cancel(job.ID, run.ID, ctx.Err())
+		_ = emit(Event{Type: "subagent.cancelled", Run: &cancelled})
 		return SubagentResult{ExitCode: -1, Duration: time.Since(started)}, ctx.Err()
 	}
 	if _, err = orchestrator.Store.StartAgentJob(ctx, job.ID); err != nil {
-		orchestrator.cancel(job.ID, run.ID, err)
-		return SubagentResult{ExitCode: -1, Duration: time.Since(started)}, err
+		return orchestrator.failSubagent(job.ID, run.ID, started, err, emit)
 	}
 	run, err = orchestrator.Store.StartAgentRun(ctx, run.ID)
 	if err != nil {
-		_, _ = orchestrator.Store.FailAgentJob(context.Background(), job.ID, err.Error())
-		return SubagentResult{ExitCode: -1, Duration: time.Since(started)}, err
+		return orchestrator.failSubagent(job.ID, run.ID, started, err, emit)
 	}
 	if err := emit(Event{Type: "subagent.started", Run: &run}); err != nil {
 		orchestrator.cancel(job.ID, run.ID, err)
@@ -151,7 +154,7 @@ func (orchestrator *SubagentOrchestrator) LabelImageDirectory(ctx context.Contex
 			_ = emit(Event{Type: "subagent.cancelled", Run: &cancelled})
 			return SubagentResult{Feedback: err.Error(), ExitCode: -1, Duration: time.Since(started)}, err
 		}
-		label := orchestrator.labelOneImage(ctx, model, directory, path, request.Instructions)
+		label := orchestrator.labelOneImage(ctx, request, model, directory, path)
 		if label.Error != "" {
 			failed++
 		}
@@ -290,7 +293,7 @@ func prepareWorkspaceOutput(workspace, output string) (string, error) {
 	return resolved, nil
 }
 
-func (orchestrator *SubagentOrchestrator) labelOneImage(ctx context.Context, model, root, path, instructions string) imageLabel {
+func (orchestrator *SubagentOrchestrator) labelOneImage(ctx context.Context, request ImageBatchRequest, model, root, path string) imageLabel {
 	relative, _ := filepath.Rel(root, path)
 	label := imageLabel{Path: filepath.ToSlash(relative), Labels: []string{}, NeedsReview: true}
 	images, err := loadImages(orchestrator.Workspace, []string{path})
@@ -299,13 +302,17 @@ func (orchestrator *SubagentOrchestrator) labelOneImage(ctx context.Context, mod
 		return label
 	}
 	var content strings.Builder
+	systemPrompt := "Label exactly one image. Follow the supplied taxonomy literally. Return only one JSON object with labels (array of strings), confidence (0 to 1), needs_review (boolean), and notes (short string). Do not use Markdown."
+	if request.SystemPrompt != "" {
+		systemPrompt = request.SystemPrompt + "\n\n" + systemPrompt
+	}
 	err = orchestrator.Chat.Chat(ctx, ollama.ChatRequest{
 		Model: model,
 		Messages: []ollama.Message{
-			{Role: "system", Content: "Label exactly one image. Follow the supplied taxonomy literally. Return only one JSON object with labels (array of strings), confidence (0 to 1), needs_review (boolean), and notes (short string). Do not use Markdown."},
-			{Role: "user", Content: instructions + "\n\nImage path: " + label.Path, Images: [][]byte{images[0].Data}},
+			{Role: "system", Content: systemPrompt},
+			{Role: "user", Content: request.Instructions + "\n\nImage path: " + label.Path, Images: [][]byte{images[0].Data}},
 		},
-		Options: &ollama.ChatOptions{NumCtx: &orchestrator.ContextTokens},
+		Options: cloneChatOptions(request.Options), Think: cloneThink(request.Think),
 	}, func(chunk ollama.ChatChunk) error {
 		content.WriteString(chunk.Message.Content)
 		return nil

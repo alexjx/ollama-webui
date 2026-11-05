@@ -38,7 +38,7 @@ func TestLoadSubagentDefaultsAndOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.SubagentsEnabled || cfg.SubagentConcurrency != 1 || cfg.SubagentContextTokens != 8192 || cfg.SubagentMaxTurns != 20 || cfg.SubagentResultBytes != 4096 {
+	if !cfg.SubagentsEnabled || cfg.SubagentResultBytes != 4096 {
 		t.Fatalf("unexpected subagent defaults: %#v", cfg)
 	}
 
@@ -51,8 +51,12 @@ func TestLoadSubagentDefaultsAndOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.SubagentsEnabled || cfg.SubagentConcurrency != 3 || cfg.SubagentContextTokens != 4096 || cfg.SubagentMaxTurns != 12 || cfg.SubagentResultBytes != 2048 {
+	if cfg.SubagentsEnabled || cfg.SubagentResultBytes != 2048 {
 		t.Fatalf("subagent overrides were not loaded: %#v", cfg)
+	}
+	// Legacy child-only overrides no longer change parent-derived settings.
+	if cfg.ContextTokens != 32768 || cfg.AgentMaxTurns != 200 {
+		t.Fatalf("child overrides changed parent runtime settings: %#v", cfg)
 	}
 }
 

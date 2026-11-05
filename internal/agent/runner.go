@@ -60,7 +60,7 @@ var delegateTaskTool = ollama.Tool{
 	Type: "function",
 	Function: ollama.ToolFunction{
 		Name:        "delegate_task",
-		Description: "Run a focused task in an isolated child-agent context. Use it for substantial independent exploration, analysis, or file work whose intermediate details should not fill the main context. The child receives only the task, named workspace/system image inputs, and the standard agent instructions. Put user deliverables under the workspace and declare their paths. The parent receives only a bounded summary and verified output paths.",
+		Description: "Offload a focused investigation before large file reads or tool outputs fill your context. One child runs at a time with your model and runtime settings, in a private context. Send goals, constraints, file paths or attachment IDs rather than raw file contents. Returns only bounded final findings and verified workspace output paths.",
 		Parameters:  json.RawMessage(`{"type":"object","properties":{"task":{"type":"string","description":"Self-contained objective, constraints, relevant paths, and expected result."},"image_paths":{"type":"array","items":{"type":"string"},"maxItems":4,"description":"Optional workspace-relative or absolute system image paths for a vision-capable model."},"output_paths":{"type":"array","items":{"type":"string"},"maxItems":20,"description":"Files the child must create under the workspace."}},"required":["task"],"additionalProperties":false}`),
 	},
 }
@@ -76,7 +76,7 @@ var labelImageDirectoryTool = ollama.Tool{
 
 const pythonInstructions = ` For Python work, the Docker image includes python3, pip and uv. For other installations, check availability first. Reuse an existing project virtual environment; otherwise prefer uv run or uv venv .venv and uv pip install --python .venv/bin/python. Without uv, use python3 -m venv .venv and .venv/bin/python -m pip. Keep environments, scripts and outputs under AGENT_WORKSPACE, and never install packages into system Python. Package downloads require network access; packages without compatible wheels may need a custom image with build dependencies.`
 
-const SystemPrompt = `You are a general-purpose autonomous assistant. Continue until the user's task is actually complete, but answer directly when no tool is needed. A shell tool is available as an optional capability for calculation, search, inspection, execution, and verification; do not inspect or edit files unless that helps the user's request. The shell may read system paths allowed by normal OS permissions, while writes are restricted to AGENT_WORKSPACE. Delegate substantial independent work when its intermediate details would crowd the main context. For a directory of images, use the dedicated image-labeling tool so each image is processed in an isolated request and results go to a workspace JSONL file. Context tools can persist important notes or large outputs outside the prompt and retrieve them later within this conversation. When a user attaches a text file, use attachment_read with its attachment ID. Choose how much to read based on your available context and the task; there is no fixed byte cap, and omitting limit reads the remaining file. Allow room for existing messages, tool metadata and your answer. Keep concise intermediate notes. Use attachment_list to rediscover older attached files after compaction. Prefer narrow commands and small outputs so local model context remains focused. Do not stop after merely describing a plan. When the task is complete, reply with a concise final answer and do not call a tool. The user can interrupt you at any time.` + pythonInstructions + webSearchInstructions
+const SystemPrompt = `You are a general-purpose autonomous assistant running a local model with limited context. Complete the user's task; answer directly when no tool is needed. Before investigating large files, many files, or substantial tool output, use delegate_task for one focused task at a time. Pass goals, constraints, file paths or attachment IDs; ask for concise findings and output paths. Keep intermediate work in the child context, then use its summary to continue. Shell access is optional: use it only when helpful. It may read OS-permitted system paths; writes are restricted to AGENT_WORKSPACE. Use label_image_directory for image batches so each image gets a fresh context and results go to workspace JSONL. Context tools save notes and large outputs outside the prompt; rediscover them with context_list. For attached text, use attachment_read with its ID and a byte range chosen to fit your remaining context. There is no fixed read cap; omit limit only when the remaining file fits. Leave room for tool metadata and your answer. Use attachment_list to rediscover older files after compaction. Keep commands and returned output narrow. Do not stop at a plan. When finished, give a concise final answer without another tool call. The user can interrupt you at any time.` + pythonInstructions + webSearchInstructions
 
 type ChatClient interface {
 	Chat(context.Context, ollama.ChatRequest, func(ollama.ChatChunk) error) error
@@ -115,6 +115,7 @@ type RunInput struct {
 	Vision             bool
 	DisableWebSearch   bool
 	AttachmentTools    bool
+	SystemPrompt       string
 }
 
 type Event struct {
@@ -356,7 +357,7 @@ func (runner Runner) Run(ctx context.Context, input RunInput, emit func(Event) e
 				})
 				continue
 			}
-			resultContent, err := runner.executeTool(ctx, input.ConversationID, input.AssistantMessageID, input.Model, input.Vision, input.DisableWebSearch, turn, call, emit)
+			resultContent, err := runner.executeTool(ctx, input, turn, call, emit)
 			if err != nil {
 				return RunResult{Content: visible.String(), Thinking: thinking.String(), Metadata: metadata}, err
 			}
@@ -540,7 +541,9 @@ func decodeToolArguments(raw json.RawMessage, target any) error {
 	return nil
 }
 
-func (runner Runner) executeTool(ctx context.Context, conversationID, messageID int64, model string, vision, disableWebSearch bool, turn int, call ollama.ToolCall, emit func(Event) error) (string, error) {
+func (runner Runner) executeTool(ctx context.Context, input RunInput, turn int, call ollama.ToolCall, emit func(Event) error) (string, error) {
+	conversationID, messageID := input.ConversationID, input.AssistantMessageID
+	model, vision, disableWebSearch := input.Model, input.Vision, input.DisableWebSearch
 	raw := call.Function.Arguments
 	if len(raw) == 0 {
 		raw = json.RawMessage(`{}`)
@@ -604,6 +607,7 @@ func (runner Runner) executeTool(ctx context.Context, conversationID, messageID 
 					ConversationID: conversationID, RequestingMessageID: messageID,
 					DisableWebSearch: disableWebSearch,
 					Model:            model, SupportsVision: vision, Task: arguments.Task, ImagePaths: arguments.ImagePaths, OutputPaths: arguments.OutputPaths,
+					Options: input.Options, Think: input.Think, SystemPrompt: input.SystemPrompt, MaxTurns: runner.MaxTurns,
 				}, emit)
 				result = ShellResult{Output: delegated.Feedback, ExitCode: delegated.ExitCode, Duration: delegated.Duration,
 					Cancelled: errors.Is(delegateErr, context.Canceled)}
@@ -630,6 +634,7 @@ func (runner Runner) executeTool(ctx context.Context, conversationID, messageID 
 					ConversationID: conversationID, RequestingMessageID: messageID, Model: model, SupportsVision: vision,
 					Directory: arguments.Directory, Instructions: arguments.Instructions, OutputPath: arguments.OutputPath,
 					Recursive: arguments.Recursive, MaxImages: arguments.MaxImages,
+					Options: input.Options, Think: input.Think, SystemPrompt: input.SystemPrompt,
 				}, emit)
 				result = ShellResult{Output: delegated.Feedback, ExitCode: delegated.ExitCode, Duration: delegated.Duration,
 					Cancelled: errors.Is(delegateErr, context.Canceled)}

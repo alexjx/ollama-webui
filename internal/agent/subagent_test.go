@@ -41,18 +41,22 @@ func TestSubagentOrchestratorUsesPrivateContextAndPersistsBoundedResult(t *testi
 		t.Fatal(err)
 	}
 	chat := &scriptedChat{turns: [][]ollama.ChatChunk{
-		{{Message: ollama.Message{ToolCalls: []ollama.ToolCall{{ID: "child-shell", Function: ollama.ToolCallFunction{Name: "shell", Arguments: json.RawMessage(`{"command":"printf child-only"}`)}}}}, Done: true}},
+		{{Message: ollama.Message{Content: "PRIVATE_CHILD_NARRATION" + strings.Repeat("x", 100), ToolCalls: []ollama.ToolCall{{ID: "child-shell", Function: ollama.ToolCallFunction{Name: "shell", Arguments: json.RawMessage(`{"command":"printf child-only"}`)}}}}, Done: true}},
 		{{Message: ollama.Message{Content: "这是一个很长的子任务总结" + strings.Repeat("x", 100)}, Done: true}},
 	}}
 	orchestrator, err := NewSubagentOrchestrator(database, chat, &recordingShell{}, nil,
-		t.TempDir(), "", 2048, 2, 1, 48, 1024)
+		t.TempDir(), 2048, 1, 48, 1024)
 	if err != nil {
 		t.Fatal(err)
 	}
 	events := make([]Event, 0)
+	contextWindow, temperature, predict := 1024, 0.15, 128
+	think := ollama.ThinkValue("low")
+	options := &ollama.ChatOptions{NumCtx: &contextWindow, Temperature: &temperature, NumPredict: &predict}
 	result, err := orchestrator.Execute(ctx, SubagentRequest{
 		ConversationID: conversation.ID, RequestingMessageID: assistant.ID,
 		Model: "vision-tools", Task: "Inspect only the supplied task context.",
+		Options: options, Think: &think, SystemPrompt: "CUSTOM parent instructions", MaxTurns: 3,
 	}, func(event Event) error { events = append(events, event); return nil })
 	if err != nil {
 		t.Fatal(err)
@@ -67,19 +71,33 @@ func TestSubagentOrchestratorUsesPrivateContextAndPersistsBoundedResult(t *testi
 		t.Fatalf("child context envelope is wrong: %#v", chat.requests[0].Messages)
 	}
 	for _, request := range chat.requests {
-		if !strings.Contains(request.Messages[0].Content, WorkspaceInstructions(orchestrator.Workspace)) {
-			t.Fatal("child model request lost configured absolute workspace path instruction")
+		if !strings.Contains(request.Messages[0].Content, "CUSTOM parent instructions") || request.Think == &think || request.Think == nil || *request.Think != think {
+			t.Fatal("child lost inherited system instructions or thinking")
+		}
+		if request.Options == options || request.Options.NumCtx == &contextWindow || *request.Options.NumCtx != contextWindow || *request.Options.Temperature != temperature || *request.Options.NumPredict != predict {
+			t.Fatal("child did not clone inherited model settings")
 		}
 	}
-	if len(events) != 2 || events[0].Type != "subagent.started" || events[1].Type != "subagent.done" {
+	if events[0].Type != "subagent.queued" || events[1].Type != "subagent.started" || events[len(events)-1].Type != "subagent.done" {
 		t.Fatalf("unexpected lifecycle events: %#v", events)
 	}
 	runs, err := database.ListAgentRunsByRequestingMessage(ctx, assistant.ID)
 	if err != nil || len(runs) != 1 || runs[0].Status != store.AgentStatusComplete {
 		t.Fatalf("run was not persisted: %#v, %v", runs, err)
 	}
+	if runs[0].ContextWindow != contextWindow {
+		t.Fatalf("child run used separate context window: %#v", runs[0])
+	}
 	if len(runs[0].ResultSummary) > 48 || !strings.Contains(runs[0].ResultSummary, "truncated") {
 		t.Fatalf("child result was not bounded: %q", runs[0].ResultSummary)
+	}
+	if !strings.HasPrefix(runs[0].ResultSummary, "这是") || strings.Contains(result.Feedback, "PRIVATE_CHILD_NARRATION") {
+		t.Fatalf("child intermediate narration displaced the final summary: %q", result.Feedback)
+	}
+	for _, event := range events {
+		if strings.Contains(event.Content, "PRIVATE_CHILD_NARRATION") || strings.Contains(event.Content, "child-only") {
+			t.Fatal("child private text leaked into progress")
+		}
 	}
 	messages, err := database.Messages(ctx, conversation.ID)
 	if err != nil || len(messages) != 1 || len(messages[0].SubagentRuns) != 1 || messages[0].SubagentRuns[0].ID != runs[0].ID {
@@ -140,7 +158,7 @@ func TestSubagentOrchestratorPersistsFailureCancellationAndMissingOutput(t *test
 				t.Fatal(err)
 			}
 			chat := test.chat()
-			orchestrator, err := NewSubagentOrchestrator(database, chat, &recordingShell{}, nil, t.TempDir(), "", 2048, 2, 1, 256, 1024)
+			orchestrator, err := NewSubagentOrchestrator(database, chat, &recordingShell{}, nil, t.TempDir(), 2048, 2, 256, 1024)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -171,7 +189,7 @@ func TestSubagentOrchestratorPersistsFailureCancellationAndMissingOutput(t *test
 			if err != nil || len(runs) != 1 || runs[0].Status != test.wantStatus {
 				t.Fatalf("unexpected persisted run: %#v, %v", runs, err)
 			}
-			if len(events) != 2 || events[0].Type != "subagent.started" || events[1].Type != test.wantEvent {
+			if events[0].Type != "subagent.queued" || events[1].Type != "subagent.started" || events[len(events)-1].Type != test.wantEvent {
 				t.Fatalf("unexpected terminal event flow: %#v", events)
 			}
 		})
@@ -202,14 +220,21 @@ func TestRunnerDelegateToolPassesOnlyExplicitTaskInputs(t *testing.T) {
 	}}
 	executor := &fakeSubagentExecutor{}
 	runner := Runner{Chat: chat, Steps: &memorySteps{}, Shell: &recordingShell{}, Subagents: executor, MaxTurns: 2}
+	contextWindow, temperature := 1536, 0.2
+	think := ollama.ThinkValue("off")
+	options := &ollama.ChatOptions{NumCtx: &contextWindow, Temperature: &temperature}
 	_, err := runner.Run(context.Background(), RunInput{
 		ConversationID: 7, AssistantMessageID: 9, Model: "tools", Messages: []ollama.Message{{Role: "user", Content: "parent context"}},
+		Options: options, Think: &think, SystemPrompt: "parent custom instructions", Vision: true, DisableWebSearch: true,
 	}, func(Event) error { return nil })
 	if err != nil {
 		t.Fatal(err)
 	}
 	if executor.request.ConversationID != 7 || executor.request.RequestingMessageID != 9 || executor.request.Model != "tools" || executor.request.Task != "focused" {
 		t.Fatalf("delegation request mismatch: %#v", executor.request)
+	}
+	if executor.request.Options != options || executor.request.Think != &think || executor.request.SystemPrompt != "parent custom instructions" || executor.request.MaxTurns != 2 || !executor.request.SupportsVision || !executor.request.DisableWebSearch {
+		t.Fatalf("parent settings dropped before delegation: %#v", executor.request)
 	}
 	if len(chat.requests[0].Tools) != 2 || chat.requests[0].Tools[1].Function.Name != "delegate_task" {
 		t.Fatalf("delegate tool was not advertised: %#v", chat.requests[0].Tools)
@@ -232,7 +257,7 @@ func TestSubagentReadsReferencedTextAttachmentWithoutInheritingHistory(t *testin
 		{{Message: ollama.Message{ToolCalls: []ollama.ToolCall{call}}, Done: true}},
 		{{Message: ollama.Message{Content: "File inspected"}, Done: true}},
 	}}
-	orchestrator, err := NewSubagentOrchestrator(database, chat, &recordingShell{}, nil, t.TempDir(), "", 2048, 2, 1, 1024, 8192)
+	orchestrator, err := NewSubagentOrchestrator(database, chat, &recordingShell{}, nil, t.TempDir(), 2048, 2, 1024, 8192)
 	if err != nil {
 		t.Fatal(err)
 	}

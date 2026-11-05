@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { cancelRunningSubagents, reduceSubagentEvent } from "../src/agent-events.js";
+import { activeSubagent, cancelRunningSubagents, reduceSubagentEvent, subagentProgressLabel } from "../src/agent-events.js";
 
 const started = {
   id: 7,
@@ -34,7 +34,7 @@ test("does not let an older duplicate overwrite a terminal child run", () => {
   assert.equal(runs[0].status, "complete");
 });
 
-test("cancellation only stops running child runs", () => {
+test("cancellation stops running and queued children while preserving finished runs", () => {
   const complete = { id: 8, task: "Already done", status: "complete" };
   const queued = { id: 9, task: "Waiting", status: "queued" };
   const runs = cancelRunningSubagents([started, complete, queued], "2026-09-04T10:02:00Z");
@@ -42,7 +42,20 @@ test("cancellation only stops running child runs", () => {
   assert.equal(runs[0].status, "cancelled");
   assert.equal(runs[0].completed_at, "2026-09-04T10:02:00Z");
   assert.strictEqual(runs[1], complete);
-  assert.strictEqual(runs[2], queued);
+  assert.equal(runs[2].status, "cancelled");
+});
+
+test("child lifecycle exposes waiting, running phases and completion without parent text", () => {
+  const message = { status: "streaming", content: "parent answer", subagent_runs: [] };
+  message.subagent_runs = reduceSubagentEvent([], { type: "subagent.queued", run: { ...started, status: "queued" } });
+  assert.match(subagentProgressLabel(activeSubagent(message)), /Waiting/);
+  message.subagent_runs = reduceSubagentEvent(message.subagent_runs, { type: "subagent.started", run: started });
+  message.subagent_runs = reduceSubagentEvent(message.subagent_runs, { type: "subagent.progress", run: started, content: JSON.stringify({ phase: "reading", turn: 2 }) });
+  assert.equal(subagentProgressLabel(activeSubagent(message)), "Reading files · Turn 2");
+  assert.equal(message.content, "parent answer");
+  message.subagent_runs = reduceSubagentEvent(message.subagent_runs, { type: "subagent.done", run: { ...started, status: "complete" } });
+  assert.equal(activeSubagent(message), null);
+  assert.equal(activeSubagent({ ...message, status: "cancelled", subagent_runs: [started] }), null);
 });
 
 test("records bounded child progress without adding transcript content", () => {
