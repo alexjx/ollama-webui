@@ -136,7 +136,12 @@ and turn limit. They receive the focused task and referenced files in a private
 context; only a bounded result summary and verified output paths return to the
 parent. One child runs at a time across conversations, and children cannot spawn
 more children. The header shows when a child is waiting or running; its expandable
-task card shows the current phase and turn, then completion, failure, or Stop.
+task card shows the current action, elapsed time, recent file reads, searches, and
+commands with their results. Expand an action for bounded details and output.
+The latest 12 actions are saved for viewing after completion or reload; these UI
+records do not enter the parent's model context. There is no invented completion
+percentage when the total work is unknown. Completion, failure, and Stop remain
+visible in the task card.
 Child context, turn-limit, and concurrency overrides from earlier versions no
 longer apply; the parent settings and single-child queue always take precedence.
 For directory image labeling, the dedicated batch tool performs one stateless

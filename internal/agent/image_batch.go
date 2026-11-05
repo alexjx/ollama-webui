@@ -166,8 +166,12 @@ func (orchestrator *SubagentOrchestrator) LabelImageDirectory(ctx context.Contex
 			return orchestrator.failSubagent(job.ID, run.ID, started, err, emit)
 		}
 		if (index+1)%10 == 0 || index+1 == len(paths) {
-			progress, _ := json.Marshal(map[string]int{"processed": index + 1, "total": len(paths), "failed": failed, "needs_review": review})
-			if err := emit(Event{Type: "subagent.progress", Content: string(progress), Run: &run}); err != nil {
+			progress := &store.AgentRunProgress{Phase: "responding", Processed: index + 1, Total: len(paths), Failed: failed, NeedsReview: review}
+			run, err = orchestrator.Store.UpdateAgentRunProgress(ctx, run.ID, progress)
+			if err != nil {
+				return orchestrator.failSubagent(job.ID, run.ID, started, err, emit)
+			}
+			if err := emitChildProgress(run, emit); err != nil {
 				return orchestrator.failSubagent(job.ID, run.ID, started, err, emit)
 			}
 			_ = orchestrator.Store.TouchAgentRun(ctx, run.ID)

@@ -57,6 +57,7 @@ type SubagentStore interface {
 	CancelAgentRun(context.Context, int64, string) (store.AgentRun, error)
 	TouchAgentJob(context.Context, int64) error
 	TouchAgentRun(context.Context, int64) error
+	UpdateAgentRunProgress(context.Context, int64, *store.AgentRunProgress) (store.AgentRun, error)
 }
 
 type SubagentOrchestrator struct {
@@ -182,7 +183,7 @@ func (orchestrator *SubagentOrchestrator) Execute(ctx context.Context, request S
 			{Role: "user", Content: childPrompt, Images: imageBytes},
 		},
 		Options: cloneChatOptions(request.Options), Think: cloneThink(request.Think),
-	}, childProgressEmitter(&run, emit))
+	}, orchestrator.childProgressEmitter(ctx, request.ConversationID, &run, emit))
 	if runErr != nil {
 		if errors.Is(runErr, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
 			cancelled := orchestrator.cancel(job.ID, run.ID, runErr)
@@ -270,50 +271,6 @@ func cloneThink(think *ollama.ThinkValue) *ollama.ThinkValue {
 	}
 	copy := *think
 	return &copy
-}
-
-// Progress describes observable phases without sending private child content or
-// tool arguments back into the parent's transcript or model context.
-func childProgressEmitter(run *store.AgentRun, emit func(Event) error) func(Event) error {
-	lastPhase, lastTurn := "", 0
-	return func(event Event) error {
-		phase := ""
-		switch event.Type {
-		case "turn.started":
-			phase = "starting"
-		case "thinking.delta":
-			phase = "thinking"
-		case "delta":
-			phase = "responding"
-		case "tool.started":
-			phase = "tool"
-			if event.Step != nil {
-				switch event.Step.ToolName {
-				case "shell":
-					phase = "shell"
-				case "web_search":
-					phase = "web_search"
-				case "attachment_read", "attachment_list", "context_read", "context_list":
-					phase = "reading"
-				}
-			}
-		case "tool.done":
-			phase = "reviewing"
-		}
-		if phase == "" {
-			return nil
-		}
-		turn := event.Turn
-		if turn == 0 {
-			turn = lastTurn
-		}
-		if phase == lastPhase && turn == lastTurn {
-			return nil
-		}
-		lastPhase, lastTurn = phase, turn
-		progress, _ := json.Marshal(map[string]any{"phase": phase, "turn": turn})
-		return emit(Event{Type: "subagent.progress", Run: run, Content: string(progress)})
-	}
 }
 
 func delegatedPrompt(task string, imagePaths, outputPaths []string) string {

@@ -66,7 +66,7 @@ export function activeSubagent(message) {
     || message.subagent_runs?.find((run) => run.status === "queued") || null;
 }
 
-export function subagentProgressLabel(run) {
+export function subagentPhaseLabel(run) {
   if (run.status === "queued") return "Waiting for the current subagent to finish";
   const labels = {
     starting: "Starting model turn",
@@ -74,7 +74,12 @@ export function subagentProgressLabel(run) {
     web_search: "Searching the web", reading: "Reading files", tool: "Using a tool",
     reviewing: "Reviewing result",
   };
-  const phase = labels[run.progress?.phase] || "Working on the delegated task";
+  return labels[run.progress?.phase] || "Working on the delegated task";
+}
+
+export function subagentProgressLabel(run) {
+  const phase = subagentPhaseLabel(run);
+  if (run.status === "queued") return phase;
   const turn = run.progress?.turn;
   return Number.isSafeInteger(turn) && turn > 0 ? `${phase} · Turn ${turn}` : phase;
 }

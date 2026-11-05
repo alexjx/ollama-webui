@@ -1,7 +1,8 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { contextUsage } from "./context-usage";
 import { applyKnownConversationTitles, mergeConversationTitles, newestConversationTitle } from "./conversation-titles";
-import { activeSubagent, cancelRunningSubagents, reduceSubagentEvent, subagentProgressLabel } from "./agent-events";
+import { activeSubagent, cancelRunningSubagents, reduceSubagentEvent } from "./agent-events";
+import SubagentRun from "./subagent-run.jsx";
 import { finalizeActivity, readActivityBlocks, recordActivityEvent } from "./activity-timeline";
 import { formatDuration, formatRate, responseMetrics } from "./response-metrics";
 import { shouldFollowTranscript, scrollToEnd } from "./scroll-position";
@@ -600,37 +601,8 @@ function AgentActivity({ message, mode, showProgress = true, progressOnly = fals
       )}
 
       {!progressOnly && subagentRuns.length > 0 && (
-        <div className="subagent-runs" aria-label="Child tasks" aria-live="polite">
-          {subagentRuns.map((run) => {
-            const statusLabel = run.status === "running" ? "Running" : run.status === "complete" ? "Complete" : run.status === "cancelled" ? "Stopped" : run.status === "failed" ? "Failed" : "Queued";
-            const RunIcon = run.status === "running" || run.status === "queued" ? CircleNotch : run.status === "complete" ? CheckCircle : Stop;
-            return (
-              <details className={`subagent-run ${run.status}`} key={run.id} open={run.status === "running" || run.status === "queued"}>
-                <summary>
-                  <span className="subagent-run-icon" aria-hidden="true"><RunIcon size={17} /></span>
-                  <span className="subagent-run-task">Subagent · {run.task || "Child task"}</span>
-                  <span className="subagent-run-status">{statusLabel}</span>
-                </summary>
-                <div className="subagent-run-result">
-                  {(run.status === "running" || run.status === "queued") && <>
-                    <p className="subagent-live-progress" role="status" aria-live="polite">{subagentProgressLabel(run)}</p>
-                    <p>{run.task || "Working on the delegated task."}</p>
-                    <p>{run.model}{run.context_window > 0 ? ` · ${run.context_window.toLocaleString()} token context` : ""} · Parent settings</p>
-                  </>}
-                  {run.result_summary && <p>{run.result_summary}</p>}
-                  {run.error && <p className="subagent-run-error">{run.error}</p>}
-                  {run.progress?.total > 0 && <p>{run.progress.processed} of {run.progress.total} processed · {run.progress.failed || 0} failed · {run.progress.needs_review || 0} need review</p>}
-                  {run.output_refs?.length > 0 && (
-                    <div className="subagent-output-refs">
-                      <strong>Outputs</strong>
-                      <ul>{run.output_refs.map((path) => <li key={path}><code>{path}</code></li>)}</ul>
-                    </div>
-                  )}
-                  {!run.result_summary && !run.error && !run.output_refs?.length && run.status !== "running" && run.status !== "queued" && <p>{statusLabel}.</p>}
-                </div>
-              </details>
-            );
-          })}
+        <div className="subagent-runs" aria-label="Child tasks">
+          {subagentRuns.map((run) => <SubagentRun run={run} key={run.id} />)}
         </div>
       )}
     </section>
@@ -1318,15 +1290,28 @@ export function App() {
       return;
     }
     const latest = messages.at(-1);
-    // Read the position before following: streaming can render before the
-    // browser delivers the reader's scroll event.
-    followProgressRef.current = shouldFollowTranscript(transcriptRef.current, transcriptScrollTopRef.current, followProgressRef.current);
     if (followProgressRef.current && (latest?.activity?.version === 1 || latest?.metadata?.activity?.version === 1)) {
       scrollToEnd(transcriptRef.current);
     }
     transcriptScrollTopRef.current = transcriptRef.current?.scrollTop ?? 0;
     releaseOlderMessages();
   }, [messages]);
+
+  useLayoutEffect(() => {
+    const transcript = transcriptRef.current;
+    const content = transcript?.querySelector('.transcript-inner');
+    if (!content) return;
+    // Child cards and expanded details can grow after the message render.
+    // Follow that layout only while the reader has chosen to stay at the end.
+    const observer = new ResizeObserver(() => {
+      if (!followProgressRef.current) return;
+      scrollToEnd(transcript);
+      transcriptScrollTopRef.current = transcript.scrollTop;
+    });
+    observer.observe(content);
+    observer.observe(transcript);
+    return () => observer.disconnect();
+  }, [activeId]);
 
   async function refreshConversations(search = query, signal) {
     const refreshed = await listConversations(search, signal);

@@ -168,23 +168,24 @@ type CreateAgentJobParams struct {
 }
 
 type AgentRun struct {
-	ID                  int64      `json:"id"`
-	JobID               int64      `json:"job_id"`
-	ParentRunID         *int64     `json:"parent_run_id,omitempty"`
-	ConversationID      int64      `json:"conversation_id"`
-	RequestingMessageID int64      `json:"requesting_message_id"`
-	Task                string     `json:"task"`
-	Status              string     `json:"status"`
-	Model               string     `json:"model"`
-	ContextWindow       int        `json:"context_window"`
-	Depth               int        `json:"depth"`
-	ResultSummary       string     `json:"result_summary"`
-	OutputRefs          []string   `json:"output_refs"`
-	Error               string     `json:"error,omitempty"`
-	CreatedAt           time.Time  `json:"created_at"`
-	UpdatedAt           time.Time  `json:"updated_at"`
-	StartedAt           *time.Time `json:"started_at,omitempty"`
-	CompletedAt         *time.Time `json:"completed_at,omitempty"`
+	ID                  int64             `json:"id"`
+	JobID               int64             `json:"job_id"`
+	ParentRunID         *int64            `json:"parent_run_id,omitempty"`
+	ConversationID      int64             `json:"conversation_id"`
+	RequestingMessageID int64             `json:"requesting_message_id"`
+	Task                string            `json:"task"`
+	Status              string            `json:"status"`
+	Model               string            `json:"model"`
+	ContextWindow       int               `json:"context_window"`
+	Depth               int               `json:"depth"`
+	ResultSummary       string            `json:"result_summary"`
+	OutputRefs          []string          `json:"output_refs"`
+	Error               string            `json:"error,omitempty"`
+	Progress            *AgentRunProgress `json:"progress,omitempty"`
+	CreatedAt           time.Time         `json:"created_at"`
+	UpdatedAt           time.Time         `json:"updated_at"`
+	StartedAt           *time.Time        `json:"started_at,omitempty"`
+	CompletedAt         *time.Time        `json:"completed_at,omitempty"`
 }
 
 type CreateAgentRunParams struct {
@@ -379,6 +380,7 @@ CREATE TABLE IF NOT EXISTS agent_runs (
   context_window INTEGER NOT NULL CHECK (context_window > 0),
   depth INTEGER NOT NULL CHECK (depth >= 0),
   result_summary TEXT NOT NULL DEFAULT '',
+  progress_json TEXT NOT NULL DEFAULT '{}',
   output_refs_json TEXT NOT NULL DEFAULT '[]',
   error TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
@@ -397,6 +399,9 @@ CREATE INDEX IF NOT EXISTS agent_runs_parent_idx ON agent_runs(parent_run_id, id
 		return err
 	}
 	if err := s.ensureColumn(ctx, "message_attachments", "workspace_path", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "agent_runs", "progress_json", "TEXT NOT NULL DEFAULT '{}'"); err != nil {
 		return err
 	}
 	if err := s.ensureColumn(ctx, "conversations", "thinking_enabled", "INTEGER CHECK (thinking_enabled IN (0, 1))"); err != nil {
@@ -927,6 +932,9 @@ SET status = 'failed', error = 'interrupted before completion', updated_at = ?, 
 WHERE status IN ('queued', 'running') AND updated_at < ?`, now, now, cutoff)
 	if err != nil {
 		return RecoveredAgentWork{}, fmt.Errorf("recover stale agent runs: %w", err)
+	}
+	if err := finishRecoveredRunProgress(ctx, tx, now); err != nil {
+		return RecoveredAgentWork{}, err
 	}
 	jobResult, err := tx.ExecContext(ctx, `
 UPDATE agent_jobs
@@ -1557,7 +1565,7 @@ FROM agent_jobs `
 const agentRunSelect = `
 SELECT r.id, r.job_id, r.parent_run_id, j.conversation_id, j.requesting_message_id,
        r.task, r.status, r.model, r.context_window, r.depth, r.result_summary,
-       r.output_refs_json, r.error, r.created_at, r.updated_at, r.started_at, r.completed_at
+       r.output_refs_json, r.error, r.progress_json, r.created_at, r.updated_at, r.started_at, r.completed_at
 FROM agent_runs r JOIN agent_jobs j ON j.id = r.job_id `
 
 func (s *Store) finishAgentJob(ctx context.Context, id int64, status, summary string, outputRefs []string, failure string) error {
@@ -1614,6 +1622,9 @@ WHERE id = ? AND `+allowedStates, status, summary, encodedRefs, failure, now, no
 	if err := requireAgentTransition(ctx, tx, "agent_runs", id, result); err != nil {
 		return err
 	}
+	if err := finishAgentRunProgress(ctx, tx, id, status, time.Now().UTC()); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit agent run completion: %w", err)
 	}
@@ -1655,11 +1666,11 @@ func scanAgentJob(row rowScanner) (AgentJob, error) {
 func scanAgentRun(row rowScanner) (AgentRun, error) {
 	var item AgentRun
 	var parentRunID sql.NullInt64
-	var outputRefsJSON, createdAt, updatedAt string
+	var outputRefsJSON, progressJSON, createdAt, updatedAt string
 	var startedAt, completedAt sql.NullString
 	if err := row.Scan(&item.ID, &item.JobID, &parentRunID, &item.ConversationID,
 		&item.RequestingMessageID, &item.Task, &item.Status, &item.Model, &item.ContextWindow,
-		&item.Depth, &item.ResultSummary, &outputRefsJSON, &item.Error, &createdAt, &updatedAt,
+		&item.Depth, &item.ResultSummary, &outputRefsJSON, &item.Error, &progressJSON, &createdAt, &updatedAt,
 		&startedAt, &completedAt); errors.Is(err, sql.ErrNoRows) {
 		return AgentRun{}, ErrNotFound
 	} else if err != nil {
@@ -1672,9 +1683,17 @@ func scanAgentRun(row rowScanner) (AgentRun, error) {
 	if err := json.Unmarshal([]byte(outputRefsJSON), &item.OutputRefs); err != nil {
 		return AgentRun{}, fmt.Errorf("decode agent run output references: %w", err)
 	}
+	if progressJSON != "{}" && progressJSON != "null" && progressJSON != "" {
+		if err := json.Unmarshal([]byte(progressJSON), &item.Progress); err != nil {
+			return AgentRun{}, fmt.Errorf("decode agent run progress: %w", err)
+		}
+	}
 	if err := parseAgentWorkTimes(createdAt, updatedAt, startedAt, completedAt,
 		&item.CreatedAt, &item.UpdatedAt, &item.StartedAt, &item.CompletedAt); err != nil {
 		return AgentRun{}, err
+	}
+	if item.CompletedAt != nil {
+		item.Progress = finishProgress(item.Progress, item.Status, *item.CompletedAt)
 	}
 	return item, nil
 }

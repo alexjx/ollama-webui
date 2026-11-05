@@ -16,7 +16,9 @@ export function isNearTranscriptEnd(element, threshold = 64) {
 // An unchanged position (including a delayed programmatic scroll event) keeps
 // the current choice; only downward scrolling near the end resumes following.
 export function shouldFollowTranscript(element, previousTop, following) {
-  if (!element || element.scrollTop < previousTop) return false;
+  if (!element) return false;
+  // A larger viewport clamps scrollTop upward while still leaving us at the end.
+  if (element.scrollTop < previousTop) return isNearTranscriptEnd(element, 0);
   if (element.scrollTop > previousTop) return isNearTranscriptEnd(element);
   return following;
 }

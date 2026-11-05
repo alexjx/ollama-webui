@@ -56,3 +56,8 @@ test("following resumes only when scrolling downward near the end", () => {
   assert.equal(shouldFollowTranscript(transcript, 580, true), true);
   assert.equal(shouldFollowTranscript(null, 0, true), false);
 });
+
+test("viewport resizing can clamp scrollTop upward while still following the end", () => {
+  assert.equal(shouldFollowTranscript({ scrollHeight: 1000, scrollTop: 400, clientHeight: 600 }, 600, true), true);
+  assert.equal(shouldFollowTranscript({ scrollHeight: 1000, scrollTop: 399, clientHeight: 600 }, 600, true), false);
+});

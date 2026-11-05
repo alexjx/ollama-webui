@@ -95,8 +95,8 @@ func TestSubagentOrchestratorUsesPrivateContextAndPersistsBoundedResult(t *testi
 		t.Fatalf("child intermediate narration displaced the final summary: %q", result.Feedback)
 	}
 	for _, event := range events {
-		if strings.Contains(event.Content, "PRIVATE_CHILD_NARRATION") || strings.Contains(event.Content, "child-only") {
-			t.Fatal("child private text leaked into progress")
+		if strings.Contains(event.Content, "PRIVATE_CHILD_NARRATION") {
+			t.Fatal("child narration leaked into progress")
 		}
 	}
 	messages, err := database.Messages(ctx, conversation.ID)
